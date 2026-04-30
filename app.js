@@ -21,13 +21,15 @@ map.createPane('boundaryPane');
 map.getPane('boundaryPane').style.zIndex = 170;
 
 // 1. Base Map Setup (Local GeoJSON) 
-const landStyle = { fillColor: "#6d6d6d", fillOpacity: 1, color: "none", interactive: false };
-const waterStyle = { fillColor: "#000022", fillOpacity: 1, color: "none", interactive: false };
+const landStyle = { fillColor: "#818181", fillOpacity: 1, color: "none", interactive: false };
+const waterStyle = { fillColor: "#0000a8", fillOpacity: 1, color: "none", interactive: false };
+const riverStyle = { color: "#0000a8", weight: 1.5, opacity: 1, interactive: false };
 const stateStyle = { color: "#ffffff", weight: 2, opacity: 0.8, fillOpacity: 0, interactive: false };
 const countyStyle = { color: "#444466", weight: 0.8, opacity: 0.5, fillOpacity: 0, interactive: false };
 
 let landLayer = null;
 let waterLayer = null;
+let riverLayer = null;
 
 // Load base land and water bodies
 fetch('data/land.json').then(res => res.json()).then(data => {
@@ -36,6 +38,10 @@ fetch('data/land.json').then(res => res.json()).then(data => {
 fetch('data/lakes.json').then(res => res.json()).then(data => {
     waterLayer = L.geoJSON(data, { style: waterStyle, pane: 'waterPane' });
     if (document.getElementById('chk-water')?.checked !== false) waterLayer.addTo(map);
+});
+fetch('data/rivers.json').then(res => res.json()).then(data => {
+    riverLayer = L.geoJSON(data, { style: riverStyle, pane: 'waterPane' });
+    if (document.getElementById('chk-rivers')?.checked !== false) riverLayer.addTo(map);
 });
 
 let statesLayer = null;
@@ -776,6 +782,8 @@ function setupRadarButtons() {
     
     const chkCities = document.getElementById('chk-cities');
     const chkRoads = document.getElementById('chk-roads');
+    const chkRivers = document.getElementById('chk-rivers');
+    const chkWater = document.getElementById('chk-water');
     const chkCounties = document.getElementById('chk-counties');
     const chkStates = document.getElementById('chk-states');
     const chkTempGradient = document.getElementById('chk-temp-gradient');
@@ -919,6 +927,14 @@ function setupRadarButtons() {
         chkRoads.addEventListener('change', (e) => {
             if (e.target.checked) map.addLayer(roadsLayer);
             else map.removeLayer(roadsLayer);
+        });
+    }
+    if (chkRivers) {
+        chkRivers.addEventListener('change', (e) => {
+            if (riverLayer) {
+                if (e.target.checked) map.addLayer(riverLayer);
+                else map.removeLayer(riverLayer);
+            }
         });
     }
     if (chkWater) {
