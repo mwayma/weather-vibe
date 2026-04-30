@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Local Weather Radar</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="map"></div>
+    <div id="ui-overlay">
+        <div id="header">
+            <div id="live-indicator">LIVE</div>
+            <h1>NATIONAL WEATHER RADAR</h1>
+            <div id="timestamp">Loading...</div>
+            <div id="radar-status-warning"></div>
+            <div id="controls-container-main" style="pointer-events: auto;">
+                <h2 id="main-controls-toggle" style="margin: 0; font-size: 1.2em; color: #fff; cursor: pointer; display: flex; justify-content: space-between; background: rgba(0,0,0,0.5); padding: 10px; border-radius: 5px; width: 220px;">Controls <span>▶</span></h2>
+                <div id="main-controls-content" style="display: none; padding: 10px; border-radius: 5px; background: rgba(0,0,0,0.5); margin-top: 5px; width: 220px;">
+                    <div id="radar-controls">
+                        <div class="control-section" style="margin-bottom: 15px; background: rgba(0,0,0,0.5); padding: 10px; border-radius: 5px;">
+                            <h3 id="weather-views-toggle" style="margin-top: 0; margin-bottom: 10px; font-size: 1.1em; color: #fff; cursor: pointer; display: flex; justify-content: space-between;">
+                                Weather Views <span>▼</span>
+                            </h3>
+                            <div id="weather-views-content">
+                                <button id="btn-reflectivity" class="active" style="width: 100%; margin-bottom: 5px;">Precipitation (Rain)</button>
+                                <div id="precip-options" style="padding-left: 10px; margin-bottom: 10px;">
+                                    <button id="btn-loop" style="width: 100%; font-size: 0.9em; padding: 5px;">Play Loop</button>
+                                </div>
+                                <button id="btn-velocity" style="width: 100%; margin-bottom: 5px;">Base Velocity (Wind)</button>
+                                <button id="btn-temperature" style="width: 100%; margin-bottom: 5px;">Temperature</button>
+                                <div id="temp-options" style="padding-left: 10px; margin-bottom: 10px; display: none; color: #eee; font-size: 0.9em;">
+                                    <label style="cursor: pointer;"><input type="checkbox" id="chk-temp-gradient" checked> Map Gradient Overlay</label>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="control-section" style="background: rgba(0,0,0,0.5); padding: 10px; border-radius: 5px;">
+                            <h3 id="map-layers-toggle" style="margin: 0; font-size: 1.1em; color: #fff; cursor: pointer; display: flex; justify-content: space-between;">
+                                Map Controls <span>▼</span>
+                            </h3>
+                            <div id="map-layers-content" style="margin-top: 10px; color: #eee; font-size: 0.95em;">
+                                <div style="margin-bottom: 5px;"><label style="cursor: pointer;"><input type="checkbox" id="chk-cities" checked> Cities</label></div>
+                                <div style="margin-bottom: 5px;"><label style="cursor: pointer;"><input type="checkbox" id="chk-roads" checked> Roads</label></div>
+                                <div style="margin-bottom: 5px;"><label style="cursor: pointer;"><input type="checkbox" id="chk-counties" checked> Counties</label></div>
+                                <div style="margin-bottom: 5px;"><label style="cursor: pointer;"><input type="checkbox" id="chk-states" checked> States</label></div>
+                            </div>
+                        </div>
+                    </div>
+                    <div id="radar-selector">
+                        <label for="radar-select">Select Radar:</label>
+                        <select id="radar-select">
+                            <option value="composite">Composite (Multi-site)</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div id="legend">
+            <div id="reflectivity-legend">
+                <div class="legend-title">WARNINGS</div>
+                <div id="legend-tornado-warning" class="legend-item" data-type="tornado-warning" style="display:none;"><span class="box tornado-warning"></span> Tornado Warning</div>
+                <div id="legend-thunderstorm-warning" class="legend-item" data-type="thunderstorm-warning" style="display:none;"><span class="box thunderstorm-warning"></span> Svr T-Storm Warning</div>
+                <div id="legend-hurricane" class="legend-item" data-type="hurricane" style="display:none;"><span class="box hurricane"></span> Hurricane / Trop</div>
+                <div id="legend-flood" class="legend-item" data-type="flood" style="display:none;"><span class="box flood"></span> Flood Warning</div>
+                <div id="legend-marine" class="legend-item" data-type="marine" style="display:none;"><span class="box marine"></span> Marine Warning</div>
+                <div id="legend-snow" class="legend-item" data-type="snow" style="display:none;"><span class="box snow"></span> Snow/Blizzard Warn</div>
+                <div id="legend-other-warning" class="legend-item" data-type="other-warning" style="display:none;"><span class="box other-warning"></span> Other Warning</div>
+                <div id="legend-no-alerts" class="legend-item">No active warnings</div>
+                
+                <div class="legend-title" style="margin-top: 15px;">WATCHES & ADVISORIES</div>
+                <div id="legend-tornado-watch" class="legend-item" data-type="tornado-watch" style="display:none;"><span class="box tornado-watch"></span> Tornado Watch</div>
+                <div id="legend-thunderstorm-watch" class="legend-item" data-type="thunderstorm-watch" style="display:none;"><span class="box thunderstorm-watch"></span> Svr T-Storm Watch</div>
+                <div id="legend-winter-watch" class="legend-item" data-type="winter-watch" style="display:none;"><span class="box winter-watch"></span> Winter/Snow Watch</div>
+                <div id="legend-other-watch" class="legend-item" data-type="other-watch" style="display:none;"><span class="box other-watch"></span> Other Watch/Adv</div>
+                <div id="legend-no-watches" class="legend-item">No active watches</div>
+            </div>
+            <div id="velocity-legend" style="display:none;">
+                <div class="legend-title">WIND ROTATION (BASE VELOCITY)</div>
+                <div class="v-scale">
+                    <span class="v-box inbound"></span> Inbound (Toward Radar)
+                </div>
+                <div class="v-scale">
+                    <span class="v-box outbound"></span> Outbound (Away)
+                </div>
+                <div class="v-note">Look for Red next to Green to spot rotation!</div>
+            </div>
+        </div>
+    </div>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+    <script src="app.js"></script>
+</body>
+</html>
