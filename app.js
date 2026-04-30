@@ -12,9 +12,31 @@ const map = L.map('map', {
 // Add Map Scale
 L.control.scale({ position: 'bottomright', imperial: true, metric: false }).addTo(map);
 
+// Create custom panes for land, water, and boundaries to ensure they stay in the correct order
+map.createPane('landPane');
+map.getPane('landPane').style.zIndex = 150;
+map.createPane('waterPane');
+map.getPane('waterPane').style.zIndex = 160;
+map.createPane('boundaryPane');
+map.getPane('boundaryPane').style.zIndex = 170;
+
 // 1. Base Map Setup (Local GeoJSON) 
+const landStyle = { fillColor: "#6d6d6d", fillOpacity: 1, color: "none", interactive: false };
+const waterStyle = { fillColor: "#000022", fillOpacity: 1, color: "none", interactive: false };
 const stateStyle = { color: "#ffffff", weight: 2, opacity: 0.8, fillOpacity: 0, interactive: false };
 const countyStyle = { color: "#444466", weight: 0.8, opacity: 0.5, fillOpacity: 0, interactive: false };
+
+let landLayer = null;
+let waterLayer = null;
+
+// Load base land and water bodies
+fetch('data/land.json').then(res => res.json()).then(data => {
+    landLayer = L.geoJSON(data, { style: landStyle, pane: 'landPane' }).addTo(map);
+});
+fetch('data/lakes.json').then(res => res.json()).then(data => {
+    waterLayer = L.geoJSON(data, { style: waterStyle, pane: 'waterPane' });
+    if (document.getElementById('chk-water')?.checked !== false) waterLayer.addTo(map);
+});
 
 let statesLayer = null;
 let countiesData = null;
@@ -22,13 +44,13 @@ let countiesLayer = null;
 const countiesLookup = {};
 
 fetch('data/states.json').then(res => res.json()).then(data => {
-    statesLayer = L.geoJSON(data, { style: stateStyle });
+    statesLayer = L.geoJSON(data, { style: stateStyle, pane: 'boundaryPane' });
     if (document.getElementById('chk-states')?.checked !== false) statesLayer.addTo(map);
 });
 fetch('data/counties.json').then(res => res.json()).then(data => {
     countiesData = data;
     data.features.forEach(c => { countiesLookup[c.properties.STATE + c.properties.COUNTY] = c; });
-    countiesLayer = L.geoJSON(data, { style: countyStyle });
+    countiesLayer = L.geoJSON(data, { style: countyStyle, pane: 'boundaryPane' });
     if (document.getElementById('chk-counties')?.checked !== false) countiesLayer.addTo(map);
     if (typeof activeAlertData !== 'undefined' && activeAlertData) renderAlerts();
 });
@@ -897,6 +919,14 @@ function setupRadarButtons() {
         chkRoads.addEventListener('change', (e) => {
             if (e.target.checked) map.addLayer(roadsLayer);
             else map.removeLayer(roadsLayer);
+        });
+    }
+    if (chkWater) {
+        chkWater.addEventListener('change', (e) => {
+            if (waterLayer) {
+                if (e.target.checked) map.addLayer(waterLayer);
+                else map.removeLayer(waterLayer);
+            }
         });
     }
     if (chkCounties) {

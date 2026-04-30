@@ -3,7 +3,7 @@ body, html {
     padding: 0;
     height: 100%;
     width: 100%;
-    background-color: #000022;
+    background-color: #000033;
     font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
     color: white;
     overflow: hidden;
@@ -268,7 +268,7 @@ body, html {
 
 /* Custom Leaflet overrides */
 .leaflet-container {
-    background: #6d6d6d !important;
+    background: #000033 !important;
 }
 
 .city-label {
