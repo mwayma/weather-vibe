@@ -28,6 +28,12 @@
                                 <div id="precip-options" style="padding-left: 10px; margin-bottom: 10px;">
                                     <button id="btn-loop" style="width: 100%; font-size: 0.9em; padding: 5px;">Play Loop</button>
                                 </div>
+                                <button id="btn-live-tracking" style="width: 100%; margin-bottom: 5px;">Live Tracking</button>
+                                <div id="live-tracking-options" style="padding-left: 10px; margin-bottom: 10px; display: none;">
+                                    <button id="btn-live-reflectivity" class="active" style="width: 100%; font-size: 0.9em; padding: 5px; margin-bottom: 3px;">Reflectivity</button>
+                                    <button id="btn-live-velocity" style="width: 100%; font-size: 0.9em; padding: 5px; margin-bottom: 3px;">Velocity</button>
+                                    <button id="btn-live-debris" style="width: 100%; font-size: 0.9em; padding: 5px;">Debris (CC)</button>
+                                </div>
                                 <button id="btn-velocity" style="width: 100%; margin-bottom: 5px;">Base Velocity (Wind)</button>
                                 <button id="btn-temperature" style="width: 100%; margin-bottom: 5px;">Temperature</button>
                                 <div id="temp-options" style="padding-left: 10px; margin-bottom: 10px; display: none; color: #eee; font-size: 0.9em;">
@@ -85,9 +91,42 @@
                 </div>
                 <div class="v-note">Look for Red next to Green to spot rotation!</div>
             </div>
+            
+            <!-- Spectrum Legends for Live Tracking -->
+            <div id="live-reflectivity-legend" style="display:none; margin-top: 10px;">
+                <div class="legend-title">LIVE PRECIPITATION (REFLECTIVITY)</div>
+                <div class="spectrum-bar reflectivity-spectrum"></div>
+                <div style="display: flex; justify-content: space-between; font-size: 10px; color: #aaa;">
+                    <span>Light</span>
+                    <span>Heavy/Hail</span>
+                </div>
+            </div>
+            
+            <div id="live-velocity-legend" style="display:none; margin-top: 10px;">
+                <div class="legend-title">LIVE VELOCITY (WIND)</div>
+                <div class="spectrum-bar velocity-spectrum"></div>
+                <div style="display: flex; justify-content: space-between; font-size: 10px; color: #aaa;">
+                    <span>Inbound (Green)</span>
+                    <span>Outbound (Red)</span>
+                </div>
+                <div class="v-note">Look for bright Red/Green touching for rotation</div>
+            </div>
+
+            <div id="live-debris-legend" style="display:none; margin-top: 10px;">
+                <div class="legend-title">LIVE DEBRIS (CC)</div>
+                <div class="spectrum-bar debris-spectrum"></div>
+                <div style="display: flex; justify-content: space-between; font-size: 10px; color: #aaa;">
+                    <span>Debris (Low CC)</span>
+                    <span>Rain (High CC)</span>
+                </div>
+                <div class="v-note">Look for blue/magenta in heavy rain areas</div>
+            </div>
         </div>
     </div>
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+    <script src="https://cdn.jsdelivr.net/npm/pako@2.1.0/dist/pako.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bzip2-js@1.0.0/bzip2.min.js"></script>
+    <script src="radar-bundle.js"></script>
     <script src="app.js"></script>
 </body>
 </html>

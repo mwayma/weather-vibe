@@ -9,6 +9,9 @@ const map = L.map('map', {
     wheelPxPerZoomLevel: 200
 });
 
+// Add Map Scale
+L.control.scale({ position: 'bottomright', imperial: true, metric: false }).addTo(map);
+
 // 1. Base Map Setup (Local GeoJSON) 
 const stateStyle = { color: "#ffffff", weight: 2, opacity: 0.8, fillOpacity: 0, interactive: false };
 const countyStyle = { color: "#444466", weight: 0.8, opacity: 0.5, fillOpacity: 0, interactive: false };
@@ -266,32 +269,32 @@ function renderAlerts() {
 function checkRadarStatus() {
     const warningDiv = document.getElementById('radar-status-warning');
     if (!selectedRadarId || selectedRadarId === 'composite') {
-        warningDiv.style.display = 'none';
+        if (warningDiv) warningDiv.style.display = 'none';
         return;
     }
 
-    // IEM API endpoint for radar metadata
     const metaUrl = `https://mesonet.agron.iastate.edu/api/1/radar/${selectedRadarId}/meta`;
 
     fetch(metaUrl)
-        .then(res => res.json())
+        .then(res => {
+            if (!res.ok) throw new Error('API not available');
+            return res.json();
+        })
         .then(meta => {
             if (meta && meta.vcp) {
                 const vcp = meta.vcp;
-                // VCPs 31 and 32 are common "Clear Air" modes where dual-pol products are often unavailable
-                if (vcp === 31 || vcp === 32) {
+                if ((vcp === 31 || vcp === 32) && warningDiv) {
                     warningDiv.innerText = `WARNING: ${selectedRadarId} is in Clear Air Mode (VCP ${vcp}). Velocity, CC, and ZDR products may be unavailable.`;
                     warningDiv.style.display = 'block';
-                } else {
+                } else if (warningDiv) {
                     warningDiv.style.display = 'none';
                 }
-            } else {
+            } else if (warningDiv) {
                 warningDiv.style.display = 'none';
             }
         })
         .catch(err => {
-            console.debug('Could not fetch radar metadata:', err);
-            warningDiv.style.display = 'none';
+            if (warningDiv) warningDiv.style.display = 'none';
         });
 }
 
@@ -467,9 +470,13 @@ async function fetchCityTempDisplay(city, safeCityId) {
     }
 }
 
-let selectedRadarId = ''; // Start empty so we can auto-select the nearest
+// Global initialization
+let selectedRadarId = ''; 
+let NEXRAD_STATIONS = [];
 
 function getNearbyRadars(maxDistance = 200) {
+    if (!NEXRAD_STATIONS || NEXRAD_STATIONS.length === 0) return [];
+    
     const bounds = map.getBounds();
     const centerLat = bounds.getCenter().lat;
     const centerLon = bounds.getCenter().lng;
@@ -497,6 +504,8 @@ function getNearbyRadars(maxDistance = 200) {
 
 function updateRadarSelector() {
     const select = document.getElementById('radar-select');
+    if (!select) return;
+
     const nearbyRadars = getNearbyRadars();
     
     // Clear existing options except composite
@@ -518,7 +527,6 @@ function updateRadarSelector() {
         }
     });
     
-    // Default to the closest radar if no valid selection exists, or if a single-site mode is active but composite is selected
     const needsSingleSite = currentRadarMode !== 'reflectivity';
     if (!isCurrentSelectionAvailable || selectedRadarId === '' || (selectedRadarId === 'composite' && needsSingleSite)) {
         if (nearbyRadars.length > 0) {
@@ -527,8 +535,7 @@ function updateRadarSelector() {
             selectedRadarId = 'composite';
         }
         
-        // Only update layers if we actually changed the selection programmatically after initial load
-        if (typeof NEXRAD_STATIONS !== 'undefined' && NEXRAD_STATIONS.length > 0) {
+        if (NEXRAD_STATIONS.length > 0) {
             updateRadarLayersBasedOnMode();
         }
     }
@@ -536,17 +543,19 @@ function updateRadarSelector() {
     select.value = selectedRadarId;
 }
 
-// Update radar selector on map move
-map.on('moveend', () => {
-    updateVisibleCities();
-    updateRadarSelector();
-    updateLegend();
-});
-map.on('zoomend', () => {
-    updateVisibleCities();
-    updateRadarSelector();
-    updateLegend();
-});
+// Update radar selector on map move with debounce
+let mapMoveTimeout = null;
+function handleMapMove() {
+    if (mapMoveTimeout) clearTimeout(mapMoveTimeout);
+    mapMoveTimeout = setTimeout(() => {
+        updateVisibleCities();
+        updateRadarSelector();
+        updateLegend();
+    }, 500); // 500ms debounce
+}
+
+map.on('moveend', handleMapMove);
+map.on('zoomend', handleMapMove);
 
 // 5. Radar Scan Refresh Logic
 function formatIEMTime(date) {
@@ -555,12 +564,8 @@ function formatIEMTime(date) {
 }
 
 function checkRadarScan() {
-    updateAlerts(); // Fetch live NWS data in background every 30 seconds
+    updateAlerts(); 
     
-    // We bypass the IEM GetCapabilities endpoint due to a server-side XML timezone bug.
-    // Instead, calculate the latest available 5-minute interval using the local clock.
-    // IEM NEXRAD composites take ~4 minutes to render, so we subtract 4 minutes 
-    // to ensure we only request tiles that have finished processing.
     const now = new Date();
     now.setMinutes(now.getMinutes() - 4);
     now.setMinutes(Math.floor(now.getMinutes() / 5) * 5);
@@ -576,26 +581,23 @@ function checkRadarScan() {
     if (latest !== lastScanTime) {
         lastScanTime = latest;
         
-        // Rebuild loop timestamps based on the exact calculated time
         const times = [];
         const latestDate = new Date(now.getTime());
         for (let i = 0; i < 12; i++) {
             const d = new Date(latestDate.getTime() - (i * 5 * 60000));
             times.push(formatIEMTime(d));
         }
-        loopTimestamps = times.reverse(); // Oldest to newest
+        loopTimestamps = times.reverse(); 
         
         if (!isLooping) {
-            if (typeof radarLayer !== 'undefined' && typeof radarLayer.setParams === 'function') {
-                // Update cachebuster to force Leaflet to fetch the new tiles
+            if (typeof radarLayer !== 'undefined' && radarLayer && typeof radarLayer.setParams === 'function') {
                 radarLayer.setParams({ _cb: new Date().getTime() }, false);
             }
-            checkRadarStatus(); // Check the radar's operational mode
+            checkRadarStatus(); 
         } else {
-            // We are looping. Seamlessly update the preloaded buffer.
             if (loopLayers.length > 0) {
                 const oldLayer = loopLayers.shift();
-                map.removeLayer(oldLayer); // Remove oldest frame
+                map.removeLayer(oldLayer); 
                 
                 const newLayer = L.tileLayer.wms('https://mesonet.agron.iastate.edu/cgi-bin/wms/nexrad/n0q-t.cgi', {
                     layers: 'nexrad-n0q-wmst',
@@ -604,12 +606,9 @@ function checkRadarScan() {
                     opacity: 0,
                     time: latest,
                     attribution: 'Radar: IEM NEXRAD'
-                }).addTo(map); // Pre-load newest frame in the background
+                }).addTo(map); 
                 
                 loopLayers.push(newLayer);
-                
-                // Adjust the loop index back by 1 since we shifted the array left,
-                // ensuring the playback animation doesn't skip a frame
                 currentLoopIndex = Math.max(0, currentLoopIndex - 1);
             }
         }
@@ -625,33 +624,30 @@ function toggleLoop() {
     const loopBtn = document.getElementById('btn-loop');
     isLooping = !isLooping;
     if (isLooping) {
-        loopBtn.classList.add('active');
-        loopBtn.innerText = 'Stop Loop';
+        if (loopBtn) {
+            loopBtn.classList.add('active');
+            loopBtn.innerText = 'Stop Loop';
+        }
         
         if (loopTimestamps.length > 0) {
             currentLoopIndex = 0;
-            
             let loadedCount = 0;
             document.getElementById('timestamp').innerText = `Loading loop frames (0/${loopTimestamps.length})...`;
             
-            // Hide the live WMS layer
-            if (map.hasLayer(radarReflectivity)) {
-                map.removeLayer(radarReflectivity);
-            }
+            if (map.hasLayer(radarReflectivity)) map.removeLayer(radarReflectivity);
             
-            // Pre-load all 12 historical frames as invisible layers to buffer them
             loopLayers = loopTimestamps.map(ts => {
                 const layer = L.tileLayer.wms('https://mesonet.agron.iastate.edu/cgi-bin/wms/nexrad/n0q-t.cgi', {
                     layers: 'nexrad-n0q-wmst',
                     format: 'image/png',
                     transparent: true,
-                    opacity: 0, // Hidden while downloading
+                    opacity: 0, 
                     time: ts,
                     attribution: 'Radar: IEM NEXRAD'
                 });
                 
                 layer.on('load', function onLayerLoad() {
-                    layer.off('load', onLayerLoad); // Stop listening once loaded
+                    layer.off('load', onLayerLoad);
                     loadedCount++;
                     if (isLooping && !loopInterval) {
                         document.getElementById('timestamp').innerText = `Loading loop frames (${loadedCount}/${loopTimestamps.length})...`;
@@ -661,53 +657,100 @@ function toggleLoop() {
                         }
                     }
                 });
-                
                 return layer.addTo(map);
             });
         }
     } else {
-        loopBtn.classList.remove('active');
-        loopBtn.innerText = 'Play Loop';
+        if (loopBtn) {
+            loopBtn.classList.remove('active');
+            loopBtn.innerText = 'Play Loop';
+        }
         clearInterval(loopInterval);
         loopInterval = null;
-        
-        // Remove all pre-loaded loop layers
         loopLayers.forEach(layer => map.removeLayer(layer));
         loopLayers = [];
-        
-        // Revert to live WMS endpoint cleanly by re-initializing the layer
         updateRadarLayersBasedOnMode();
-        
-        if (lastScanTime) {
-            document.getElementById('timestamp').innerText = `Last Checked: ${new Date().toLocaleTimeString()}`;
-        }
+        if (lastScanTime) document.getElementById('timestamp').innerText = `Last Checked: ${new Date().toLocaleTimeString()}`;
     }
 }
 
 function advanceLoop() {
     if (loopLayers.length === 0) return;
-    
-    // Hide all layers
     loopLayers.forEach(layer => layer.setOpacity(0));
-    
-    // Show the current frame
     loopLayers[currentLoopIndex].setOpacity(0.8);
-    
     const ts = loopTimestamps[currentLoopIndex];
     const scanDate = new Date(ts);
     document.getElementById('timestamp').innerText = `Radar Scan: ${scanDate.toLocaleTimeString()} (Looping)`;
-    
     currentLoopIndex = (currentLoopIndex + 1) % loopLayers.length;
 }
 
-// 6. Radar Control Buttons
+// Live Tracking State
+let liveTrackingLayer = L.layerGroup().addTo(map);
+let radarStationMarker = null;
+let azimuthLine = null;
+let currentLiveMode = 'reflectivity'; // 'reflectivity', 'velocity', 'debris'
+let liveRadarData = null;
+let liveScanInterval = null;
+let liveDataRefreshInterval = null;
+let liveCanvasLayer = null;
+
+const COLOR_SCALES = {
+    reflectivity: (val) => {
+        if (val === null || val < 5) return null;
+        if (val < 10) return '#00ecec';
+        if (val < 15) return '#01a0f6';
+        if (val < 20) return '#0000f6';
+        if (val < 25) return '#00ff00';
+        if (val < 30) return '#00c800';
+        if (val < 35) return '#009000';
+        if (val < 40) return '#ffff00';
+        if (val < 45) return '#e7c000';
+        if (val < 50) return '#ff9000';
+        if (val < 55) return '#ff0000';
+        if (val < 60) return '#d60000';
+        if (val < 65) return '#c00000';
+        if (val < 70) return '#ff00ff';
+        if (val < 75) return '#9955c9';
+        return '#ffffff';
+    },
+    velocity: (val) => {
+        if (val === null) return null;
+        if (val < -60) return '#00ff00';
+        if (val < -40) return '#00cc00';
+        if (val < -20) return '#008800';
+        if (val < 0) return '#004400';
+        if (val === 0) return '#777777';
+        if (val < 20) return '#440000';
+        if (val < 40) return '#880000';
+        if (val < 60) return '#cc0000';
+        return '#ff0000';
+    },
+    debris: (val) => {
+        if (val === null || val < 0.7) return null;
+        if (val < 0.8) return '#ff00ff'; 
+        if (val < 0.9) return '#0000ff';
+        if (val < 0.95) return '#00ffff';
+        if (val < 0.98) return '#00ff00';
+        return '#ffff00';
+    }
+};
+
 function setupRadarButtons() {
+    console.log('Initializing radar buttons...');
     const reflectivityBtn = document.getElementById('btn-reflectivity');
+    const liveTrackingBtn = document.getElementById('btn-live-tracking');
     const velocityBtn = document.getElementById('btn-velocity');
     const temperatureBtn = document.getElementById('btn-temperature');
     const loopBtn = document.getElementById('btn-loop');
+    
+    const liveOptions = document.getElementById('live-tracking-options');
+    const btnLiveReflectivity = document.getElementById('btn-live-reflectivity');
+    const btnLiveVelocity = document.getElementById('btn-live-velocity');
+    const btnLiveDebris = document.getElementById('btn-live-debris');
+
     const reflectivityLegend = document.getElementById('reflectivity-legend');
     const velocityLegend = document.getElementById('velocity-legend');
+    const liveIndicator = document.getElementById('live-indicator');
     
     const chkCities = document.getElementById('chk-cities');
     const chkRoads = document.getElementById('chk-roads');
@@ -721,67 +764,116 @@ function setupRadarButtons() {
     const mainControlsToggle = document.getElementById('main-controls-toggle');
     const mainControlsContent = document.getElementById('main-controls-content');
 
-    reflectivityBtn.addEventListener('click', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-
-        if (reflectivityBtn.classList.contains('active')) {
-            // If it's active, turn it off
-            currentRadarMode = 'none';
-            reflectivityBtn.classList.remove('active');
-        } else {
-            // If it's not active, turn it on
-            currentRadarMode = 'reflectivity';
-            reflectivityBtn.classList.add('active');
-            velocityBtn.classList.remove('active');
-            if (temperatureBtn) temperatureBtn.classList.remove('active');
-            velocityLegend.style.display = 'none';
-        }
-        updateRadarLayersBasedOnMode();
-    });
-    
-    velocityBtn.addEventListener('click', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-
-        if (velocityBtn.classList.contains('active')) {
-            // If it's active, turn it off
-            currentRadarMode = 'none';
-            velocityBtn.classList.remove('active');
-            velocityLegend.style.display = 'none';
-        } else {
-            // If it's not active, turn it on
-            currentRadarMode = 'velocity';
-            if (selectedRadarId === 'composite') {
-                updateRadarSelector(); // Auto-switch to local radar
+    if (reflectivityBtn) {
+        reflectivityBtn.addEventListener('click', (e) => {
+            e.preventDefault(); e.stopPropagation();
+            if (reflectivityBtn.classList.contains('active')) {
+                currentRadarMode = 'none';
+                reflectivityBtn.classList.remove('active');
+            } else {
+                currentRadarMode = 'reflectivity';
+                reflectivityBtn.classList.add('active');
+                if (liveTrackingBtn) liveTrackingBtn.classList.remove('active');
+                if (velocityBtn) velocityBtn.classList.remove('active');
+                if (temperatureBtn) temperatureBtn.classList.remove('active');
+                if (velocityLegend) velocityLegend.style.display = 'none';
             }
-            velocityBtn.classList.add('active');
-            reflectivityBtn.classList.remove('active');
-            if (temperatureBtn) temperatureBtn.classList.remove('active');
-            velocityLegend.style.display = 'block';
-        }
-        updateRadarLayersBasedOnMode();
-    });
+            updateRadarLayersBasedOnMode();
+        });
+    }
+
+    if (liveTrackingBtn) {
+        liveTrackingBtn.addEventListener('click', (e) => {
+            e.preventDefault(); e.stopPropagation();
+            console.log('Live tracking clicked');
+            if (liveTrackingBtn.classList.contains('active')) {
+                currentRadarMode = 'reflectivity';
+                liveTrackingBtn.classList.remove('active');
+                if (reflectivityBtn) reflectivityBtn.classList.add('active');
+            } else {
+                currentRadarMode = 'live-tracking';
+                if (selectedRadarId === 'composite') updateRadarSelector();
+                liveTrackingBtn.classList.add('active');
+                if (reflectivityBtn) reflectivityBtn.classList.remove('active');
+                if (velocityBtn) velocityBtn.classList.remove('active');
+                if (temperatureBtn) temperatureBtn.classList.remove('active');
+                if (velocityLegend) velocityLegend.style.display = 'none';
+            }
+            updateRadarLayersBasedOnMode();
+        });
+    }
+
+    if (btnLiveReflectivity) {
+        btnLiveReflectivity.addEventListener('click', () => {
+            currentLiveMode = 'reflectivity';
+            btnLiveReflectivity.classList.add('active');
+            if (btnLiveVelocity) btnLiveVelocity.classList.remove('active');
+            if (btnLiveDebris) btnLiveDebris.classList.remove('active');
+            updateLiveLegends();
+            renderLiveRadar();
+        });
+    }
+
+    if (btnLiveVelocity) {
+        btnLiveVelocity.addEventListener('click', () => {
+            currentLiveMode = 'velocity';
+            if (btnLiveReflectivity) btnLiveReflectivity.classList.remove('active');
+            btnLiveVelocity.classList.add('active');
+            if (btnLiveDebris) btnLiveDebris.classList.remove('active');
+            updateLiveLegends();
+            renderLiveRadar();
+        });
+    }
+
+    if (btnLiveDebris) {
+        btnLiveDebris.addEventListener('click', () => {
+            currentLiveMode = 'debris';
+            if (btnLiveReflectivity) btnLiveReflectivity.classList.remove('active');
+            if (btnLiveVelocity) btnLiveVelocity.classList.remove('active');
+            btnLiveDebris.classList.add('active');
+            updateLiveLegends();
+            renderLiveRadar();
+        });
+    }
+    
+    if (velocityBtn) {
+        velocityBtn.addEventListener('click', (e) => {
+            e.preventDefault(); e.stopPropagation();
+            if (velocityBtn.classList.contains('active')) {
+                currentRadarMode = 'none';
+                velocityBtn.classList.remove('active');
+                if (velocityLegend) velocityLegend.style.display = 'none';
+            } else {
+                currentRadarMode = 'velocity';
+                if (selectedRadarId === 'composite') updateRadarSelector();
+                velocityBtn.classList.add('active');
+                if (reflectivityBtn) reflectivityBtn.classList.remove('active');
+                if (liveTrackingBtn) liveTrackingBtn.classList.remove('active');
+                if (temperatureBtn) temperatureBtn.classList.remove('active');
+                if (velocityLegend) velocityLegend.style.display = 'block';
+            }
+            updateRadarLayersBasedOnMode();
+        });
+    }
     
     if (temperatureBtn) {
         temperatureBtn.addEventListener('click', (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-
+            e.preventDefault(); e.stopPropagation();
             if (temperatureBtn.classList.contains('active')) {
                 currentRadarMode = 'none';
                 temperatureBtn.classList.remove('active');
             } else {
                 currentRadarMode = 'temperature';
                 temperatureBtn.classList.add('active');
-                reflectivityBtn.classList.remove('active');
-                velocityBtn.classList.remove('active');
-                velocityLegend.style.display = 'none';
+                if (reflectivityBtn) reflectivityBtn.classList.remove('active');
+                if (velocityBtn) velocityBtn.classList.remove('active');
+                if (liveTrackingBtn) liveTrackingBtn.classList.remove('active');
+                if (velocityLegend) velocityLegend.style.display = 'none';
             }
             updateRadarLayersBasedOnMode();
         });
     }
-    
+
     const cityAttribution = '<a href="https://simplemaps.com" target="_blank">City Data: simplemaps.com</a>';
 
     if (chkCities) {
@@ -791,9 +883,9 @@ function setupRadarButtons() {
 
         chkCities.addEventListener('change', (e) => {
             isCitiesVisible = e.target.checked;
-            if (isCitiesVisible) {
-                map.addLayer(cityLayer);
-                updateVisibleCities();
+            if (isCitiesVisible) { 
+                map.addLayer(cityLayer); 
+                updateVisibleCities(); 
                 if (map.attributionControl) map.attributionControl.addAttribution(cityAttribution);
             } else {
                 map.removeLayer(cityLayer);
@@ -801,18 +893,12 @@ function setupRadarButtons() {
             }
         });
     }
-    
     if (chkRoads) {
         chkRoads.addEventListener('change', (e) => {
-            isRoadsVisible = e.target.checked;
-            if (isRoadsVisible) {
-                map.addLayer(roadsLayer);
-            } else {
-                map.removeLayer(roadsLayer);
-            }
+            if (e.target.checked) map.addLayer(roadsLayer);
+            else map.removeLayer(roadsLayer);
         });
     }
-    
     if (chkCounties) {
         chkCounties.addEventListener('change', (e) => {
             if (countiesLayer) {
@@ -821,7 +907,6 @@ function setupRadarButtons() {
             }
         });
     }
-    
     if (chkStates) {
         chkStates.addEventListener('change', (e) => {
             if (statesLayer) {
@@ -830,11 +915,8 @@ function setupRadarButtons() {
             }
         });
     }
-
     if (chkTempGradient) {
-        chkTempGradient.addEventListener('change', () => {
-            updateRadarLayersBasedOnMode();
-        });
+        chkTempGradient.addEventListener('change', () => updateRadarLayersBasedOnMode());
     }
 
     if (mapLayersToggle && mapLayersContent) {
@@ -878,8 +960,7 @@ function setupRadarButtons() {
     
     if (loopBtn) {
         loopBtn.addEventListener('click', (e) => {
-            e.preventDefault();
-            e.stopPropagation();
+            e.preventDefault(); e.stopPropagation();
             if (currentRadarMode !== 'reflectivity') return;
             toggleLoop();
         });
@@ -889,11 +970,9 @@ function setupRadarButtons() {
 function setupLegendToggles() {
     document.querySelectorAll('.legend-item').forEach(item => {
         if (item.id === 'legend-no-alerts' || item.id === 'legend-no-watches') return;
-        
         item.addEventListener('click', (e) => {
             const type = e.currentTarget.getAttribute('data-type');
             if (!type) return;
-            
             if (disabledAlertTypes.has(type)) {
                 disabledAlertTypes.delete(type);
                 e.currentTarget.classList.remove('disabled');
@@ -901,163 +980,373 @@ function setupLegendToggles() {
                 disabledAlertTypes.add(type);
                 e.currentTarget.classList.add('disabled');
             }
-            renderAlerts(); // Redraw layer based on new toggle state
+            renderAlerts(); 
         });
     });
 }
 
-// Set up buttons once DOM is ready
-if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', setupRadarButtons);
-} else {
-    setupRadarButtons();
-}
-
-// 7. Radar Selector Handler
 function setupRadarSelector() {
     const radarSelect = document.getElementById('radar-select');
-    
-    if (!radarSelect) {
-        console.error('Radar selector not found in DOM');
-        return;
-    }
-    
+    if (!radarSelect) return;
     radarSelect.addEventListener('change', (e) => {
         selectedRadarId = e.target.value;
-        console.log('Radar selected:', selectedRadarId);        
         updateRadarLayersBasedOnMode();
         checkRadarStatus();
     });
-    
-    // Initial population
     updateRadarSelector();
 }
 
 function updateVelocityLayer() {
-    // Remove the old radarVelocity layer if it exists on the map
-    if (map.hasLayer(radarVelocity)) {
-        map.removeLayer(radarVelocity);
-    }
-
+    if (map.hasLayer(radarVelocity)) map.removeLayer(radarVelocity);
     if (!selectedRadarId || selectedRadarId === 'composite') {
-        console.log('Velocity data requires a specific radar station selection.');
-        radarVelocity = L.layerGroup(); // Empty layer to prevent WMS 400 errors
+        radarVelocity = L.layerGroup(); 
         return;
     } else {
-        // Find the selected radar station
         const station = NEXRAD_STATIONS.find(s => s.id === selectedRadarId);
-        if (!station) {
-            console.error('Radar station not found:', selectedRadarId);
-            radarVelocity = L.layerGroup(); 
-            return;
-        }
-        // IEM uses a specific ridge.cgi endpoint for single-site radar data
+        if (!station) { radarVelocity = L.layerGroup(); return; }
         const specificWmsUrl = 'https://mesonet.agron.iastate.edu/cgi-bin/wms/nexrad/ridge.cgi';
-        // IEM ridge expects a 3-character uppercase sector ID (e.g., 'LZK' instead of 'KLZK')
         const sectorId = station.id.length === 4 ? station.id.substring(1).toUpperCase() : station.id.toUpperCase();
-        console.log('Updating velocity layer for station:', station.id, 'using sector:', sectorId);
-        
         radarVelocity = L.tileLayer.wms(specificWmsUrl, {
-            layers: 'single', // The target WMS layer for individual stations is 'single'
-            sector: sectorId, // 3-character Station ID
-            prod: 'N0U', // Product ID (N0U for base velocity)
-            format: 'image/png',
-            transparent: true,
-            opacity: 0.8,
-            attribution: `Radar: IEM NEXRAD (${station.id})`
+            layers: 'single', sector: sectorId, prod: 'N0U', format: 'image/png',
+            transparent: true, opacity: 0.8, attribution: `Radar: ${station.id}`
         });
     }
 }
 
 function updateReflectivityLayer() {
-    if (map.hasLayer(radarReflectivity)) {
-        map.removeLayer(radarReflectivity);
-    }
-    // Re-initialize the reflectivity layer (it's always composite for reflectivity)
+    if (map.hasLayer(radarReflectivity)) map.removeLayer(radarReflectivity);
     radarReflectivity = L.tileLayer.wms('https://mesonet.agron.iastate.edu/cgi-bin/wms/nexrad/n0q.cgi', {
-        layers: 'nexrad-n0q',
-        format: 'image/png',
-        transparent: true,
-        opacity: 0.8,
+        layers: 'nexrad-n0q', format: 'image/png', transparent: true, opacity: 0.8,
         attribution: 'Radar: IEM NEXRAD'
     });
 }
 
-// New function to manage radar layer visibility based on current mode
-function updateRadarLayersBasedOnMode() {
-    const loopBtn = document.getElementById('btn-loop');
-    const precipOptions = document.getElementById('precip-options');
-    const tempOptions = document.getElementById('temp-options');
+function updateLiveLegends() {
+    const refLegend = document.getElementById('live-reflectivity-legend');
+    const velLegend = document.getElementById('live-velocity-legend');
+    const debLegend = document.getElementById('live-debris-legend');
 
-    // Toggle sub-menus
-    if (precipOptions) precipOptions.style.display = (currentRadarMode === 'reflectivity') ? 'block' : 'none';
-    if (tempOptions) tempOptions.style.display = (currentRadarMode === 'temperature') ? 'block' : 'none';
+    if (refLegend) refLegend.style.display = 'none';
+    if (velLegend) velLegend.style.display = 'none';
+    if (debLegend) debLegend.style.display = 'none';
 
-    // Clean up all potential layers first
-    if (map.hasLayer(radarReflectivity)) {
-        map.removeLayer(radarReflectivity);
-    }
-    if (map.hasLayer(radarVelocity)) {
-        map.removeLayer(radarVelocity);
-    }
-    if (map.hasLayer(radarTemperature)) {
-        map.removeLayer(radarTemperature);
-    }
-
-    // Stop loop if it's running and we're not in a mode that supports it
-    if (currentRadarMode !== 'reflectivity' && isLooping) {
-        toggleLoop();
-    }
-    loopBtn.disabled = (currentRadarMode !== 'reflectivity');
-
-    if (currentRadarMode === 'reflectivity') {
-        loopBtn.disabled = false;
-        updateReflectivityLayer();
-        map.addLayer(radarReflectivity);
-        radarLayer = radarReflectivity;
-    } else if (currentRadarMode === 'velocity') {
-        loopBtn.disabled = true;
-        updateVelocityLayer();
-        map.addLayer(radarVelocity);
-        radarLayer = radarVelocity;
-    } else if (currentRadarMode === 'temperature') {
-        const chkTempGradient = document.getElementById('chk-temp-gradient');
-        if (chkTempGradient && chkTempGradient.checked) {
-            map.addLayer(radarTemperature);
-            radarLayer = radarTemperature;
-        } else {
-            radarLayer = null;
-        }
-    } else { // 'none' state
-        radarLayer = null; // No active layer
-    }
-
-    // Re-render cities so their temperatures show/hide accordingly.
-    // This is a critical step that was missing.
-    if (isCitiesVisible) {
-        updateVisibleCities();
+    if (currentRadarMode === 'live-tracking') {
+        if (currentLiveMode === 'reflectivity' && refLegend) refLegend.style.display = 'block';
+        if (currentLiveMode === 'velocity' && velLegend) velLegend.style.display = 'block';
+        if (currentLiveMode === 'debris' && debLegend) debLegend.style.display = 'block';
     }
 }
 
-// Initial setup when DOM is ready
+function updateRadarLayersBasedOnMode() {
+    console.log('Updating radar layers for mode:', currentRadarMode);
+    const loopBtn = document.getElementById('btn-loop');
+    const precipOptions = document.getElementById('precip-options');
+    const liveOptions = document.getElementById('live-tracking-options');
+    const tempOptions = document.getElementById('temp-options');
+    const liveIndicator = document.getElementById('live-indicator');
+
+    if (precipOptions) precipOptions.style.display = (currentRadarMode === 'reflectivity') ? 'block' : 'none';
+    if (liveOptions) liveOptions.style.display = (currentRadarMode === 'live-tracking') ? 'block' : 'none';
+    if (tempOptions) tempOptions.style.display = (currentRadarMode === 'temperature') ? 'block' : 'none';
+    if (liveIndicator) liveIndicator.style.display = (currentRadarMode === 'live-tracking') ? 'block' : 'none';
+
+    updateLiveLegends();
+
+    if (map.hasLayer(radarReflectivity)) map.removeLayer(radarReflectivity);
+    if (map.hasLayer(radarVelocity)) map.removeLayer(radarVelocity);
+    if (map.hasLayer(radarTemperature)) map.removeLayer(radarTemperature);
+    
+    liveTrackingLayer.clearLayers();
+    if (liveScanInterval) { cancelAnimationFrame(liveScanInterval); liveScanInterval = null; }
+    if (liveDataRefreshInterval) { clearInterval(liveDataRefreshInterval); liveDataRefreshInterval = null; }
+
+    if (currentRadarMode !== 'reflectivity' && isLooping) toggleLoop();
+    if (loopBtn) loopBtn.disabled = (currentRadarMode !== 'reflectivity');
+
+    if (currentRadarMode === 'reflectivity') {
+        updateReflectivityLayer(); map.addLayer(radarReflectivity);
+    } else if (currentRadarMode === 'live-tracking') {
+        startLiveTracking();
+    } else if (currentRadarMode === 'velocity') {
+        updateVelocityLayer(); map.addLayer(radarVelocity);
+    } else if (currentRadarMode === 'temperature') {
+        const chkTempGradient = document.getElementById('chk-temp-gradient');
+        if (chkTempGradient && chkTempGradient.checked) map.addLayer(radarTemperature);
+    }
+    if (isCitiesVisible) updateVisibleCities();
+}
+
+function startLiveTracking() {
+    if (!NEXRAD_STATIONS || NEXRAD_STATIONS.length === 0) return;
+    if (!selectedRadarId || selectedRadarId === 'composite') {
+        const nearby = getNearbyRadars();
+        if (nearby.length > 0) {
+            selectedRadarId = nearby[0].id;
+            const select = document.getElementById('radar-select');
+            if (select) select.value = selectedRadarId;
+        } else return;
+    }
+    const station = NEXRAD_STATIONS.find(s => s.id === selectedRadarId);
+    if (!station) return;
+
+    radarStationMarker = L.circleMarker([station.lat, station.lon], {
+        radius: 10, fillColor: '#ffffff', color: '#000', weight: 2, opacity: 1, fillOpacity: 1
+    }).addTo(liveTrackingLayer);
+
+    azimuthLine = L.polyline([[station.lat, station.lon], [station.lat, station.lon]], {
+        color: '#ffffff', weight: 2, opacity: 0.8
+    }).addTo(liveTrackingLayer);
+
+    fetchLatestLevel2Data(selectedRadarId);
+    
+    if (liveDataRefreshInterval) clearInterval(liveDataRefreshInterval);
+    liveDataRefreshInterval = setInterval(() => fetchLatestLevel2Data(selectedRadarId), 300000);
+
+    let angle = window.currentScanAzimuth || 0;
+    let lastTime = performance.now();
+    
+    function animateSweep(time) {
+        const dt = time - lastTime;
+        lastTime = time;
+        
+        // 20 seconds per rev = 360 / 20000 = 0.018 deg/ms
+        angle = (angle + 0.018 * dt) % 360; 
+        window.currentScanAzimuth = angle;
+        
+        const rad = (90 - angle) * Math.PI / 180; 
+        const dist = 3.5; 
+        const endLat = station.lat + dist * Math.sin(rad);
+        const endLon = station.lon + dist * Math.cos(rad);
+        
+        if (azimuthLine) {
+            azimuthLine.setLatLngs([[station.lat, station.lon], [endLat, endLon]]);
+        }
+        if (liveCanvasLayer && liveCanvasLayer._topLeft) {
+            liveCanvasLayer._draw();
+        }
+        
+        liveScanInterval = requestAnimationFrame(animateSweep);
+    }
+    
+    liveScanInterval = requestAnimationFrame(animateSweep);
+}
+
+async function fetchLatestLevel2Data(radarId) {
+    const now = new Date();
+    const prefix = `${now.getUTCFullYear()}/${String(now.getUTCMonth() + 1).padStart(2, '0')}/${String(now.getUTCDate()).padStart(2, '0')}/${radarId}/`;
+    
+    // Switch to unidata bucket which has broader CORS support
+    const s3Url = `https://unidata-nexrad-level2.s3.amazonaws.com/?list-type=2&prefix=${prefix}`;
+    
+    document.getElementById('timestamp').innerText = `Fetching Level 2: ${radarId}...`;
+    try {
+        const res = await fetch(s3Url);
+        if (!res.ok) throw new Error('S3 Access Denied (CORS or 404)');
+        
+        const xml = new DOMParser().parseFromString(await res.text(), 'text/xml');
+        let contents = Array.from(xml.getElementsByTagName('Contents'))
+                            .filter(c => !c.getElementsByTagName('Key')[0].textContent.includes('_MDM'));
+        
+        if (contents.length === 0) {
+            console.log('No data for today, checking yesterday...');
+            const yesterday = new Date(now.getTime() - 86400000);
+            const yPrefix = `${yesterday.getUTCFullYear()}/${String(yesterday.getUTCMonth() + 1).padStart(2, '0')}/${String(yesterday.getUTCDate()).padStart(2, '0')}/${radarId}/`;
+            const yRes = await fetch(`https://unidata-nexrad-level2.s3.amazonaws.com/?list-type=2&prefix=${yPrefix}`);
+            const yXml = new DOMParser().parseFromString(await yRes.text(), 'text/xml');
+            contents = Array.from(yXml.getElementsByTagName('Contents'))
+                                .filter(c => !c.getElementsByTagName('Key')[0].textContent.includes('_MDM'));
+        }
+
+        if (contents.length === 0) throw new Error('No data found for station');
+        
+        let parsed = false;
+        // Try the latest 3 files (in case the very latest is still being written to S3 and is truncated)
+        for (let i = contents.length - 1; i >= Math.max(0, contents.length - 3); i--) {
+            const key = contents[i].getElementsByTagName('Key')[0].textContent;
+            const fileUrl = `https://unidata-nexrad-level2.s3.amazonaws.com/${key}`;
+            
+            const success = await loadAndParseLevel2(fileUrl);
+            if (success) {
+                parsed = true;
+                break;
+            }
+        }
+        
+        if (!parsed) {
+            document.getElementById('timestamp').innerText = 'Data Unavailable (Corrupt)';
+        }
+    } catch (err) {
+        console.error('Fetch error:', err);
+        document.getElementById('timestamp').innerText = 'Data Unavailable (CORS/S3 Error)';
+    }
+}
+
+async function loadAndParseLevel2(url) {
+    document.getElementById('timestamp').innerText = `Downloading...`;
+    try {
+        const res = await fetch(url);
+        const arrayBuffer = await res.arrayBuffer();
+        let data = new Uint8Array(arrayBuffer);
+        if (url.endsWith('.gz')) data = pako.ungzip(data);
+        else if (url.endsWith('.bz2')) data = new Uint8Array(bzip2.decode(data));
+        
+        // Use the bundled parsing function which includes the correct Buffer polyfill internally
+        const parsedRadar = window.parseRadarData(data);
+        
+        // The parsing library catches its own offset errors and returns an empty/truncated object
+        // We must manually reject these so the fallback loop tries an older, complete file.
+        if (parsedRadar.isTruncated || !parsedRadar.data || Object.keys(parsedRadar.data).length === 0) {
+            throw new Error('File is truncated or empty (actively being written by NOAA)');
+        }
+        
+        liveRadarData = parsedRadar;
+        
+        document.getElementById('timestamp').innerText = `Live: ${url.split('/').pop()}`;
+        renderLiveRadar();
+        return true;
+    } catch (err) { 
+        console.warn('Parse error for', url, ':', err.message); 
+        return false;
+    }
+}
+
+function renderLiveRadar() {
+    if (currentRadarMode !== 'live-tracking') return;
+    if (!liveRadarData) return;
+    if (liveCanvasLayer) liveTrackingLayer.removeLayer(liveCanvasLayer);
+    const CanvasLayer = L.Layer.extend({
+        onAdd: function(map) {
+            this._container = L.DomUtil.create('canvas', 'leaflet-zoom-animated');
+            this._container.style.pointerEvents = 'none';
+            map.getPanes().overlayPane.appendChild(this._container);
+            map.on('viewreset', this._reset, this); map.on('moveend', this._reset, this);
+            this._reset();
+        },
+        onRemove: function(map) {
+            map.getPanes().overlayPane.removeChild(this._container);
+            map.off('viewreset', this._reset, this); map.off('moveend', this._reset, this);
+        },
+        _reset: function() {
+            const size = map.getSize();
+            this._container.width = size.x; this._container.height = size.y;
+            const pos = map.latLngToLayerPoint(map.getBounds().getNorthWest());
+            L.DomUtil.setPosition(this._container, pos);
+            this._topLeft = pos;
+            this._draw();
+        },
+        _draw: function() {
+            if (!this._topLeft) return;
+            const ctx = this._container.getContext('2d');
+            ctx.clearRect(0, 0, this._container.width, this._container.height);
+            const station = NEXRAD_STATIONS.find(s => s.id === selectedRadarId);
+            if (!station || !liveRadarData) return;
+            
+            const centerLayer = map.latLngToLayerPoint([station.lat, station.lon]);
+            const center = {
+                x: centerLayer.x - this._topLeft.x,
+                y: centerLayer.y - this._topLeft.y
+            };
+            
+            const edge = L.latLng(station.lat, station.lon).toBounds(2000).getNorthEast(); 
+            const edgeLayer = map.latLngToLayerPoint(edge);
+            const pixelsPerKm = centerLayer.distanceTo(edgeLayer) / Math.sqrt(2);
+            
+            let scale = COLOR_SCALES.reflectivity;
+            let momentArray = [];
+            let method = 'getHighresReflectivity';
+            
+            if (currentLiveMode === 'velocity') { 
+                scale = COLOR_SCALES.velocity; 
+                method = 'getHighresVelocity';
+            } else if (currentLiveMode === 'debris') { 
+                scale = COLOR_SCALES.debris; 
+                method = 'getHighresCorrelationCoefficient';
+            }
+            
+            let foundElevation = false;
+            // Iterate through the lowest elevations to find the requested product (handling Split Cuts)
+            for (let e = 1; e <= 5; e++) {
+                try {
+                    liveRadarData.setElevation(e);
+                    const tempMomentArray = liveRadarData[method]();
+                    
+                    if (tempMomentArray && tempMomentArray.some(m => m !== undefined && m.moment_data)) {
+                        momentArray = tempMomentArray;
+                        foundElevation = true;
+                        break; 
+                    }
+                } catch (err) {}
+            }
+
+            if (!foundElevation) {
+                console.warn(`Moment ${method} not available on any low elevation for this volume scan.`);
+                return;
+            }
+            
+            let azArray;
+            try {
+                azArray = liveRadarData.getAzimuth();
+            } catch(e) { return; }
+
+            const currentAz = window.currentScanAzimuth || 0;
+            const angularRes = 360 / azArray.length;
+            const arcWidthRad = (angularRes * Math.PI / 180) * 1.1; // 10% overlap
+            
+            for (let i = 0; i < azArray.length; i++) {
+                const radialAz = azArray[i];
+                const moment = momentArray[i];
+                if (!moment || !moment.moment_data) continue;
+                
+                let diff = (currentAz - radialAz + 360) % 360;
+                const azimuth = (90 - radialAz) * Math.PI / 180;
+                
+                ctx.save(); 
+                ctx.translate(center.x, center.y); 
+                ctx.rotate(-azimuth); 
+                
+                let alpha = 0.65;
+                if (diff < 30) {
+                    alpha = 0.65 + 0.35 * (1 - diff / 30);
+                }
+                ctx.globalAlpha = alpha;
+                
+                const firstGateKm = moment.first_gate / 1000;
+                const gateSizeKm = moment.gate_size; 
+                const firstGateActual = firstGateKm < 1 ? moment.first_gate : moment.first_gate / 1000;
+                
+                for (let j = 0; j < moment.moment_data.length; j += 2) {
+                    const val = moment.moment_data[j];
+                    if (val === null || val === undefined) continue;
+                    
+                    const color = scale(val);
+                    if (color) {
+                        const r1 = (firstGateActual + j * gateSizeKm) * pixelsPerKm;
+                        const r2 = r1 + (gateSizeKm * 2) * pixelsPerKm;
+                        ctx.fillStyle = color;
+                        const width = arcWidthRad * r1;
+                        ctx.fillRect(r1, -width/2, r2-r1 + 0.5, Math.max(1, width));
+                    }
+                }
+                ctx.restore();
+            }
+        }
+    });
+    liveCanvasLayer = new CanvasLayer();
+    liveCanvasLayer.addTo(liveTrackingLayer);
+}
+
+function initializeAppWithStations(data) {
+    NEXRAD_STATIONS = data;
+    console.log('NEXRAD Stations loaded:', NEXRAD_STATIONS.length);
+    setupRadarSelector();
+    setupLegendToggles();
+    setupRadarButtons();
+}
+
 if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', () => {
-        fetch('data/nexrad_stations.json')
-            .then(res => res.json())
-            .then(data => {
-                NEXRAD_STATIONS = data;
-                setupRadarSelector(); // Call setupRadarSelector after NEXRAD_STATIONS is loaded
-                setupLegendToggles(); // Bind legend click events
-            })
-            .catch(err => console.error('Error loading NEXRAD stations:', err));
+        fetch('data/nexrad_stations.json').then(res => res.json()).then(initializeAppWithStations);
     });
 } else {
-    fetch('data/nexrad_stations.json')
-        .then(res => res.json())
-        .then(data => {
-            NEXRAD_STATIONS = data;
-            setupRadarSelector(); // Call setupRadarSelector after NEXRAD_STATIONS is loaded
-            setupLegendToggles();
-        })
-        .catch(err => console.error('Error loading NEXRAD stations:', err));
+    fetch('data/nexrad_stations.json').then(res => res.json()).then(initializeAppWithStations);
 }

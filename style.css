@@ -46,7 +46,17 @@ body, html {
     padding: 2px 8px;
     border-radius: 4px;
     animation: blink 1s infinite;
+    display: none; /* Hidden by default */
 }
+
+/* Live Tracking Styles */
+#btn-live-tracking.active {
+    background: #ffffff !important;
+    color: #000000 !important;
+    border-color: #ffffff !important;
+    box-shadow: 0 0 15px #ffffff;
+}
+
 
 @keyframes blink {
     0% { opacity: 1; }
@@ -301,4 +311,24 @@ body, html {
     background: #ffeeee;
     padding: 5px;
     border-left: 3px solid #cc0000;
+}
+
+/* Spectrum Legends */
+.spectrum-bar {
+    height: 15px;
+    width: 100%;
+    margin: 5px 0;
+    border-radius: 2px;
+}
+
+.reflectivity-spectrum {
+    background: linear-gradient(to right, #00ecec, #01a0f6, #0000f6, #00ff00, #00c800, #009000, #ffff00, #e7c000, #ff9000, #ff0000, #d60000, #c00000, #ff00ff, #9955c9, #ffffff);
+}
+
+.velocity-spectrum {
+    background: linear-gradient(to right, #00ff00, #00cc00, #008800, #004400, #777777, #440000, #880000, #cc0000, #ff0000);
+}
+
+.debris-spectrum {
+    background: linear-gradient(to right, #ff00ff, #0000ff, #00ffff, #00ff00, #ffff00);
 }

@@ -1,0 +1,9 @@
+{
+  "dependencies": {
+    "nexrad-level-2-data": "^2.4.3"
+  },
+  "devDependencies": {
+    "browserify": "^17.0.1",
+    "esbuild": "^0.28.0"
+  }
+}
