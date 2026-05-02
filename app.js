@@ -1432,8 +1432,6 @@ const RadarCanvasLayer = L.Layer.extend({
         this._offscreenCtx = null;
     },
     _getPixelsPerKm: function(stationLat, stationLon) {
-        // Use a 100km reference point for better stability at high zoom levels
-        // 0.899 degrees is approximately 100km North
         const centerLayer = map.latLngToLayerPoint([stationLat, stationLon]);
         const refPoint = L.latLng(stationLat + 0.899, stationLon);
         const refLayer = map.latLngToLayerPoint(refPoint);
@@ -1441,10 +1439,15 @@ const RadarCanvasLayer = L.Layer.extend({
     },
     _reset: function() {
         const size = map.getSize();
-        this._container.width = size.x; 
-        this._container.height = size.y;
-        this._offscreenCanvas.width = size.x;
-        this._offscreenCanvas.height = size.y;
+        const dpr = window.devicePixelRatio || 1;
+        
+        this._container.width = size.x * dpr; 
+        this._container.height = size.y * dpr;
+        this._container.style.width = size.x + 'px';
+        this._container.style.height = size.y + 'px';
+        
+        this._offscreenCanvas.width = size.x * dpr;
+        this._offscreenCanvas.height = size.y * dpr;
 
         const pos = map.latLngToLayerPoint(map.getBounds().getNorthWest());
         L.DomUtil.setPosition(this._container, pos);
@@ -1455,6 +1458,7 @@ const RadarCanvasLayer = L.Layer.extend({
     _renderFull: function(center, pixelsPerKm) {
         if (!this._offscreenCanvas || !this._offscreenCtx) return;
         const ctx = this._offscreenCtx;
+        const dpr = window.devicePixelRatio || 1;
         ctx.clearRect(0, 0, this._offscreenCanvas.width, this._offscreenCanvas.height);
 
         if (!liveRadarData || !liveRadarData.elevations) return;
@@ -1472,12 +1476,13 @@ const RadarCanvasLayer = L.Layer.extend({
 
         const azArray = liveRadarData.azimuths;
         const angularRes = 360 / azArray.length;
-        const arcWidthRad = (angularRes * Math.PI / 180) * 1.6;
+        const arcWidthRad = (angularRes * Math.PI / 180) * 1.1; // Reduced multiplier for better precision
         const zoom = map.getZoom();
         const gateStep = zoom < 7 ? 4 : (zoom < 9 ? 2 : 1);
         const scale = COLOR_SCALES[momentKey];
 
         ctx.save();
+        ctx.scale(dpr, dpr);
         ctx.translate(center.x, center.y);
         ctx.globalAlpha = 1.0;
 
@@ -1489,9 +1494,7 @@ const RadarCanvasLayer = L.Layer.extend({
             const radialAz = azArray[i];
             const moment = momentArray[i];
             
-            // ONLY render radials that have already been "painted" by the sweep
             if (!liveRadarData.revealedUpdate || !liveRadarData.revealedUpdate[i]) continue;
-
             if (!moment || !moment.moment_data) continue;
 
             const azimuth = (90 - radialAz) * Math.PI / 180;
@@ -1515,10 +1518,9 @@ const RadarCanvasLayer = L.Layer.extend({
                         const r1 = (firstGateActual + startJ * gateSizeKm) * pixelsPerKm;
                         const r2 = (firstGateActual + j * gateSizeKm) * pixelsPerKm;
                         ctx.fillStyle = currentColor;
-                        // Use smooth annular sectors instead of blocky fillRect
                         ctx.beginPath();
-                        ctx.arc(0, 0, r1 - 0.5, -arcWidthRad/2 - 0.001, arcWidthRad/2 + 0.001);
-                        ctx.arc(0, 0, r2 + 0.5, arcWidthRad/2 + 0.001, -arcWidthRad/2 - 0.001, true);
+                        ctx.arc(0, 0, r1, -arcWidthRad/2, arcWidthRad/2);
+                        ctx.arc(0, 0, r2, arcWidthRad/2, -arcWidthRad/2, true);
                         ctx.closePath();
                         ctx.fill();
                     }
@@ -1539,6 +1541,7 @@ const RadarCanvasLayer = L.Layer.extend({
         const centerLayer = map.latLngToLayerPoint([station.lat, station.lon]);
         const center = { x: centerLayer.x - this._topLeft.x, y: centerLayer.y - this._topLeft.y };
         const pixelsPerKm = this._getPixelsPerKm(station.lat, station.lon);
+        const dpr = window.devicePixelRatio || 1;
 
         const ctx = this._offscreenCtx;
 
@@ -1555,19 +1558,37 @@ const RadarCanvasLayer = L.Layer.extend({
 
         const azArray = liveRadarData.azimuths;
         const angularRes = 360 / azArray.length;
-        const arcWidthRad = (angularRes * Math.PI / 180) * 1.6;
+        const arcWidthRad = (angularRes * Math.PI / 180) * 1.1;
         const zoom = map.getZoom();
         const gateStep = zoom < 7 ? 4 : (zoom < 9 ? 2 : 1);
         const scale = COLOR_SCALES[momentKey];
 
         ctx.save();
+        ctx.scale(dpr, dpr);
         ctx.translate(center.x, center.y);
         ctx.globalAlpha = 1.0; 
 
+        // 1. CLEAR the arc between startAz and endAz (continuous clearing)
+        ctx.globalCompositeOperation = 'destination-out';
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        // Canvas angles are clockwise from positive X-axis. 
+        // Our azimuth is North-relative clockwise. 
+        // Conversion: CanvasAngle = (Azimuth - 90) * PI / 180
+        const startRad = (startAz - 90) * Math.PI / 180;
+        const endRad = (endAz - 90) * Math.PI / 180;
+        
+        // Add a small buffer to the clear arc to avoid slivers
+        const CLEAR_BUFFER = 0.02; 
+        ctx.arc(0, 0, 460 * pixelsPerKm, startRad - CLEAR_BUFFER, endRad + CLEAR_BUFFER);
+        ctx.lineTo(0, 0);
+        ctx.fill();
+        ctx.globalCompositeOperation = 'source-over';
+
+        // 2. PAINT radials that fall within the sweep window
         for (let i = 0; i < azArray.length; i++) {
             const radialAz = azArray[i];
 
-            // Check if this radial falls within the current sweep window
             let isInside = false;
             if (startAz <= endAz) {
                 isInside = (radialAz >= startAz && radialAz <= endAz);
@@ -1581,15 +1602,6 @@ const RadarCanvasLayer = L.Layer.extend({
             ctx.save();
             ctx.rotate(-azimuth);
 
-            // 1. ALWAYS clear the slice ahead of the sweep to erase old data
-            ctx.globalCompositeOperation = 'destination-out';
-            ctx.beginPath();
-            ctx.moveTo(0, 0);
-            ctx.arc(0, 0, 460 * pixelsPerKm, -arcWidthRad/2 - 0.01, arcWidthRad/2 + 0.01); 
-            ctx.fill();
-            ctx.globalCompositeOperation = 'source-over';
-
-            // 2. PAINT new data if it exists for this radial
             const moment = momentArray[i];
             const radialTs = liveRadarData.lastUpdated ? liveRadarData.lastUpdated[i] : 0;
             const SWEEP_BUFFER_MS = 45000;
@@ -1613,10 +1625,9 @@ const RadarCanvasLayer = L.Layer.extend({
                             const r1 = (firstGateActual + startJ * gateSizeKm) * pixelsPerKm;
                             const r2 = (firstGateActual + j * gateSizeKm) * pixelsPerKm;
                             ctx.fillStyle = currentColor;
-                            // Use smooth annular sectors instead of blocky fillRect
                             ctx.beginPath();
-                            ctx.arc(0, 0, r1 - 0.5, -arcWidthRad/2 - 0.001, arcWidthRad/2 + 0.001);
-                            ctx.arc(0, 0, r2 + 0.5, arcWidthRad/2 + 0.001, -arcWidthRad/2 - 0.001, true);
+                            ctx.arc(0, 0, r1, -arcWidthRad/2, arcWidthRad/2);
+                            ctx.arc(0, 0, r2, arcWidthRad/2, -arcWidthRad/2, true);
                             ctx.closePath();
                             ctx.fill();
                         }
@@ -1625,7 +1636,6 @@ const RadarCanvasLayer = L.Layer.extend({
                     }
                 }
                 
-                // CRITICAL: Persist revealed state to the radialsMap
                 const roundedAz = Math.round(radialAz * 10) / 10;
                 if (liveRadarData.radialsMap && liveRadarData.radialsMap.has(roundedAz)) {
                     const radial = liveRadarData.radialsMap.get(roundedAz);
@@ -1640,6 +1650,7 @@ const RadarCanvasLayer = L.Layer.extend({
     _draw: function() {
         if (!this._topLeft || !this._container || !this._offscreenCanvas) return;
         const ctx = this._container.getContext('2d');
+        const dpr = window.devicePixelRatio || 1;
         const station = NEXRAD_STATIONS.find(s => s.id === selectedRadarId);
         if (!station || !liveRadarData) return;
 
@@ -1647,16 +1658,11 @@ const RadarCanvasLayer = L.Layer.extend({
         const center = { x: centerLayer.x - this._topLeft.x, y: centerLayer.y - this._topLeft.y };
         const pixelsPerKm = this._getPixelsPerKm(station.lat, station.lon);
 
-        // Initial full render if needed (e.g. on load or after pan/zoom)
         if (this._needsFullRedraw) {
             this._renderFull(center, pixelsPerKm);
         }
 
-        // 1. Clear the main display canvas
         ctx.clearRect(0, 0, this._container.width, this._container.height);
-
-        // 2. Simply draw the persistent offscreen buffer onto the map
-        ctx.globalAlpha = 1.0;
         ctx.drawImage(this._offscreenCanvas, 0, 0);
     }
 });

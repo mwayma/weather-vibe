@@ -321,10 +321,10 @@ function extractRadialData(parsed, stationId, chunkId) {
     let timestamps = null;
     const extractedElevations = {};
 
-    const methods = {
-        reflectivity: 'getHighresReflectivity',
-        velocity: 'getHighresVelocity',
-        debris: 'getHighresCorrelationCoefficient'
+    const methodGroups = {
+        reflectivity: ['getHighresReflectivity', 'getReflectivity'],
+        velocity: ['getHighresVelocity', 'getVelocity'],
+        debris: ['getHighresCorrelationCoefficient', 'getCorrelationCoefficient']
     };
 
     let hasAnyData = false;
@@ -343,18 +343,30 @@ function extractRadialData(parsed, stationId, chunkId) {
 
             const elevationProducts = {};
             let elevationHasData = false;
-            for (const [key, method] of Object.entries(methods)) {
-                const moments = parsed[method]();
+            
+            for (const [productKey, methodList] of Object.entries(methodGroups)) {
+                let moments = null;
+                // Try each method in the group until we find data
+                for (const methodName of methodList) {
+                    if (typeof parsed[methodName] === 'function') {
+                        moments = parsed[methodName]();
+                        if (moments && moments.some(m => m && m.moment_data)) {
+                            break; // Found data with this method
+                        }
+                    }
+                }
+
                 if (moments && moments.some(m => m && m.moment_data)) {
                     hasAnyData = true;
                     elevationHasData = true;
-                    elevationProducts[key] = moments.map(m => m ? {
+                    elevationProducts[productKey] = moments.map(m => m ? {
                         moment_data: m.moment_data,
                         first_gate: m.first_gate,
                         gate_size: m.gate_size
                     } : null);
                 }
             }
+            
             if (elevationHasData) {
                 extractedElevations[e] = elevationProducts;
             }
