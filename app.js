@@ -792,7 +792,8 @@ function mergeRealTimeData(newData) {
     console.log(`Radar data updated: ${addedCount} added, ${updatedCount} updated radials`);
 
     if (liveCanvasLayer) {
-        liveCanvasLayer._needsFullRedraw = true;
+        // We no longer set _needsFullRedraw = true here.
+        // Instead, the incremental sweep will pick up the new data as it passes each azimuth.
     }
 }
 
@@ -1547,11 +1548,13 @@ const RadarCanvasLayer = L.Layer.extend({
             ctx.save();
             ctx.rotate(-azimuth);
 
-            // Clear the "slice" before drawing new data
+            // Clear ONLY the slice we are about to draw. 
+            // The arc width should match the radial's angular width.
             ctx.globalCompositeOperation = 'destination-out';
             ctx.beginPath();
             ctx.moveTo(0, 0);
-            ctx.arc(0, 0, 2000, -0.05, 0.05); // Large radius for all zoom levels
+            // arcWidthRad covers the 10% overlap we use for drawing
+            ctx.arc(0, 0, 2000, -arcWidthRad/2, arcWidthRad/2); 
             ctx.fill();
             ctx.globalCompositeOperation = 'source-over';
 
