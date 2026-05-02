@@ -247,12 +247,6 @@ async function pollChunks(stationId) {
         pollingLocks.delete(stationId);
     }
 }
-    } catch (e) {
-        console.error(`[${stationId}] Poll error:`, e.message);
-    } finally {
-        pollingLocks.delete(stationId);
-    }
-}
 
 function extractRadialData(parsed, stationId, chunkId) {
     const elevations = [1, 2, 3, 4, 5];
