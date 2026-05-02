@@ -213,6 +213,8 @@ async function pollChunks(stationId) {
 
         if (!state.processedChunks) state.processedChunks = new Set();
 
+        const allRadials = [];
+
         for (const volPrefix of volumesToPoll) {
             const listChunksUrl = `${BUCKET_URL}/?list-type=2&prefix=${volPrefix}`;
             const chunkRes = await fetchWithTimeout(listChunksUrl);
@@ -230,13 +232,9 @@ async function pollChunks(stationId) {
             // Detect Volume Transition (on the newest folder)
             if (volPrefix === latestVolPrefix && volumeId !== state.lastVolume) {
                 console.log(`[${stationId}] Transitioning to new volume: ${volumeId}`);
-                // stationCache.delete(stationId); // Keep old data to avoid blanking out the client
-                // broadcast(stationId, { type: 'clear_data' }); 
                 state.lastVolume = volumeId;
                 state.lastChunkKey = null; 
                 state.headerChunk = null;
-                // DO NOT clear processedChunks here, we want to maintain the "seen" list 
-                // to avoid re-processing the tail of the previous volume.
                 stationState.set(stationId, state);
             }
 
@@ -249,10 +247,6 @@ async function pollChunks(stationId) {
                 const lastId = latestKey.split('/').pop();
                 console.log(`[${stationId}] Vol ${volPrefix}: Processing ${unseen.length} new chunks (${firstId} to ${lastId})`);
                 
-                if (latestKey.includes('-E')) {
-                    console.log(`[${stationId}] Vol ${volPrefix} completed.`);
-                }
-
                 if (!state.headerChunk) {
                     const headerKey = contents.find(c => c.Key.includes('-001-S'))?.Key;
                     if (headerKey) {
@@ -261,8 +255,6 @@ async function pollChunks(stationId) {
                     }
                 }
 
-                const CONCURRENCY = 5;
-                const batchRadials = [];
                 const chunkResults = await Promise.all(unseen.map(async (chunk) => {
                     try {
                         const chunkId = chunk.Key.split('/').pop();
@@ -296,7 +288,6 @@ async function pollChunks(stationId) {
                 }));
 
                 // Flatten and aggregate all radials from all chunks in this poll
-                const allRadials = [];
                 chunkResults.forEach(extracted => {
                     if (extracted && extracted.azimuths.length > 0) {
                         extracted.azimuths.forEach((az, i) => {
@@ -316,50 +307,50 @@ async function pollChunks(stationId) {
                     }
                 });
 
-                if (allRadials.length > 0) {
-                    // Sort by timestamp to handle out-of-order chunks
-                    allRadials.sort((a, b) => a.timestamp - b.timestamp);
-
-                    // Merge into cache
-                    allRadials.forEach(radial => {
-                        const roundedAz = Math.round(radial.azimuth * 10) / 10;
-                        if (!stationCache.has(stationId)) {
-                            stationCache.set(stationId, { radials: new Map(), stationId });
-                        }
-                        const cache = stationCache.get(stationId);
-                        
-                        if (!cache.radials.has(roundedAz)) {
-                            cache.radials.set(roundedAz, {
-                                azimuth: radial.azimuth,
-                                timestamp: radial.timestamp,
-                                elevations: {}
-                            });
-                        }
-                        
-                        const cachedRadial = cache.radials.get(roundedAz);
-                        cachedRadial.timestamp = radial.timestamp;
-
-                        for (const [e, products] of Object.entries(radial.elevations)) {
-                            if (!cachedRadial.elevations[e]) cachedRadial.elevations[e] = {};
-                            for (const [product, moment] of Object.entries(products)) {
-                                cachedRadial.elevations[e][product] = moment;
-                            }
-                        }
-                    });
-
-                    broadcast(stationId, { 
-                        type: 'radial_batch', 
-                        stationId: stationId,
-                        radials: allRadials,
-                        latestAzimuth: allRadials[allRadials.length - 1].azimuth
-                    });
-                }
-                
                 if (volPrefix === latestVolPrefix) {
                     state.lastChunkKey = latestKey;
                     stationState.set(stationId, state);
                 }
             }
+        }
+
+        if (allRadials.length > 0) {
+            // Sort by timestamp to handle out-of-order chunks
+            allRadials.sort((a, b) => a.timestamp - b.timestamp);
+
+            // Merge into cache
+            allRadials.forEach(radial => {
+                const roundedAz = Math.round(radial.azimuth * 10) / 10;
+                if (!stationCache.has(stationId)) {
+                    stationCache.set(stationId, { radials: new Map(), stationId });
+                }
+                const cache = stationCache.get(stationId);
+                
+                if (!cache.radials.has(roundedAz)) {
+                    cache.radials.set(roundedAz, {
+                        azimuth: radial.azimuth,
+                        timestamp: radial.timestamp,
+                        elevations: {}
+                    });
+                }
+                
+                const cachedRadial = cache.radials.get(roundedAz);
+                cachedRadial.timestamp = radial.timestamp;
+
+                for (const [e, products] of Object.entries(radial.elevations)) {
+                    if (!cachedRadial.elevations[e]) cachedRadial.elevations[e] = {};
+                    for (const [product, moment] of Object.entries(products)) {
+                        cachedRadial.elevations[e][product] = moment;
+                    }
+                }
+            });
+
+            broadcast(stationId, { 
+                type: 'radial_batch', 
+                stationId: stationId,
+                radials: allRadials,
+                latestAzimuth: allRadials[allRadials.length - 1].azimuth
+            });
         }
     } catch (e) {
         console.error(`[${stationId}] Poll error:`, e.message);

@@ -858,10 +858,8 @@ function mergeRealTimeData(newData) {
     if (!liveRadarData) {
         console.log('Initializing liveRadarData with real-time update');
         liveRadarData = {
-            radialsMap: new Map(), // roundedAz -> { azimuth, timestamp, revealedUpdate, elevations }
+            radialsMap: new Map(), // roundedAz -> { azimuth, timestamp, elevations }
             azimuths: [],
-            lastUpdated: [],
-            revealedUpdate: [],
             timestamps: [],
             elevations: {}
         };
@@ -880,7 +878,6 @@ function mergeRealTimeData(newData) {
             liveRadarData.radialsMap.set(roundedAz, {
                 azimuth: az,
                 timestamp: timestamp,
-                revealedUpdate: 0,
                 elevations: {}
             });
         }
@@ -896,8 +893,6 @@ function mergeRealTimeData(newData) {
         }
     });
 
-    syncLiveRadarArrays();
-    
     // CRITICAL: Ensure the layer exists and is ready to render
     if (!liveCanvasLayer) {
         renderLiveRadar();
@@ -1435,14 +1430,12 @@ function startLiveTracking() {
 
         const diff = (targetAzimuth - currentAngle + 360) % 360;
         
-        // Constant pursuit with dynamic speed adjustments
-        // Increased max speed to 0.02 to ensure we catch fast-rotating radars
+        // Pursuit Logic
+        let sweepSpeed = 0.009; // Base speed
         if (diff > 5) {
-            sweepSpeed = 0.020; 
+            sweepSpeed = 0.012; // Catch up
         } else if (diff < 2) {
-            sweepSpeed = 0.007; 
-        } else {
-            sweepSpeed = 0.010; 
+            sweepSpeed = 0.007; // Slow down to match
         }
 
         currentAngle += sweepSpeed * dt;
@@ -1598,9 +1591,8 @@ const RadarCanvasLayer = L.Layer.extend({
         else if (currentLiveMode === 'debris') { momentKey = 'debris'; }
         
         const scale = COLOR_SCALES[momentKey];
-        const arcWidthRad = ( (360 / 720) * Math.PI / 180) * 2.5; 
+        const arcWidthRad = ( (360 / 720) * Math.PI / 180) * 2.2;
         const gateStep = 1;
-
         const azimuth = (90 - radial.azimuth) * Math.PI / 180;
         ctx.save();
         ctx.translate(center.x, center.y);
@@ -1674,6 +1666,26 @@ const RadarCanvasLayer = L.Layer.extend({
         ctx.lineTo(center.x, center.y);
         ctx.fill();
         ctx.restore();
+
+        // DRAW FRESH RADIALS IN THE SWEEP PATH
+        if (!liveRadarData || !liveRadarData.radialsMap) return;
+        
+        const now = Date.now();
+        for (const [roundedAz, radial] of liveRadarData.radialsMap) {
+            let isInside = false;
+            if (startAz <= endAz) {
+                isInside = (roundedAz >= startAz && roundedAz <= endAz);
+            } else {
+                isInside = (roundedAz >= startAz || roundedAz <= endAz);
+            }
+
+            if (isInside) {
+                const isDataFresh = (now - radial.timestamp) < 300000; // 5 minutes
+                if (isDataFresh) {
+                    this._drawRadialToOffscreen(radial);
+                }
+            }
+        }
     },
     _draw: function() {
         if (!this._topLeft || !this._container || !this._offscreenCanvas || !this._cachedCenter) return;
