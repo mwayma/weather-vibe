@@ -720,6 +720,9 @@ let liveRadarData = null;
 let liveScanInterval = null;
 let liveDataRefreshInterval = null;
 let liveCanvasLayer = null;
+let targetAzimuth = 0;
+let currentAngle = 0;
+let lastSweepTime = performance.now();
 
 let socket = null;
 function initWebSocket() {
@@ -788,6 +791,9 @@ function initWebSocket() {
             if (message.stationId && message.stationId !== currentStationId) return;
 
             console.log('Received real-time update:', message.chunk);
+            if (message.latestAzimuth !== undefined) {
+                targetAzimuth = message.latestAzimuth;
+            }
             mergeRealTimeData(message.data);
         } else if (message.type === 'clear_data') {
             console.log('Server requested data clear (New Volume) - ignoring to persist display');
@@ -1347,6 +1353,9 @@ function startLiveTracking() {
 
     // CRITICAL: Clear existing data to prevent geo-contamination
     liveRadarData = null;
+    currentAngle = 0;
+    targetAzimuth = 0;
+    lastSweepTime = performance.now();
     if (liveCanvasLayer) {
         liveCanvasLayer._needsFullRedraw = true;
         if (liveCanvasLayer._offscreenCtx) {
@@ -1371,11 +1380,13 @@ function startLiveTracking() {
     if (liveDataRefreshInterval) clearInterval(liveDataRefreshInterval);
 
     function animateSweep() {
-        // Sync sweep to 1 RPM (6 degrees per second) with a lag buffer
-        const SWEEP_BUFFER_MS = 20000; // 20s lag buffer to ensure data availability
-        const replayTime = Date.now() - SWEEP_BUFFER_MS;
-        const secondsInMinute = (replayTime / 1000) % 60;
-        const currentAngle = secondsInMinute * 6; 
+        const now = performance.now();
+        const dt = now - lastSweepTime;
+        lastSweepTime = now;
+
+        const diff = (targetAzimuth - currentAngle + 360) % 360;
+        currentAngle += (0.009 + (diff * 0.0005)) * dt;
+        currentAngle %= 360;
         
         window.currentScanAzimuth = currentAngle;
         
@@ -1484,15 +1495,13 @@ const RadarCanvasLayer = L.Layer.extend({
 
         const azArray = liveRadarData.azimuths;
         const angularRes = 360 / azArray.length;
-        const arcWidthRad = (angularRes * Math.PI / 180) * 2.2; // Significant overlap for smoothness
-        const zoom = map.getZoom();
+        const arcWidthRad = (angularRes * Math.PI / 180) * 2.2; 
         const gateStep = 1; 
         const scale = COLOR_SCALES[momentKey];
 
         ctx.save();
         ctx.scale(dpr, dpr);
         ctx.translate(center.x, center.y);
-        ctx.globalAlpha = 1.0;
         ctx.lineJoin = 'round';
         ctx.lineCap = 'round';
 
@@ -1506,6 +1515,14 @@ const RadarCanvasLayer = L.Layer.extend({
             
             if (!liveRadarData.revealedUpdate || !liveRadarData.revealedUpdate[i]) continue;
             if (!moment || !moment.moment_data) continue;
+
+            // Calculate persistence alpha based on distance from currentAngle
+            const angularDiff = Math.abs((radialAz - currentAngle + 540) % 360 - 180);
+            let alpha = 0.9;
+            if (angularDiff > 30) {
+                alpha = 0.9 - ((angularDiff - 30) / (180 - 30)) * (0.9 - 0.4);
+            }
+            ctx.globalAlpha = Math.max(0, alpha);
 
             const azimuth = (90 - radialAz) * Math.PI / 180;
             ctx.save();
@@ -1666,9 +1683,8 @@ const RadarCanvasLayer = L.Layer.extend({
         const center = { x: centerLayer.x - this._topLeft.x, y: centerLayer.y - this._topLeft.y };
         const pixelsPerKm = this._getPixelsPerKm(station.lat, station.lon);
 
-        if (this._needsFullRedraw) {
-            this._renderFull(center, pixelsPerKm);
-        }
+        // Always redraw full to apply the alpha persistence gradient synchronously with sweep
+        this._renderFull(center, pixelsPerKm);
 
         ctx.clearRect(0, 0, this._container.width, this._container.height);
         ctx.drawImage(this._offscreenCanvas, 0, 0);

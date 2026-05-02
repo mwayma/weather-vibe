@@ -285,7 +285,8 @@ async function pollChunks(stationId) {
                                         type: 'radial_update', 
                                         stationId: stationId,
                                         data: extracted, 
-                                        chunk: chunkId 
+                                        chunk: chunkId,
+                                        latestAzimuth: extracted.azimuths[extracted.azimuths.length - 1]
                                     });
                                 }
                             // Mark as processed
