@@ -1588,7 +1588,7 @@ const RadarCanvasLayer = L.Layer.extend({
         ctx.beginPath();
         ctx.moveTo(0, 0);
         const clearStartRad = (endAz - 90) * Math.PI / 180;
-        const clearEndRad = (endAz - 80) * Math.PI / 180; // Clear 10 degrees ahead
+        const clearEndRad = (endAz - 88) * Math.PI / 180; // Clear 2 degrees ahead (minimal gap)
         ctx.arc(0, 0, 460 * pixelsPerKm, clearStartRad, clearEndRad);
         ctx.lineTo(0, 0);
         ctx.fill();
