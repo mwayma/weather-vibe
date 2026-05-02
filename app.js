@@ -736,8 +736,19 @@ function initWebSocket() {
 
     socket.onmessage = (event) => {
         const message = JSON.parse(event.data);
+        
+        // 4-letter normalization for verification
+        let currentStationId = selectedRadarId;
+        if (currentStationId && currentStationId.length === 3) currentStationId = 'K' + currentStationId;
+
         if (message.type === 'initial_state') {
-            console.log('Received initial state from server');
+            // Verify stationId to prevent cross-session contamination
+            if (message.stationId && message.stationId !== currentStationId) {
+                console.warn('Ignoring initial_state for mismatched station:', message.stationId);
+                return;
+            }
+
+            console.log('Received initial state for', message.stationId);
             liveRadarData = message.data;
             if (liveRadarData) {
                 // Initialize metadata arrays if missing
@@ -745,8 +756,8 @@ function initWebSocket() {
                     liveRadarData.lastUpdated = new Array(liveRadarData.azimuths.length).fill(Date.now());
                 }
                 if (!liveRadarData.revealedUpdate) {
-                    // Start with everything revealed to avoid "black screen" on load
-                    liveRadarData.revealedUpdate = [...liveRadarData.lastUpdated];
+                    // Mark as already revealed so initial state is visible immediately
+                    liveRadarData.revealedUpdate = new Array(liveRadarData.azimuths.length).fill(1);
                 }
                 if (!liveRadarData.timestamps) {
                     liveRadarData.timestamps = [...liveRadarData.lastUpdated];
@@ -773,7 +784,10 @@ function initWebSocket() {
             }
             renderLiveRadar();
         } else if (message.type === 'radial_update') {
-            console.log('Received real-time radial update:', message.chunk);
+            // Verify stationId
+            if (message.stationId && message.stationId !== currentStationId) return;
+
+            console.log('Received real-time update:', message.chunk);
             mergeRealTimeData(message.data);
         } else if (message.type === 'clear_data') {
             console.log('Server requested data clear (New Volume) - ignoring to persist display');
@@ -1331,6 +1345,15 @@ function startLiveTracking() {
         socket.send(JSON.stringify({ action: 'subscribe', station: stationId }));
     }
 
+    // CRITICAL: Clear existing data to prevent geo-contamination
+    liveRadarData = null;
+    if (liveCanvasLayer) {
+        liveCanvasLayer._needsFullRedraw = true;
+        if (liveCanvasLayer._offscreenCtx) {
+            liveCanvasLayer._offscreenCtx.clearRect(0, 0, liveCanvasLayer._offscreenCanvas.width, liveCanvasLayer._offscreenCanvas.height);
+        }
+    }
+
     const station = NEXRAD_STATIONS.find(s => s.id === selectedRadarId);
     if (!station) return;
 
@@ -1449,9 +1472,9 @@ const RadarCanvasLayer = L.Layer.extend({
 
         const azArray = liveRadarData.azimuths;
         const angularRes = 360 / azArray.length;
-        const arcWidthRad = (angularRes * Math.PI / 180) * 1.1; // Reduced multiplier for better precision
+        const arcWidthRad = (angularRes * Math.PI / 180) * 1.5; // Increased overlap for persistence
         const zoom = map.getZoom();
-        const gateStep = zoom < 7 ? 4 : (zoom < 9 ? 2 : 1);
+        const gateStep = 1; // Force maximum resolution for live tracking
         const scale = COLOR_SCALES[momentKey];
 
         ctx.save();
@@ -1460,7 +1483,7 @@ const RadarCanvasLayer = L.Layer.extend({
         ctx.globalAlpha = 1.0;
 
         if (!liveRadarData.revealedUpdate) {
-            liveRadarData.revealedUpdate = new Array(azArray.length).fill(0);
+            liveRadarData.revealedUpdate = new Array(azArray.length).fill(1);
         }
 
         for (let i = 0; i < azArray.length; i++) {
@@ -1491,11 +1514,14 @@ const RadarCanvasLayer = L.Layer.extend({
                         const r1 = (firstGateActual + startJ * gateSizeKm) * pixelsPerKm;
                         const r2 = (firstGateActual + j * gateSizeKm) * pixelsPerKm;
                         ctx.fillStyle = currentColor;
+                        ctx.strokeStyle = currentColor;
+                        ctx.lineWidth = 0.5; // Subtle bleed for anti-aliasing
                         ctx.beginPath();
                         ctx.arc(0, 0, r1, -arcWidthRad/2, arcWidthRad/2);
                         ctx.arc(0, 0, r2, arcWidthRad/2, -arcWidthRad/2, true);
                         ctx.closePath();
                         ctx.fill();
+                        ctx.stroke();
                     }
                     currentColor = color;
                     startJ = j;
@@ -1531,9 +1557,9 @@ const RadarCanvasLayer = L.Layer.extend({
 
         const azArray = liveRadarData.azimuths;
         const angularRes = 360 / azArray.length;
-        const arcWidthRad = (angularRes * Math.PI / 180) * 1.2; // Slightly more overlap for persistence
+        const arcWidthRad = (angularRes * Math.PI / 180) * 1.5; // Slightly more overlap for persistence
         const zoom = map.getZoom();
-        const gateStep = zoom < 7 ? 4 : (zoom < 9 ? 2 : 1);
+        const gateStep = 1; // Max detail
         const scale = COLOR_SCALES[momentKey];
 
         ctx.save();
@@ -1593,11 +1619,14 @@ const RadarCanvasLayer = L.Layer.extend({
                             const r1 = (firstGateActual + startJ * gateSizeKm) * pixelsPerKm;
                             const r2 = (firstGateActual + j * gateSizeKm) * pixelsPerKm;
                             ctx.fillStyle = currentColor;
+                            ctx.strokeStyle = currentColor;
+                            ctx.lineWidth = 0.5;
                             ctx.beginPath();
                             ctx.arc(0, 0, r1, -arcWidthRad/2, arcWidthRad/2);
                             ctx.arc(0, 0, r2, arcWidthRad/2, -arcWidthRad/2, true);
                             ctx.closePath();
                             ctx.fill();
+                            ctx.stroke();
                         }
                         currentColor = color;
                         startJ = j;

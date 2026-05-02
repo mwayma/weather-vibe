@@ -279,14 +279,15 @@ async function pollChunks(stationId) {
 
                             const parsed = new Level2Radar(combinedBuffer);
                             const extracted = extractRadialData(parsed, stationId, chunkId);
-                            if (extracted && extracted.azimuths.length > 0) {
-                                mergeRealTimeData(stationId, extracted);
-                                broadcast(stationId, { 
-                                    type: 'radial_update', 
-                                    data: extracted, 
-                                    chunk: chunkId 
-                                });
-                            }
+                                if (extracted && extracted.azimuths.length > 0) {
+                                    mergeRealTimeData(stationId, extracted);
+                                    broadcast(stationId, { 
+                                        type: 'radial_update', 
+                                        stationId: stationId,
+                                        data: extracted, 
+                                        chunk: chunkId 
+                                    });
+                                }
                             // Mark as processed
                             state.processedChunks.add(chunk.Key);
                             
@@ -424,7 +425,11 @@ wss.on('connection', (ws) => {
 
                 // 1. ALWAYS send initial state if we have it in the cache
                 if (stationCache.has(stationId)) {
-                    ws.send(JSON.stringify({ type: 'initial_state', data: getConsolidatedData(stationId) }));
+                    ws.send(JSON.stringify({ 
+                        type: 'initial_state', 
+                        stationId: stationId,
+                        data: getConsolidatedData(stationId) 
+                    }));
                 }
 
                 // 2. Start or trigger the poller
