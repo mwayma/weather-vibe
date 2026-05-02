@@ -740,12 +740,36 @@ function initWebSocket() {
             console.log('Received initial state from server');
             liveRadarData = message.data;
             if (liveRadarData) {
+                // Initialize metadata arrays if missing
                 if (!liveRadarData.lastUpdated) {
                     liveRadarData.lastUpdated = new Array(liveRadarData.azimuths.length).fill(Date.now());
                 }
                 if (!liveRadarData.revealedUpdate) {
+                    // Mark as 0 so the sweep can "reveal" it for the first time
                     liveRadarData.revealedUpdate = new Array(liveRadarData.azimuths.length).fill(0);
                 }
+                if (!liveRadarData.timestamps) {
+                    liveRadarData.timestamps = [...liveRadarData.lastUpdated];
+                }
+                
+                // Build the radialsMap for future incremental updates
+                liveRadarData.radialsMap = new Map();
+                liveRadarData.azimuths.forEach((az, i) => {
+                    const rounded = Math.round(az * 10) / 10;
+                    const radialElevations = {};
+                    for (const [e, products] of Object.entries(liveRadarData.elevations)) {
+                        radialElevations[e] = {};
+                        for (const [product, moments] of Object.entries(products)) {
+                            radialElevations[e][product] = moments[i];
+                        }
+                    }
+                    liveRadarData.radialsMap.set(rounded, {
+                        azimuth: az,
+                        timestamp: liveRadarData.timestamps[i],
+                        revealedUpdate: liveRadarData.revealedUpdate[i],
+                        elevations: radialElevations
+                    });
+                });
             }
             renderLiveRadar();
         } else if (message.type === 'radial_update') {
@@ -778,84 +802,84 @@ function initWebSocket() {
 function mergeRealTimeData(newData) {
     if (!liveRadarData) {
         console.log('Initializing liveRadarData with real-time update');
-        liveRadarData = newData;
-        if (!liveRadarData.lastUpdated) {
-            liveRadarData.lastUpdated = new Array(liveRadarData.azimuths.length).fill(Date.now());
-        }
-        if (!liveRadarData.revealedUpdate) {
-            liveRadarData.revealedUpdate = new Array(liveRadarData.azimuths.length).fill(0);
-        }
-        renderLiveRadar();
-        return;
+        liveRadarData = {
+            radialsMap: new Map(), // roundedAz -> { azimuth, timestamp, revealedUpdate, elevations }
+            azimuths: [],
+            lastUpdated: [],
+            revealedUpdate: [],
+            timestamps: [],
+            elevations: {}
+        };
     }
 
-    let addedCount = 0;
-    let updatedCount = 0;
+    if (!liveRadarData.radialsMap) {
+        liveRadarData.radialsMap = new Map();
+        // Migrating existing arrays to map if needed (unlikely in normal flow)
+        liveRadarData.azimuths.forEach((az, i) => {
+            const rounded = Math.round(az * 10) / 10;
+            liveRadarData.radialsMap.set(rounded, {
+                azimuth: az,
+                timestamp: liveRadarData.timestamps ? liveRadarData.timestamps[i] : Date.now(),
+                revealedUpdate: liveRadarData.revealedUpdate ? liveRadarData.revealedUpdate[i] : 0,
+                elevations: {} // populate if needed
+            });
+        });
+    }
 
+    const now = Date.now();
     newData.azimuths.forEach((az, i) => {
         const roundedAz = Math.round(az * 10) / 10;
-        const existingIdx = liveRadarData.azimuths.findIndex(a => Math.round(a * 10) / 10 === roundedAz);
-        
-        const now = newData.timestamps ? newData.timestamps[i] : Date.now();
+        const timestamp = newData.timestamps ? newData.timestamps[i] : now;
 
-        if (existingIdx !== -1) {
-            liveRadarData.lastUpdated[existingIdx] = now;
-            if (newData.timestamps) liveRadarData.timestamps[existingIdx] = newData.timestamps[i];
-            
-            for (const [e, elevations] of Object.entries(newData.elevations)) {
-                for (const [product, moments] of Object.entries(elevations)) {
-                    if (liveRadarData.elevations[e] && liveRadarData.elevations[e][product]) {
-                        liveRadarData.elevations[e][product][existingIdx] = moments[i];
-                    }
-                }
+        if (!liveRadarData.radialsMap.has(roundedAz)) {
+            liveRadarData.radialsMap.set(roundedAz, {
+                azimuth: az,
+                timestamp: timestamp,
+                revealedUpdate: 0,
+                elevations: {}
+            });
+        }
+
+        const radial = liveRadarData.radialsMap.get(roundedAz);
+        radial.timestamp = timestamp;
+
+        for (const [e, elevations] of Object.entries(newData.elevations)) {
+            if (!radial.elevations[e]) radial.elevations[e] = {};
+            for (const [product, moments] of Object.entries(elevations)) {
+                radial.elevations[e][product] = moments[i];
             }
-            updatedCount++;
-        } else {
-            liveRadarData.azimuths.push(az);
-            liveRadarData.lastUpdated.push(now);
-            liveRadarData.revealedUpdate.push(0);
-            if (newData.timestamps) {
-                if (!liveRadarData.timestamps) liveRadarData.timestamps = [];
-                liveRadarData.timestamps.push(newData.timestamps[i]);
-            }
-            
-            for (const [e, elevations] of Object.entries(newData.elevations)) {
-                for (const [product, moments] of Object.entries(elevations)) {
-                    if (liveRadarData.elevations[e] && liveRadarData.elevations[e][product]) {
-                        liveRadarData.elevations[e][product].push(moments[i]);
-                    }
-                }
-            }
-            addedCount++;
         }
     });
 
-    if (liveCanvasLayer) {
-        // OPTIMIZATION: Keep azimuths sorted for consistent rendering order
-        const indices = liveRadarData.azimuths.map((_, i) => i);
-        indices.sort((a, b) => liveRadarData.azimuths[a] - liveRadarData.azimuths[b]);
-        
-        const sortedAz = indices.map(i => liveRadarData.azimuths[i]);
-        const sortedLu = indices.map(i => liveRadarData.lastUpdated[i]);
-        const sortedRu = indices.map(i => liveRadarData.revealedUpdate[i]);
-        const sortedTs = liveRadarData.timestamps ? indices.map(i => liveRadarData.timestamps[i]) : null;
-        
-        const sortedElevations = {};
-        for (const [e, products] of Object.entries(liveRadarData.elevations)) {
-            sortedElevations[e] = {};
-            for (const [product, moments] of Object.entries(products)) {
-                sortedElevations[e][product] = indices.map(i => moments[i]);
+    syncLiveRadarArrays();
+}
+
+function syncLiveRadarArrays() {
+    if (!liveRadarData || !liveRadarData.radialsMap) return;
+
+    const sortedAzKeys = Array.from(liveRadarData.radialsMap.keys()).sort((a, b) => a - b);
+    
+    liveRadarData.azimuths = [];
+    liveRadarData.lastUpdated = [];
+    liveRadarData.revealedUpdate = [];
+    liveRadarData.timestamps = [];
+    liveRadarData.elevations = {};
+
+    sortedAzKeys.forEach(key => {
+        const radial = liveRadarData.radialsMap.get(key);
+        liveRadarData.azimuths.push(radial.azimuth);
+        liveRadarData.lastUpdated.push(radial.timestamp);
+        liveRadarData.revealedUpdate.push(radial.revealedUpdate);
+        liveRadarData.timestamps.push(radial.timestamp);
+
+        for (const [e, products] of Object.entries(radial.elevations)) {
+            if (!liveRadarData.elevations[e]) liveRadarData.elevations[e] = {};
+            for (const [product, moment] of Object.entries(products)) {
+                if (!liveRadarData.elevations[e][product]) liveRadarData.elevations[e][product] = [];
+                liveRadarData.elevations[e][product].push(moment);
             }
         }
-        
-        liveRadarData.azimuths = sortedAz;
-        liveRadarData.lastUpdated = sortedLu;
-        liveRadarData.revealedUpdate = sortedRu;
-        if (sortedTs) liveRadarData.timestamps = sortedTs;
-        liveRadarData.elevations = sortedElevations;
-        
-        // The incremental sweep will pick up the new data as it passes each azimuth.
-    }
+    });
 }
 
 initWebSocket();

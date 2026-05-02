@@ -34,92 +34,88 @@ function sendStatus(stationId, message) {
 
 function mergeRealTimeData(stationId, newData) {
     if (!stationCache.has(stationId)) {
-        // Deep copy the initial state to prevent mutating the original reference if needed
-        stationCache.set(stationId, JSON.parse(JSON.stringify(newData)));
-        return;
+        // Initialize with fixed-size structure for O(1) access
+        // We use a Map keyed by rounded azimuth (1 decimal place)
+        const initialState = {
+            radials: new Map(), // roundedAz -> { timestamp, elevations: { e: { product: moments } } }
+            stationId: stationId
+        };
+        stationCache.set(stationId, initialState);
     }
 
-    const liveRadarData = stationCache.get(stationId);
+    const state = stationCache.get(stationId);
     
     newData.azimuths.forEach((az, i) => {
         const roundedAz = Math.round(az * 10) / 10;
-        const existingIdx = liveRadarData.azimuths.findIndex(a => Math.round(a * 10) / 10 === roundedAz);
+        const timestamp = newData.timestamps ? newData.timestamps[i] : Date.now();
         
-        if (existingIdx !== -1) {
-            // Update timestamp
-            if (newData.timestamps && newData.timestamps[i]) {
-                liveRadarData.timestamps[existingIdx] = newData.timestamps[i];
+        if (!state.radials.has(roundedAz)) {
+            state.radials.set(roundedAz, {
+                azimuth: az,
+                timestamp: timestamp,
+                elevations: {}
+            });
+        }
+        
+        const radial = state.radials.get(roundedAz);
+        radial.timestamp = timestamp; // Update to latest
+
+        for (const [e, elevations] of Object.entries(newData.elevations)) {
+            if (!radial.elevations[e]) radial.elevations[e] = {};
+            for (const [product, moments] of Object.entries(elevations)) {
+                radial.elevations[e][product] = moments[i];
             }
-            for (const [e, elevations] of Object.entries(newData.elevations)) {
-                for (const [product, moments] of Object.entries(elevations)) {
-                    if (liveRadarData.elevations[e] && liveRadarData.elevations[e][product]) {
-                        liveRadarData.elevations[e][product][existingIdx] = moments[i];
-                    }
-                }
-            }
-        } else {
-            // Add new azimuth and keep arrays synchronized
-            liveRadarData.azimuths.push(az);
-            if (newData.timestamps && newData.timestamps[i]) {
-                if (!liveRadarData.timestamps) liveRadarData.timestamps = [];
-                liveRadarData.timestamps.push(newData.timestamps[i]);
-            } else if (liveRadarData.timestamps) {
-                liveRadarData.timestamps.push(Date.now());
-            }
-            
-            for (const [e, elevations] of Object.entries(newData.elevations)) {
-                for (const [product, moments] of Object.entries(elevations)) {
-                    if (liveRadarData.elevations[e] && liveRadarData.elevations[e][product]) {
-                        liveRadarData.elevations[e][product].push(moments[i]);
-                    }
-                }
+        }
+    });
+}
+
+// Helper to convert the Map-based cache to the flat format the client expects
+function getConsolidatedData(stationId) {
+    const state = stationCache.get(stationId);
+    if (!state) return null;
+
+    const sortedAzimuths = Array.from(state.radials.keys()).sort((a, b) => a - b);
+    
+    const result = {
+        azimuths: [],
+        timestamps: [],
+        elevations: {}
+    };
+
+    sortedAzimuths.forEach(az => {
+        const radial = state.radials.get(az);
+        result.azimuths.push(radial.azimuth);
+        result.timestamps.push(radial.timestamp);
+        
+        for (const [e, products] of Object.entries(radial.elevations)) {
+            if (!result.elevations[e]) result.elevations[e] = {};
+            for (const [product, moment] of Object.entries(products)) {
+                if (!result.elevations[e][product]) result.elevations[e][product] = [];
+                result.elevations[e][product].push(moment);
             }
         }
     });
 
-    // OPTIMIZATION: Keep azimuths sorted to allow for faster range searches in the client
-    const indices = liveRadarData.azimuths.map((_, i) => i);
-    indices.sort((a, b) => liveRadarData.azimuths[a] - liveRadarData.azimuths[b]);
-    
-    const sortedAz = indices.map(i => liveRadarData.azimuths[i]);
-    const sortedTs = liveRadarData.timestamps ? indices.map(i => liveRadarData.timestamps[i]) : null;
-    
-    const sortedElevations = {};
-    for (const [e, products] of Object.entries(liveRadarData.elevations)) {
-        sortedElevations[e] = {};
-        for (const [product, moments] of Object.entries(products)) {
-            sortedElevations[e][product] = indices.map(i => moments[i]);
-        }
-    }
-    
-    liveRadarData.azimuths = sortedAz;
-    if (sortedTs) liveRadarData.timestamps = sortedTs;
-    liveRadarData.elevations = sortedElevations;
+    return result;
 }
 
 async function pollChunks(stationId) {
-    // Ensure stationId is 4 letters (ICAO code)
     if (stationId.length === 3) stationId = 'K' + stationId;
-    
     if (pollingLocks.has(stationId)) return;
     pollingLocks.add(stationId);
     
     try {
-        // Step 1: List volume folders (e.g., KJAX/988/, KJAX/989/, ...)
         const listVolUrl = `${BUCKET_URL}/?list-type=2&prefix=${stationId}/&delimiter=/`;
         const volRes = await fetch(listVolUrl);
-        const volText = await volRes.text();
-        const volJson = parser.parse(volText);
+        const volJson = parser.parse(await volRes.text());
         
         let commonPrefixes = volJson.ListBucketResult.CommonPrefixes;
         if (!commonPrefixes) return;
         if (!Array.isArray(commonPrefixes)) commonPrefixes = [commonPrefixes];
 
-        // Filter for numeric volume folders (e.g. KJAX/988/)
         commonPrefixes = commonPrefixes.filter(p => /^[A-Z0-9]{4}\/\d+\/$/.test(p.Prefix));
         if (commonPrefixes.length === 0) return;
 
-        // Sort by volume number (numerically if possible, otherwise lexicographically)
         commonPrefixes.sort((a, b) => {
             const numA = parseInt(a.Prefix.split('/')[1]);
             const numB = parseInt(b.Prefix.split('/')[1]);
@@ -129,27 +125,21 @@ async function pollChunks(stationId) {
         const latestVolPrefix = commonPrefixes[commonPrefixes.length - 1].Prefix;
         let state = stationState.get(stationId) || { lastVolume: null, lastChunkKey: null, headerChunk: null };
 
-        // Step 2: List chunks within the latest volume folder
         const listChunksUrl = `${BUCKET_URL}/?list-type=2&prefix=${latestVolPrefix}`;
         const chunkRes = await fetch(listChunksUrl);
-        const chunkText = await chunkRes.text();
-        const chunkJson = parser.parse(chunkText);
+        const chunkJson = parser.parse(await chunkRes.text());
         
         let contents = chunkJson.ListBucketResult.Contents;
         if (!contents) return;
         if (!Array.isArray(contents)) contents = [contents];
-
-        // Sort lexicographically to ensure chronological order of chunks
         contents.sort((a, b) => a.Key.localeCompare(b.Key));
         
-        // Volume transition: we identify volume by the folder prefix AND the timestamp in the first chunk
         const firstChunkKey = contents[0].Key;
         const timestampMatch = firstChunkKey.match(/(\d{8}-\d{6})/);
         const volumeId = latestVolPrefix + (timestampMatch ? timestampMatch[1] : '');
 
         if (volumeId !== state.lastVolume) {
-            console.log(`[${stationId}] New volume detected: ${volumeId}`);
-            sendStatus(stationId, `New volume: ${volumeId.split('/').pop()}`);
+            console.log(`[${stationId}] New volume: ${volumeId}`);
             stationCache.delete(stationId);
             broadcast(stationId, { type: 'clear_data' });
             state.lastVolume = volumeId;
@@ -158,57 +148,55 @@ async function pollChunks(stationId) {
             stationState.set(stationId, state);
         }
 
-        // Find chunks we haven't seen yet
         const unseen = contents.filter(c => !state.lastChunkKey || c.Key.localeCompare(state.lastChunkKey) > 0);
 
         if (unseen.length > 0) {
-            console.log(`[${stationId}] Processing ${unseen.length} new chunks in ${latestVolPrefix}`);
-            
-            // Ensure we have the header chunk for this volume
             if (!state.headerChunk) {
                 const headerKey = contents.find(c => c.Key.includes('-001-S'))?.Key;
                 if (headerKey) {
-                    console.log(`[${stationId}] Fetching header chunk: ${headerKey}`);
                     const hRes = await fetch(`${BUCKET_URL}/${headerKey}`);
                     state.headerChunk = await hRes.arrayBuffer();
                 }
             }
 
-            for (const chunk of unseen) {
-                const chunkId = chunk.Key.split('/').pop();
-                const dataRes = await fetch(`${BUCKET_URL}/${chunk.Key}`);
-                const chunkBuffer = await dataRes.arrayBuffer();
-                
-                try {
-                    let combinedBuffer;
-                    if (state.headerChunk && !chunk.Key.includes('-001-S')) {
-                        combinedBuffer = Buffer.concat([
-                            Buffer.from(state.headerChunk),
-                            Buffer.from(chunkBuffer)
-                        ]);
-                    } else {
-                        combinedBuffer = Buffer.from(chunkBuffer);
-                    }
+            // Parallel fetch and parse with concurrency limit
+            const CONCURRENCY = 5;
+            for (let i = 0; i < unseen.length; i += CONCURRENCY) {
+                const batch = unseen.slice(i, i + CONCURRENCY);
+                await Promise.all(batch.map(async (chunk) => {
+                    try {
+                        const chunkId = chunk.Key.split('/').pop();
+                        const dataRes = await fetch(`${BUCKET_URL}/${chunk.Key}`);
+                        const chunkBuffer = await dataRes.arrayBuffer();
+                        
+                        let combinedBuffer;
+                        if (state.headerChunk && !chunk.Key.includes('-001-S')) {
+                            combinedBuffer = Buffer.concat([Buffer.from(state.headerChunk), Buffer.from(chunkBuffer)]);
+                        } else {
+                            combinedBuffer = Buffer.from(chunkBuffer);
+                        }
 
-                    const parsed = new Level2Radar(combinedBuffer);
-                    const extracted = extractRadialData(parsed);
-                    if (extracted && extracted.azimuths.length > 0) {
-                        mergeRealTimeData(stationId, extracted);
-                        broadcast(stationId, { 
-                            type: 'radial_update', 
-                            data: extracted, 
-                            chunk: chunkId 
-                        });
+                        const parsed = new Level2Radar(combinedBuffer);
+                        const extracted = extractRadialData(parsed);
+                        if (extracted && extracted.azimuths.length > 0) {
+                            mergeRealTimeData(stationId, extracted);
+                            // Send the extracted radial directly to client
+                            broadcast(stationId, { 
+                                type: 'radial_update', 
+                                data: extracted, 
+                                chunk: chunkId 
+                            });
+                        }
+                    } catch (e) {
+                        console.warn(`[${stationId}] Chunk error (${chunk.Key}): ${e.message}`);
                     }
-                } catch (e) {
-                    console.warn(`[${stationId}] Chunk parse error (${chunkId}): ${e.message}`);
-                }
+                }));
             }
             state.lastChunkKey = unseen[unseen.length - 1].Key;
             stationState.set(stationId, state);
         }
     } catch (e) {
-        console.error(`Error polling chunks for ${stationId}:`, e.message);
+        console.error(`Error polling ${stationId}:`, e.message);
     } finally {
         pollingLocks.delete(stationId);
     }
@@ -312,7 +300,7 @@ wss.on('connection', (ws) => {
                     activePollers.set(stationId, poller);
                     pollChunks(stationId);
                 } else if (stationCache.has(stationId)) {
-                    ws.send(JSON.stringify({ type: 'initial_state', data: stationCache.get(stationId) }));
+                    ws.send(JSON.stringify({ type: 'initial_state', data: getConsolidatedData(stationId) }));
                 }
                 
                 ws.send(JSON.stringify({ type: 'status', message: `Subscribed to real-time chunks for ${stationId}` }));
