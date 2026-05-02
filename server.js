@@ -176,7 +176,8 @@ async function pollChunks(stationId) {
                 state.lastVolume = volumeId;
                 state.lastChunkKey = null; 
                 state.headerChunk = null;
-                state.processedChunks.clear(); // Clear seen chunks for the new volume
+                // DO NOT clear processedChunks here, we want to maintain the "seen" list 
+                // to avoid re-processing the tail of the previous volume.
                 stationState.set(stationId, state);
             }
 
@@ -225,11 +226,16 @@ async function pollChunks(stationId) {
                                     chunk: chunkId 
                                 });
                             }
-                            // Mark as processed only after successful broadcast
+                            // Mark as processed
                             state.processedChunks.add(chunk.Key);
+                            
+                            // Prevent memory leak by capping Set size
+                            if (state.processedChunks.size > 1000) {
+                                const firstKey = state.processedChunks.values().next().value;
+                                state.processedChunks.delete(firstKey);
+                            }
                         } catch (e) {
                             console.warn(`[${stationId}] Chunk ${chunk.Key} error: ${e.message}`);
-                            // Still mark as processed to avoid infinite retry loops on corrupt chunks
                             state.processedChunks.add(chunk.Key);
                         }
                     }));
