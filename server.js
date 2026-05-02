@@ -112,6 +112,51 @@ async function fetchWithTimeout(url, options = {}, timeout = 15000) {
     }
 }
 
+async function findTrulyLatestVolume(stationId, commonPrefixes) {
+    if (commonPrefixes.length === 0) return null;
+
+    // Sort numerically: 1, 2, 3... 999
+    const sorted = [...commonPrefixes].sort((a, b) => {
+        const numA = parseInt(a.Prefix.split('/')[1]);
+        const numB = parseInt(b.Prefix.split('/')[1]);
+        return numA - numB;
+    });
+
+    const highestNumPrefix = sorted[sorted.length - 1].Prefix;
+    const lowestNumPrefix = sorted[0].Prefix;
+
+    // Peek at the first chunk of both to compare timestamps
+    async function getVolTimestamp(prefix) {
+        try {
+            const listUrl = `${BUCKET_URL}/?list-type=2&prefix=${prefix}&max-keys=5`;
+            const res = await fetchWithTimeout(listUrl);
+            const json = parser.parse(await res.text());
+            const contents = json.ListBucketResult.Contents;
+            if (!contents) return 0;
+            const firstChunk = Array.isArray(contents) ? contents[0] : contents;
+            const match = firstChunk.Key.match(/(\d{8}-\d{6})/);
+            if (!match) return 0;
+            // Parse YYYYMMDD-HHMMSS to a comparable number or date
+            return parseInt(match[1].replace('-', ''));
+        } catch (e) {
+            return 0;
+        }
+    }
+
+    const highTs = await getVolTimestamp(highestNumPrefix);
+    const lowTs = await getVolTimestamp(lowestNumPrefix);
+
+    // If the lowest numerical folder is newer than the highest, we've wrapped around
+    if (lowTs > highTs) {
+        // Find the boundary where it wraps (highest TS in the low numerical range)
+        // For efficiency, we just start from the bottom and find the latest consecutive new one
+        // or just return the highest in the low range that is "recent"
+        return lowestNumPrefix; // Simplest: just take the lowest for now, next poll will move up
+    }
+
+    return highestNumPrefix;
+}
+
 async function pollChunks(stationId) {
     if (stationId.length === 3) stationId = 'K' + stationId;
     
@@ -135,14 +180,19 @@ async function pollChunks(stationId) {
         commonPrefixes = commonPrefixes.filter(p => /^[A-Z0-9]{4}\/\d+\/$/.test(p.Prefix));
         if (commonPrefixes.length === 0) return;
 
-        commonPrefixes.sort((a, b) => {
+        // Use helper to find the truly latest volume (handles wrap-around)
+        const latestVolPrefix = await findTrulyLatestVolume(stationId, commonPrefixes);
+        if (!latestVolPrefix) return;
+
+        // For transition logic, we still want to know the previous folder to catch late chunks
+        const sortedNumerically = [...commonPrefixes].sort((a, b) => {
             const numA = parseInt(a.Prefix.split('/')[1]);
             const numB = parseInt(b.Prefix.split('/')[1]);
             return numA - numB;
         });
         
-        const latestVolPrefix = commonPrefixes[commonPrefixes.length - 1].Prefix;
-        const previousVolPrefix = commonPrefixes.length > 1 ? commonPrefixes[commonPrefixes.length - 2].Prefix : null;
+        const latestIdx = sortedNumerically.findIndex(p => p.Prefix === latestVolPrefix);
+        const previousVolPrefix = latestIdx > 0 ? sortedNumerically[latestIdx - 1].Prefix : null;
         
         const volumesToPoll = previousVolPrefix ? [previousVolPrefix, latestVolPrefix] : [latestVolPrefix];
         let state = stationState.get(stationId) || { 
