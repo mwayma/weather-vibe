@@ -1423,11 +1423,74 @@ const RadarCanvasLayer = L.Layer.extend({
         const size = map.getSize();
         this._container.width = size.x; 
         this._container.height = size.y;
+        this._offscreenCanvas.width = size.x;
+        this._offscreenCanvas.height = size.y;
+
         const pos = map.latLngToLayerPoint(map.getBounds().getNorthWest());
         L.DomUtil.setPosition(this._container, pos);
         this._topLeft = pos;
         this._needsFullRedraw = true;
         this._draw();
+    },
+    _renderFull: function(center, pixelsPerKm) {
+        if (!this._offscreenCanvas || !this._offscreenCtx) return;
+        const ctx = this._offscreenCtx;
+        ctx.clearRect(0, 0, this._offscreenCanvas.width, this._offscreenCanvas.height);
+
+        if (!liveRadarData || !liveRadarData.elevations) return;
+
+        let momentKey = 'reflectivity';
+        if (currentLiveMode === 'velocity') { momentKey = 'velocity'; }
+        else if (currentLiveMode === 'debris') { momentKey = 'debris'; }
+
+        let momentArray = [];
+        for (let e = 1; e <= 5; e++) {
+            const temp = liveRadarData.elevations[e] ? liveRadarData.elevations[e][momentKey] : null;
+            if (temp && temp.some(m => m && m.moment_data)) { momentArray = temp; break; }
+        }
+        if (momentArray.length === 0) return;
+
+        const azArray = liveRadarData.azimuths;
+        const angularRes = 360 / azArray.length;
+        const arcWidthRad = (angularRes * Math.PI / 180) * 1.1;
+        const zoom = map.getZoom();
+        const gateStep = zoom < 7 ? 4 : (zoom < 9 ? 2 : 1);
+        const scale = COLOR_SCALES[momentKey];
+
+        ctx.save();
+        ctx.translate(center.x, center.y);
+        ctx.globalAlpha = 1.0;
+
+        for (let i = 0; i < azArray.length; i++) {
+            const radialAz = azArray[i];
+            const moment = momentArray[i];
+            if (!moment || !moment.moment_data) continue;
+
+            const azimuth = (90 - radialAz) * Math.PI / 180;
+            ctx.save();
+            ctx.rotate(-azimuth);
+
+            const firstGateKm = moment.first_gate / 1000;
+            const firstGateActual = firstGateKm < 1 ? moment.first_gate : firstGateKm;
+            const gateSizeKm = moment.gate_size;
+            const data = moment.moment_data;
+
+            for (let j = 0; j < data.length; j += gateStep) {
+                const val = data[j];
+                if (val === null || val === undefined) continue;
+                const color = scale(val);
+                if (color) {
+                    const r1 = (firstGateActual + j * gateSizeKm) * pixelsPerKm;
+                    const r2 = r1 + (gateSizeKm * gateStep) * pixelsPerKm;
+                    ctx.fillStyle = color;
+                    const width = arcWidthRad * r1;
+                    ctx.fillRect(r1, -width/2, r2 - r1 + 0.5, Math.max(1, width));
+                }
+            }
+            ctx.restore();
+        }
+        ctx.restore();
+        this._needsFullRedraw = false;
     },
     _drawIncremental: function(startAz, endAz) {
         if (!this._offscreenCanvas || !this._offscreenCtx) return;
@@ -1462,7 +1525,7 @@ const RadarCanvasLayer = L.Layer.extend({
 
         ctx.save();
         ctx.translate(center.x, center.y);
-        ctx.globalAlpha = 1.0; // Draw full opacity to offscreen
+        ctx.globalAlpha = 1.0; 
 
         for (let i = 0; i < azArray.length; i++) {
             const radialAz = azArray[i];
@@ -1472,7 +1535,6 @@ const RadarCanvasLayer = L.Layer.extend({
             if (startAz <= endAz) {
                 isInside = (radialAz >= startAz && radialAz <= endAz);
             } else {
-                // Handle 360/0 wrap around
                 isInside = (radialAz >= startAz || radialAz <= endAz);
             }
 
@@ -1485,12 +1547,11 @@ const RadarCanvasLayer = L.Layer.extend({
             ctx.save();
             ctx.rotate(-azimuth);
 
-            // Clear the "slice" before drawing new data to avoid accumulation issues
-            // We use a small arc clear
+            // Clear the "slice" before drawing new data
             ctx.globalCompositeOperation = 'destination-out';
             ctx.beginPath();
             ctx.moveTo(0, 0);
-            ctx.arc(0, 0, 500, -0.05, 0.05); // Small slice
+            ctx.arc(0, 0, 2000, -0.05, 0.05); // Large radius for all zoom levels
             ctx.fill();
             ctx.globalCompositeOperation = 'source-over';
 
@@ -1518,20 +1579,8 @@ const RadarCanvasLayer = L.Layer.extend({
     _draw: function() {
         if (!this._topLeft || !this._container || !this._offscreenCanvas) return;
         const ctx = this._container.getContext('2d');
-
-        // Base radar is now updated incrementally in _drawIncremental
-        // We just clear main and paint offscreen
-        ctx.clearRect(0, 0, this._container.width, this._container.height);
-
-        // Use global alpha here to control the "background" intensity
-        ctx.globalAlpha = 0.65;
-        ctx.drawImage(this._offscreenCanvas, 0, 0);
-        ctx.globalAlpha = 1.0;
-
-        // Draw the highlight sweep (approx 30 degrees)
-        const currentAz = window.currentScanAzimuth || 0;
         const station = NEXRAD_STATIONS.find(s => s.id === selectedRadarId);
-        if (!station || !liveRadarData || !liveRadarData.elevations) return;
+        if (!station || !liveRadarData) return;
 
         const centerLayer = map.latLngToLayerPoint([station.lat, station.lon]);
         const center = { x: centerLayer.x - this._topLeft.x, y: centerLayer.y - this._topLeft.y };
@@ -1539,10 +1588,25 @@ const RadarCanvasLayer = L.Layer.extend({
         const edgeLayer = map.latLngToLayerPoint(edge);
         const pixelsPerKm = centerLayer.distanceTo(edgeLayer) / Math.sqrt(2);
 
+        // Populate offscreen if needed (on initial load or map move)
+        if (this._needsFullRedraw) {
+            this._renderFull(center, pixelsPerKm);
+        }
+
+        ctx.clearRect(0, 0, this._container.width, this._container.height);
+
+        // Base radar scan at 100% opacity for full persistence until overwritten
+        ctx.globalAlpha = 1.0;
+        ctx.drawImage(this._offscreenCanvas, 0, 0);
+
+        // Draw the highlight sweep (approx 30 degrees ahead)
+        const currentAz = window.currentScanAzimuth || 0;
+        
         let momentKey = 'reflectivity';
         if (currentLiveMode === 'velocity') { momentKey = 'velocity'; }
         else if (currentLiveMode === 'debris') { momentKey = 'debris'; }
 
+        if (!liveRadarData.elevations) return;
         let momentArray = [];
         for (let e = 1; e <= 5; e++) {
             const temp = liveRadarData.elevations[e] ? liveRadarData.elevations[e][momentKey] : null;
