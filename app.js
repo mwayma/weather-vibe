@@ -1261,17 +1261,17 @@ function updateRadarLayersBasedOnMode() {
     if (map.hasLayer(radarVelocity)) map.removeLayer(radarVelocity);
     if (map.hasLayer(radarTemperature)) map.removeLayer(radarTemperature);
     
-    // Explicitly de-reference large data objects before clearing
-    liveRadarData = null;
-    liveCanvasLayer = null;
-
-    if (socket && socket.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({ action: 'unsubscribe' }));
+    // ONLY clear live data if we are switching AWAY from live-tracking mode
+    if (currentRadarMode !== 'live-tracking') {
+        liveRadarData = null;
+        liveCanvasLayer = null;
+        if (socket && socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({ action: 'unsubscribe' }));
+        }
+        liveTrackingLayer.clearLayers();
+        if (liveScanInterval) { cancelAnimationFrame(liveScanInterval); liveScanInterval = null; }
+        if (liveDataRefreshInterval) { clearInterval(liveDataRefreshInterval); liveDataRefreshInterval = null; }
     }
-    
-    liveTrackingLayer.clearLayers();
-    if (liveScanInterval) { cancelAnimationFrame(liveScanInterval); liveScanInterval = null; }
-    if (liveDataRefreshInterval) { clearInterval(liveDataRefreshInterval); liveDataRefreshInterval = null; }
 
     if (currentRadarMode !== 'reflectivity' && isLooping) toggleLoop();
     if (loopBtn) loopBtn.disabled = (currentRadarMode !== 'reflectivity');

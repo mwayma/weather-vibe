@@ -22,6 +22,7 @@ app.use(express.static(path.join(__dirname, '/')));
 
 const subscriptions = new Map();
 const activePollers = new Map();
+const pollingLocks = new Set(); // stationId set for locking
 const stationState = new Map(); // stationId -> { lastVolume, lastChunkKey, headerChunk }
 const stationCache = new Map(); // stationId -> liveRadarData object
 
@@ -97,6 +98,9 @@ function mergeRealTimeData(stationId, newData) {
 }
 
 async function pollChunks(stationId) {
+    if (pollingLocks.has(stationId)) return;
+    pollingLocks.add(stationId);
+    
     try {
         const listVolUrl = `${BUCKET_URL}/?list-type=2&prefix=${stationId}/&delimiter=/`;
         const volRes = await fetch(listVolUrl);
@@ -107,7 +111,11 @@ async function pollChunks(stationId) {
         if (!commonPrefixes) return;
         if (!Array.isArray(commonPrefixes)) commonPrefixes = [commonPrefixes];
 
-        // Correct lexicographical sort for prefix timestamps (YYYYMMDD-HHMMSS)
+        // Filter for folders that look like NEXRAD volume timestamps (YYYYMMDD-HHMMSS)
+        commonPrefixes = commonPrefixes.filter(p => /^[A-Z0-9]{4}\/\d{8}-\d{6}\/$/.test(p.Prefix));
+        if (commonPrefixes.length === 0) return;
+
+        // Correct lexicographical sort for prefix timestamps
         commonPrefixes.sort((a, b) => a.Prefix.localeCompare(b.Prefix));
         
         const latestVolPrefix = commonPrefixes[commonPrefixes.length - 1].Prefix;
@@ -122,6 +130,7 @@ async function pollChunks(stationId) {
             state.lastVolume = latestVolPrefix;
             state.lastChunkKey = null; // Start fresh in new volume
             state.headerChunk = null;
+            stationState.set(stationId, state); // Save immediately to prevent re-detecting
         }
 
         const listChunksUrl = `${BUCKET_URL}/?list-type=2&prefix=${latestVolPrefix}`;
@@ -131,7 +140,6 @@ async function pollChunks(stationId) {
         
         let contents = chunkJson.ListBucketResult.Contents;
         if (!contents) {
-            // console.log(`No chunks found in volume ${latestVolPrefix}`);
             return;
         }
         if (!Array.isArray(contents)) contents = [contents];
@@ -156,7 +164,6 @@ async function pollChunks(stationId) {
 
             for (const chunk of unseen) {
                 const chunkId = chunk.Key.split('/').pop();
-                // console.log(`[${stationId}] Fetching chunk: ${chunkId}`);
                 const dataRes = await fetch(`${BUCKET_URL}/${chunk.Key}`);
                 const chunkBuffer = await dataRes.arrayBuffer();
                 
@@ -181,8 +188,6 @@ async function pollChunks(stationId) {
                             data: extracted, 
                             chunk: chunkId 
                         });
-                    } else {
-                        // console.log(`[${stationId}] Chunk ${chunkId} contained no relevant data`);
                     }
                 } catch (e) {
                     console.warn(`[${stationId}] Chunk parse error (${chunkId}): ${e.message}`);
@@ -193,6 +198,8 @@ async function pollChunks(stationId) {
         }
     } catch (e) {
         console.error(`Error polling chunks for ${stationId}:`, e.message);
+    } finally {
+        pollingLocks.delete(stationId);
     }
 }
 
