@@ -1487,8 +1487,8 @@ const RadarCanvasLayer = L.Layer.extend({
             const radialAz = azArray[i];
             const moment = momentArray[i];
             
-            // Mark as revealed so the incremental sweep knows it's already on the screen
-            liveRadarData.revealedUpdate[i] = liveRadarData.lastUpdated ? liveRadarData.lastUpdated[i] : Date.now();
+            // ONLY render radials that have already been "painted" by the sweep
+            if (!liveRadarData.revealedUpdate || !liveRadarData.revealedUpdate[i]) continue;
 
             if (!moment || !moment.moment_data) continue;
 
@@ -1576,8 +1576,7 @@ const RadarCanvasLayer = L.Layer.extend({
             ctx.save();
             ctx.rotate(-azimuth);
 
-            // 1. ALWAYS clear the slice ahead of the sweep. 
-            // Wider arc (approx 0.02 rad extra) to prevent ghosting
+            // 1. ALWAYS clear the slice ahead of the sweep to erase old data
             ctx.globalCompositeOperation = 'destination-out';
             ctx.beginPath();
             ctx.moveTo(0, 0);
@@ -1585,45 +1584,35 @@ const RadarCanvasLayer = L.Layer.extend({
             ctx.fill();
             ctx.globalCompositeOperation = 'source-over';
 
-            // 2. ONLY draw if we have "relevant" data for this radial.
-            // We use a persistence window: data is valid for up to 2 minutes (120000ms).
-            // This prevents the 'sporadic lines' effect by allowing the sweep to 
-            // 'carry over' data from the previous revolution if new data hasn't arrived yet.
-            const dataAge = Date.now() - (liveRadarData.lastUpdated ? liveRadarData.lastUpdated[i] : 0);
-            const isDataFresh = dataAge < 120000; // 2 minute persistence
+            // 2. PAINT new data if it exists for this radial
+            const moment = momentArray[i];
+            if (moment && moment.moment_data) {
+                const firstGateKm = moment.first_gate / 1000;
+                const firstGateActual = firstGateKm < 1 ? moment.first_gate : firstGateKm;
+                const gateSizeKm = moment.gate_size;
+                const data = moment.moment_data;
 
-            if (isDataFresh && liveRadarData.lastUpdated && liveRadarData.revealedUpdate && 
-                liveRadarData.lastUpdated[i] > liveRadarData.revealedUpdate[i]) {
-                
-                const moment = momentArray[i];
-                if (moment && moment.moment_data) {
-                    const firstGateKm = moment.first_gate / 1000;
-                    const firstGateActual = firstGateKm < 1 ? moment.first_gate : firstGateKm;
-                    const gateSizeKm = moment.gate_size;
-                    const data = moment.moment_data;
+                let startJ = null;
+                let currentColor = null;
 
-                    let startJ = null;
-                    let currentColor = null;
-
-                    for (let j = 0; j <= data.length; j += gateStep) {
-                        const val = j < data.length ? data[j] : null;
-                        const color = val !== null && val !== undefined ? scale(val) : null;
-                        
-                        if (color !== currentColor) {
-                            if (currentColor !== null && startJ !== null) {
-                                const r1 = (firstGateActual + startJ * gateSizeKm) * pixelsPerKm;
-                                const r2 = (firstGateActual + j * gateSizeKm) * pixelsPerKm;
-                                ctx.fillStyle = currentColor;
-                                const width = arcWidthRad * r2;
-                                ctx.fillRect(r1, -width/2 - 0.5, r2 - r1 + 0.5, width + 1);
-                            }
-                            currentColor = color;
-                            startJ = j;
+                for (let j = 0; j <= data.length; j += gateStep) {
+                    const val = j < data.length ? data[j] : null;
+                    const color = val !== null && val !== undefined ? scale(val) : null;
+                    
+                    if (color !== currentColor) {
+                        if (currentColor !== null && startJ !== null) {
+                            const r1 = (firstGateActual + startJ * gateSizeKm) * pixelsPerKm;
+                            const r2 = (firstGateActual + j * gateSizeKm) * pixelsPerKm;
+                            ctx.fillStyle = currentColor;
+                            const width = arcWidthRad * r2;
+                            ctx.fillRect(r1, -width/2 - 0.5, r2 - r1 + 0.5, width + 1);
                         }
+                        currentColor = color;
+                        startJ = j;
                     }
-                    // Mark as revealed
-                    liveRadarData.revealedUpdate[i] = liveRadarData.lastUpdated[i];
                 }
+                // Mark as revealed
+                liveRadarData.revealedUpdate[i] = liveRadarData.lastUpdated[i];
             }
             ctx.restore();
         }
@@ -1650,87 +1639,6 @@ const RadarCanvasLayer = L.Layer.extend({
         // 2. Simply draw the persistent offscreen buffer onto the map
         ctx.globalAlpha = 1.0;
         ctx.drawImage(this._offscreenCanvas, 0, 0);
-
-        // 3. Draw the highlight sweep beam (approx 30 degrees ahead)
-        const currentAz = window.currentScanAzimuth || 0;
-
-        let momentKey = 'reflectivity';
-        if (currentLiveMode === 'velocity') { momentKey = 'velocity'; }
-        else if (currentLiveMode === 'debris') { momentKey = 'debris'; }
-
-        if (!liveRadarData.elevations) return;
-        let momentArray = [];
-        for (let e = 1; e <= 5; e++) {
-            const temp = liveRadarData.elevations[e] ? liveRadarData.elevations[e][momentKey] : null;
-            if (temp && temp.some(m => m && m.moment_data)) { momentArray = temp; break; }
-        }
-        if (momentArray.length === 0) return;
-
-        const azArray = liveRadarData.azimuths;
-        const angularRes = 360 / azArray.length;
-        const arcWidthRad = (angularRes * Math.PI / 180) * 1.1;
-        const zoom = map.getZoom();
-        const gateStep = zoom < 7 ? 4 : (zoom < 9 ? 2 : 1);
-        const scale = COLOR_SCALES[momentKey];
-
-        ctx.save();
-        ctx.translate(center.x, center.y);
-
-        for (let i = 0; i < azArray.length; i++) {
-            const radialAz = azArray[i];
-            let diff = (currentAz - radialAz + 360) % 360;
-            
-            // Allow the highlight/trail to persist for the full revolution (360 degrees)
-            // This ensures the data is always visible.
-            if (diff > 360) continue; 
-
-            const moment = momentArray[i];
-            if (!moment || !moment.moment_data) continue;
-
-            const azimuth = (90 - radialAz) * Math.PI / 180;
-            ctx.save();
-            ctx.rotate(-azimuth);
-
-            // Base alpha: high visibility (0.8) for the first 90 degrees, 
-            // then slowly fading to 0.4 over the remaining 270 degrees.
-            let alpha = 0.8;
-            if (diff > 90) {
-                alpha = 0.8 - (0.4 * ((diff - 90) / 270));
-            }
-
-            // Add a sharp "glow" boost at the very front (first 5 degrees)
-            if (diff < 5) alpha = Math.min(1.0, alpha + 0.3);
-            
-            ctx.globalAlpha = alpha;
-
-            const firstGateKm = moment.first_gate / 1000;
-            const firstGateActual = firstGateKm < 1 ? moment.first_gate : firstGateKm;
-            const gateSizeKm = moment.gate_size;
-            const data = moment.moment_data;
-
-            let startJ = null;
-            let currentColor = null;
-
-            for (let j = 0; j <= data.length; j += gateStep) {
-                const val = j < data.length ? data[j] : null;
-                const color = val !== null && val !== undefined ? scale(val) : null;
-                
-                if (color !== currentColor) {
-                    if (currentColor !== null && startJ !== null) {
-                        const r1 = (firstGateActual + startJ * gateSizeKm) * pixelsPerKm;
-                        const r2 = (firstGateActual + j * gateSizeKm) * pixelsPerKm;
-                        ctx.fillStyle = currentColor;
-                        const width = arcWidthRad * r2;
-                        // Use a slightly wider fill to prevent gaps
-                        ctx.fillRect(r1, -width/2 - 0.5, r2 - r1 + 0.5, width + 1);
-                    }
-                    currentColor = color;
-                    startJ = j;
-                }
-            }
-            ctx.restore();
-        }
-        ctx.restore();
     }
 });
 
