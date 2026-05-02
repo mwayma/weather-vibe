@@ -717,6 +717,7 @@ let radarStationMarker = null;
 let azimuthLine = null;
 let currentLiveMode = 'reflectivity'; // 'reflectivity', 'velocity', 'debris'
 let liveRadarData = null;
+let incomingRadialBuffer = new Map(); // roundedAz -> radial data
 let liveScanInterval = null;
 let liveDataRefreshInterval = null;
 let liveCanvasLayer = null;
@@ -796,20 +797,10 @@ function initWebSocket() {
                 targetAzimuth = message.latestAzimuth;
             }
             
-            // Sequentially update liveRadarData
+            // Buffer the radials instead of merging them immediately
             message.radials.forEach(radial => {
-                const singleExtracted = {
-                    azimuths: [radial.azimuth],
-                    timestamps: [radial.timestamp],
-                    elevations: {}
-                };
-                for (const [e, products] of Object.entries(radial.elevations)) {
-                    singleExtracted.elevations[e] = {};
-                    for (const [product, moment] of Object.entries(products)) {
-                        singleExtracted.elevations[e][product] = [moment];
-                    }
-                }
-                mergeRealTimeData(singleExtracted);
+                const roundedAz = Math.round(radial.azimuth * 10) / 10;
+                incomingRadialBuffer.set(roundedAz, radial);
             });
         } else if (message.type === 'radial_update') {
             // Verify stationId
@@ -1378,6 +1369,7 @@ function startLiveTracking() {
 
     // CRITICAL: Clear existing data to prevent geo-contamination
     liveRadarData = null;
+    incomingRadialBuffer.clear();
     currentAngle = 0;
     targetAzimuth = 0;
     lastSweepTime = performance.now();
@@ -1437,6 +1429,35 @@ function startLiveTracking() {
         
         if (liveCanvasLayer && liveCanvasLayer._topLeft) {
             const lastAngle = window._lastSweepAngle !== undefined ? window._lastSweepAngle : currentAngle;
+            
+            // Sequential Merge: Find buffered radials that fall within this frame's sweep window
+            const keys = Array.from(incomingRadialBuffer.keys());
+            keys.forEach(roundedAz => {
+                let isInside = false;
+                if (lastAngle <= currentAngle) {
+                    isInside = (roundedAz >= lastAngle && roundedAz <= currentAngle);
+                } else {
+                    isInside = (roundedAz >= lastAngle || roundedAz <= currentAngle);
+                }
+
+                if (isInside) {
+                    const radial = incomingRadialBuffer.get(roundedAz);
+                    const singleExtracted = {
+                        azimuths: [radial.azimuth],
+                        timestamps: [radial.timestamp],
+                        elevations: {}
+                    };
+                    for (const [e, products] of Object.entries(radial.elevations)) {
+                        singleExtracted.elevations[e] = {};
+                        for (const [product, moment] of Object.entries(products)) {
+                            singleExtracted.elevations[e][product] = [moment];
+                        }
+                    }
+                    mergeRealTimeData(singleExtracted);
+                    incomingRadialBuffer.delete(roundedAz);
+                }
+            });
+
             liveCanvasLayer._drawIncremental(lastAngle, currentAngle);
             liveCanvasLayer._draw();
         }
