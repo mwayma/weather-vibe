@@ -722,6 +722,7 @@ let liveDataRefreshInterval = null;
 let liveCanvasLayer = null;
 let targetAzimuth = 0;
 let currentAngle = 0;
+let sweepSpeed = 0.009; // Degrees per millisecond
 let lastSweepTime = performance.now();
 
 let socket = null;
@@ -786,6 +787,30 @@ function initWebSocket() {
                 });
             }
             renderLiveRadar();
+        } else if (message.type === 'radial_batch') {
+            // Verify stationId
+            if (message.stationId && message.stationId !== currentStationId) return;
+
+            console.log(`Received batch of ${message.radials.length} radials`);
+            if (message.latestAzimuth !== undefined) {
+                targetAzimuth = message.latestAzimuth;
+            }
+            
+            // Sequentially update liveRadarData
+            message.radials.forEach(radial => {
+                const singleExtracted = {
+                    azimuths: [radial.azimuth],
+                    timestamps: [radial.timestamp],
+                    elevations: {}
+                };
+                for (const [e, products] of Object.entries(radial.elevations)) {
+                    singleExtracted.elevations[e] = {};
+                    for (const [product, moment] of Object.entries(products)) {
+                        singleExtracted.elevations[e][product] = [moment];
+                    }
+                }
+                mergeRealTimeData(singleExtracted);
+            });
         } else if (message.type === 'radial_update') {
             // Verify stationId
             if (message.stationId && message.stationId !== currentStationId) return;
@@ -1385,7 +1410,17 @@ function startLiveTracking() {
         lastSweepTime = now;
 
         const diff = (targetAzimuth - currentAngle + 360) % 360;
-        currentAngle += (0.009 + (diff * 0.0005)) * dt;
+        
+        // Constant pursuit with dynamic speed adjustments
+        if (diff > 5) {
+            sweepSpeed = 0.012; // Speed up to catch the data
+        } else if (diff < 2) {
+            sweepSpeed = 0.007; // Slow down so we don't pass the "real" dish
+        } else {
+            sweepSpeed = 0.009; // Nominal speed
+        }
+
+        currentAngle += sweepSpeed * dt;
         currentAngle %= 360;
         
         window.currentScanAzimuth = currentAngle;
