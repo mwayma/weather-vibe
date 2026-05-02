@@ -107,14 +107,22 @@ async function pollChunks(stationId) {
         if (!commonPrefixes) return;
         if (!Array.isArray(commonPrefixes)) commonPrefixes = [commonPrefixes];
 
-        commonPrefixes.sort((a, b) => {
-            const volA = parseInt(a.Prefix.split('/')[1]);
-            const volB = parseInt(b.Prefix.split('/')[1]);
-            return volA - volB;
-        });
+        // Correct lexicographical sort for prefix timestamps (YYYYMMDD-HHMMSS)
+        commonPrefixes.sort((a, b) => a.Prefix.localeCompare(b.Prefix));
         
         const latestVolPrefix = commonPrefixes[commonPrefixes.length - 1].Prefix;
         let state = stationState.get(stationId) || { lastVolume: null, lastChunkKey: null, headerChunk: null };
+
+        // Handle volume transition
+        if (latestVolPrefix !== state.lastVolume) {
+            console.log(`[${stationId}] New volume detected: ${latestVolPrefix}`);
+            sendStatus(stationId, `New volume: ${latestVolPrefix.split('/')[1]}`);
+            stationCache.delete(stationId);
+            broadcast(stationId, { type: 'clear_data' });
+            state.lastVolume = latestVolPrefix;
+            state.lastChunkKey = null; // Start fresh in new volume
+            state.headerChunk = null;
+        }
 
         const listChunksUrl = `${BUCKET_URL}/?list-type=2&prefix=${latestVolPrefix}`;
         const chunkRes = await fetch(listChunksUrl);
@@ -122,7 +130,10 @@ async function pollChunks(stationId) {
         const chunkJson = parser.parse(chunkText);
         
         let contents = chunkJson.ListBucketResult.Contents;
-        if (!contents) return;
+        if (!contents) {
+            // console.log(`No chunks found in volume ${latestVolPrefix}`);
+            return;
+        }
         if (!Array.isArray(contents)) contents = [contents];
 
         contents.sort((a, b) => a.Key.localeCompare(b.Key));
@@ -134,16 +145,13 @@ async function pollChunks(stationId) {
             console.log(`[${stationId}] Processing ${unseen.length} new chunks`);
             
             // If new volume, we MUST get the header chunk (001-S)
-            if (latestVolPrefix !== state.lastVolume) {
-                sendStatus(stationId, `New volume detected: ${latestVolPrefix.split('/')[1]}`);
+            if (!state.headerChunk) {
                 const headerKey = contents.find(c => c.Key.endsWith('-001-S'))?.Key;
                 if (headerKey) {
                     console.log(`[${stationId}] Fetching header chunk: ${headerKey}`);
                     const hRes = await fetch(`${BUCKET_URL}/${headerKey}`);
                     state.headerChunk = await hRes.arrayBuffer();
                 }
-                state.lastVolume = latestVolPrefix;
-                stationCache.delete(stationId); // Clear cache on new volume
             }
 
             for (const chunk of unseen) {

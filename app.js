@@ -751,6 +751,13 @@ function initWebSocket() {
         } else if (message.type === 'radial_update') {
             console.log('Received real-time radial update:', message.chunk);
             mergeRealTimeData(message.data);
+        } else if (message.type === 'clear_data') {
+            console.log('Server requested data clear (New Volume)');
+            liveRadarData = null;
+            if (liveCanvasLayer) {
+                liveCanvasLayer._needsFullRedraw = true;
+                liveCanvasLayer._draw();
+            }
         } else if (message.type === 'status') {
             console.log('WebSocket Status:', message.message);
         } else if (message.type === 'heartbeat') {
