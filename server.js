@@ -105,51 +105,68 @@ async function pollChunks(stationId) {
     pollingLocks.add(stationId);
     
     try {
-        // Unidata chunk bucket is flat: station/station_YYYYMMDD_HHMMSS_chunk
-        const listUrl = `${BUCKET_URL}/?list-type=2&prefix=${stationId}/${stationId}_`;
-        const res = await fetch(listUrl);
-        const text = await res.text();
-        const json = parser.parse(text);
+        // Step 1: List volume folders (e.g., KJAX/988/, KJAX/989/, ...)
+        const listVolUrl = `${BUCKET_URL}/?list-type=2&prefix=${stationId}/&delimiter=/`;
+        const volRes = await fetch(listVolUrl);
+        const volText = await volRes.text();
+        const volJson = parser.parse(volText);
         
-        let contents = json.ListBucketResult.Contents;
+        let commonPrefixes = volJson.ListBucketResult.CommonPrefixes;
+        if (!commonPrefixes) return;
+        if (!Array.isArray(commonPrefixes)) commonPrefixes = [commonPrefixes];
+
+        // Filter for numeric volume folders (e.g. KJAX/988/)
+        commonPrefixes = commonPrefixes.filter(p => /^[A-Z0-9]{4}\/\d+\/$/.test(p.Prefix));
+        if (commonPrefixes.length === 0) return;
+
+        // Sort by volume number (numerically if possible, otherwise lexicographically)
+        commonPrefixes.sort((a, b) => {
+            const numA = parseInt(a.Prefix.split('/')[1]);
+            const numB = parseInt(b.Prefix.split('/')[1]);
+            return numA - numB;
+        });
+        
+        const latestVolPrefix = commonPrefixes[commonPrefixes.length - 1].Prefix;
+        let state = stationState.get(stationId) || { lastVolume: null, lastChunkKey: null, headerChunk: null };
+
+        // Step 2: List chunks within the latest volume folder
+        const listChunksUrl = `${BUCKET_URL}/?list-type=2&prefix=${latestVolPrefix}`;
+        const chunkRes = await fetch(listChunksUrl);
+        const chunkText = await chunkRes.text();
+        const chunkJson = parser.parse(chunkText);
+        
+        let contents = chunkJson.ListBucketResult.Contents;
         if (!contents) return;
         if (!Array.isArray(contents)) contents = [contents];
 
         // Sort lexicographically to ensure chronological order of chunks
         contents.sort((a, b) => a.Key.localeCompare(b.Key));
         
-        let state = stationState.get(stationId) || { lastVolume: null, lastChunkKey: null, headerChunk: null };
+        // Volume transition: we identify volume by the folder prefix AND the timestamp in the first chunk
+        const firstChunkKey = contents[0].Key;
+        const timestampMatch = firstChunkKey.match(/(\d{8}-\d{6})/);
+        const volumeId = latestVolPrefix + (timestampMatch ? timestampMatch[1] : '');
 
-        // Identify the latest volume from the keys (e.g., KSRX_20240502_123000_...)
-        // We look at the timestamp part of the key
-        const latestKey = contents[contents.length - 1].Key;
-        const latestTimestampMatch = latestKey.match(/_(\d{8}_\d{6})/);
-        if (!latestTimestampMatch) return;
-        
-        const latestVolume = latestTimestampMatch[1];
-
-        // Handle volume transition
-        if (latestVolume !== state.lastVolume) {
-            console.log(`[${stationId}] New volume detected: ${latestVolume}`);
-            sendStatus(stationId, `New volume: ${latestVolume}`);
+        if (volumeId !== state.lastVolume) {
+            console.log(`[${stationId}] New volume detected: ${volumeId}`);
+            sendStatus(stationId, `New volume: ${volumeId.split('/').pop()}`);
             stationCache.delete(stationId);
             broadcast(stationId, { type: 'clear_data' });
-            state.lastVolume = latestVolume;
+            state.lastVolume = volumeId;
             state.lastChunkKey = null; 
             state.headerChunk = null;
             stationState.set(stationId, state);
         }
 
-        // Filter for chunks belonging to the current volume and newer than last seen
-        const volumeChunks = contents.filter(c => c.Key.includes(`_${latestVolume}_`));
-        const unseen = volumeChunks.filter(c => !state.lastChunkKey || c.Key.localeCompare(state.lastChunkKey) > 0);
+        // Find chunks we haven't seen yet
+        const unseen = contents.filter(c => !state.lastChunkKey || c.Key.localeCompare(state.lastChunkKey) > 0);
 
         if (unseen.length > 0) {
-            console.log(`[${stationId}] Processing ${unseen.length} new chunks in volume ${latestVolume}`);
+            console.log(`[${stationId}] Processing ${unseen.length} new chunks in ${latestVolPrefix}`);
             
             // Ensure we have the header chunk for this volume
             if (!state.headerChunk) {
-                const headerKey = volumeChunks.find(c => c.Key.includes('-001-S'))?.Key;
+                const headerKey = contents.find(c => c.Key.includes('-001-S'))?.Key;
                 if (headerKey) {
                     console.log(`[${stationId}] Fetching header chunk: ${headerKey}`);
                     const hRes = await fetch(`${BUCKET_URL}/${headerKey}`);
@@ -164,7 +181,6 @@ async function pollChunks(stationId) {
                 
                 try {
                     let combinedBuffer;
-                    // Prepend header chunk to all chunks except the header itself
                     if (state.headerChunk && !chunk.Key.includes('-001-S')) {
                         combinedBuffer = Buffer.concat([
                             Buffer.from(state.headerChunk),
