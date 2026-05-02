@@ -184,553 +184,172 @@ function updateAlerts() {
 function getAlertType(eventStr) {
     const ev = eventStr.toLowerCase();
     const isWatch = ev.includes('watch') || ev.includes('advisory') || ev.includes('statement');
-    
     if (ev.includes('tornado')) return isWatch ? 'tornado-watch' : 'tornado-warning';
     if (ev.includes('thunderstorm')) return isWatch ? 'thunderstorm-watch' : 'thunderstorm-warning';
     if (ev.includes('hurricane') || ev.includes('tropical storm')) return 'hurricane';
     if (ev.includes('flood')) return 'flood';
     if (ev.includes('marine') || ev.includes('gale')) return 'marine';
     if (ev.includes('snow') || ev.includes('blizzard') || ev.includes('winter') || ev.includes('ice') || ev.includes('freez')) return isWatch ? 'winter-watch' : 'snow';
-    
     return isWatch ? 'other-watch' : 'other-warning';
-}
-
-function updateLegend() {
-    if (!activeAlertData || !activeAlertData.features) return;
-    
-    const types = {
-        'tornado-warning': false,
-        'tornado-watch': false,
-        'thunderstorm-warning': false,
-        'thunderstorm-watch': false,
-        'hurricane': false,
-        'flood': false,
-        'marine': false,
-        'snow': false,
-        'winter-watch': false,
-        'other-warning': false,
-        'other-watch': false
-    };
-
-    const mapBounds = map.getBounds();
-
-    activeAlertData.features.forEach(f => {
-        if (!f.geometry) return;
-        
-        // Cache the calculated Leaflet bounds on the feature so we don't have to re-compute it every time you pan the map
-        if (!f.properties._bounds) {
-            f.properties._bounds = L.geoJSON(f).getBounds();
-        }
-        
-        // Only flag the alert type as active if its boundaries physically intersect the boundaries of your browser screen
-        if (f.properties._bounds.isValid() && mapBounds.intersects(f.properties._bounds)) {
-            const type = getAlertType(f.properties.event);
-            if (type) types[type] = true;
-        }
-    });
-
-    // Update legend visibility based on the current viewport
-    Object.keys(types).forEach(type => {
-        const legendEl = document.getElementById(`legend-${type}`);
-        if (legendEl) {
-            legendEl.style.display = types[type] ? 'flex' : 'none';
-        }
-    });
-    
-    const anyWarnings = types['tornado-warning'] || types['thunderstorm-warning'] || types['hurricane'] || types['flood'] || types['marine'] || types['snow'] || types['other-warning'];
-    const anyWatches = types['tornado-watch'] || types['thunderstorm-watch'] || types['winter-watch'] || types['other-watch'];
-    
-    const noAlerts = document.getElementById(`legend-no-alerts`);
-    if (noAlerts) noAlerts.style.display = anyWarnings ? 'none' : 'flex';
-    
-    const noWatches = document.getElementById(`legend-no-watches`);
-    if (noWatches) noWatches.style.display = anyWatches ? 'none' : 'flex';
 }
 
 function renderAlerts() {
     alertsLayer.clearLayers();
     if (!activeAlertData || !activeAlertData.features) return;
-    
-    // Pre-process features to synthesize geometries for county-based alerts that lack polygons
-    activeAlertData.features.forEach(f => {
-        if (!f.geometry && countiesData && f.properties.geocode?.SAME) {
-            const coordinates = [];
-            f.properties.geocode.SAME.forEach(fips => {
-                const countyFips = fips.substring(1, 6); // Convert 6-digit NWS SAME code to 5-digit Census FIPS
-                const countyFeature = countiesLookup[countyFips];
-                if (countyFeature && countyFeature.geometry) {
-                    if (countyFeature.geometry.type === 'Polygon') {
-                        coordinates.push(countyFeature.geometry.coordinates);
-                    } else if (countyFeature.geometry.type === 'MultiPolygon') {
-                        coordinates.push(...countyFeature.geometry.coordinates); // Spread for multi-island counties
-                    }
-                }
-            });
-            if (coordinates.length > 0) {
-                f.geometry = { type: 'MultiPolygon', coordinates: coordinates };
-            }
+
+    // Reset legend indicators
+    const legendItems = document.querySelectorAll('.legend-item');
+    legendItems.forEach(item => {
+        if (item.id !== 'legend-no-alerts' && item.id !== 'legend-no-watches') {
+            item.style.display = 'none';
         }
     });
 
-    // Let the legend scanner determine visibility locally
-    updateLegend();
+    let hasVisibleAlerts = false;
+    let hasVisibleWatches = false;
 
-    // Sort features by severity so more severe alerts are drawn last (on top)
-    const sortedFeatures = [...activeAlertData.features].sort((a, b) => {
-        return getAlertSeverity(a.properties.event) - getAlertSeverity(b.properties.event);
+    // Sort features by severity so higher severity draws on top
+    const sortedFeatures = [...activeAlertData.features].sort((a, b) => 
+        getAlertSeverity(a.properties.event) - getAlertSeverity(b.properties.event)
+    );
+
+    sortedFeatures.forEach(feature => {
+        const type = getAlertType(feature.properties.event);
+        const item = document.querySelector(`.legend-item[data-type="${type}"]`);
+        
+        if (item) {
+            item.style.display = 'flex';
+            if (type.includes('warning') || type === 'hurricane' || type === 'flood' || type === 'marine' || type === 'snow') {
+                hasVisibleAlerts = true;
+            } else {
+                hasVisibleWatches = true;
+            }
+        }
+
+        if (disabledAlertTypes.has(type)) return;
+
+        L.geoJSON(feature, {
+            style: getAlertStyle(feature.properties.event)
+        }).bindPopup(`
+            <div class="alert-popup">
+                <h3>${feature.properties.event}</h3>
+                <div class="alert-desc">${feature.properties.description || 'No description provided.'}</div>
+                <div class="alert-inst">${feature.properties.instruction || 'Follow local advice.'}</div>
+            </div>
+        `, { maxWidth: 300 }).addTo(alertsLayer);
     });
 
-    L.geoJSON({ type: 'FeatureCollection', features: sortedFeatures }, {
-        filter: (f) => {
-            const type = getAlertType(f.properties.event);
-            
-            // Filter out non-radar alerts AND user-toggled disabled alerts
-            if (!type || disabledAlertTypes.has(type)) return false;
-            return true;
-        },
-        style: (f) => getAlertStyle(f.properties.event),
-        onEachFeature: (f, layer) => {
-            let popupContent = `<div class="alert-popup">`;
-            popupContent += `<h3>${f.properties.event}</h3>`;
-            if (f.properties.headline) {
-                popupContent += `<strong>${f.properties.headline}</strong><br><br>`;
-            }
-            if (f.properties.description) {
-                popupContent += `<div class="alert-desc">${f.properties.description.replace(/\n/g, '<br>')}</div>`;
-            }
-            if (f.properties.instruction) {
-                popupContent += `<strong>Instructions:</strong><div class="alert-inst">${f.properties.instruction.replace(/\n/g, '<br>')}</div>`;
-            }
-            popupContent += `</div>`;
-            layer.bindPopup(popupContent, { maxWidth: 400, maxHeight: 300 });
-        }
-    }).addTo(alertsLayer);
-    
+    document.getElementById('legend-no-alerts').style.display = hasVisibleAlerts ? 'none' : 'flex';
+    document.getElementById('legend-no-watches').style.display = hasVisibleWatches ? 'none' : 'flex';
 }
 
-// 4. Dynamic City Labels with Collision Detection
-const cityLayer = L.layerGroup().addTo(map);
-let allCities = [];
+// 4. City Overlay 
+const cityLayer = L.layerGroup();
+let NEXRAD_STATIONS = [];
 let isCitiesVisible = true;
 
-// Load local cities as baseline
-fetch('data/cities.json')
-    .then(res => res.json())
-    .then(cities => {
-        allCities = cities.map(c => ({
-            city: c.city,
-            state: c.state,
-            latitude: c.latitude,
-            longitude: c.longitude,
-            population: c.population,
-            pop: parseInt(c.population) || 5000,
-            station: c.station
-        }));
-        // Sort by population descending so we process larger cities first
-        allCities.sort((a, b) => b.pop - a.pop);
-        citiesWorker.postMessage({ type: 'init', data: allCities });
-        updateVisibleCities();
+const cityWorker = new Worker('cities-worker.js');
+cityWorker.onmessage = function(e) {
+    const visibleCities = e.data;
+    cityLayer.clearLayers();
+    visibleCities.forEach(city => {
+        L.marker([city.lat, city.lng], {
+            icon: L.divIcon({
+                className: 'city-label',
+                html: `<div>${city.city}</div>`,
+                iconSize: [100, 20],
+                iconAnchor: [50, 10]
+            }),
+            interactive: false
+        }).addTo(cityLayer);
     });
-
-const citiesWorker = new Worker('cities-worker.js');
-citiesWorker.onmessage = function(e) {
-    const { visibleMarkers } = e.data;
-    renderVisibleCities(visibleMarkers);
 };
 
 function updateVisibleCities() {
-    if (!isCitiesVisible) return;
-    if (!allCities || allCities.length === 0) return;
-    
+    if (!isCitiesVisible || !map) return;
     const bounds = map.getBounds();
-    const zoom = map.getZoom();
-    
-    const data = {
+    cityWorker.postMessage({
         bounds: {
-            south: bounds.getSouth(),
-            north: bounds.getNorth(),
-            west: bounds.getWest(),
-            east: bounds.getEast()
+            _southWest: { lat: bounds.getSouthWest().lat, lng: bounds.getSouthWest().lng },
+            _northEast: { lat: bounds.getNorthEast().lat, lng: bounds.getNorthEast().lng }
         },
-        zoom: zoom,
-        minGapLat: 45 / Math.pow(2, zoom),
-        minGapLng: 75 / Math.pow(2, zoom),
-        maxCitiesOnScreen: zoom < 7 ? 12 : 25
-    };
-
-    citiesWorker.postMessage({ type: 'update', data });
-}
-
-function renderVisibleCities(visibleMarkers) {
-    cityLayer.clearLayers();
-    
-    visibleMarkers.forEach(city => {
-        let tempHtml = '';
-        const safeCityId = (city.city + city.state).replace(/[^a-zA-Z0-9]/g, '');
-
-        if (currentRadarMode === 'temperature' && city.station) {
-            const stationId = city.station;
-            if (stationTempsCache[stationId] && stationTempsCache[stationId] !== 'fetching') {
-                tempHtml = `<div id="temp-${safeCityId}" class="station-${stationId}" style="color: #ffcc00; font-size: 1.1em; font-weight: bold; text-shadow: 1px 1px 2px #000;">${stationTempsCache[stationId]}&deg;</div>`;
-            } else {
-                tempHtml = `<div id="temp-${safeCityId}" class="station-${stationId}" style="color: #ffcc00; font-size: 1.1em; font-weight: bold; text-shadow: 1px 1px 2px #000;">...</div>`;
-                fetchCityTempDisplay(city, safeCityId);
-            }
-        }
-
-        const marker = L.marker(L.latLng(city.latitude, city.longitude), {
-            icon: L.divIcon({
-                className: 'city-label',
-                html: `<div style="text-align: center;"><span>${city.city}</span>${tempHtml}</div>`,
-                iconAnchor: [0, 0]
-            }),
-            interactive: true
-        });
-        
-        marker.on('click', () => {
-            fetchCityWeather(city, marker);
-        });
-
-        marker.addTo(cityLayer);
+        zoom: map.getZoom()
     });
 }
 
-async function fetchCityWeather(city, marker) {
-    try {
-        marker.bindPopup(`<div style="text-align:center;">Fetching weather...</div>`).openPopup();
-
-        let stationId = city.station;
-
-        if (!stationId) {
-            // 1. Get the NWS grid point to find the nearest observation stations
-            const pointRes = await fetch(`https://api.weather.gov/points/${city.latitude},${city.longitude}`);
-            const pointData = await pointRes.json();
-            
-            // 2. Fetch the list of stations for this grid point and grab the closest one
-            const stationsRes = await fetch(pointData.properties.observationStations);
-            const stationsData = await stationsRes.json();
-            stationId = stationsData.features[0].properties.stationIdentifier;
-            city.station = stationId; // Cache it locally to save API calls in the future
-        }
-
-        // 3. Fetch the latest observation for the closest station using the NWS endpoint
-        const obsRes = await fetch(`https://api.weather.gov/stations/${stationId}/observations/latest`);
-        const obsData = await obsRes.json();
-        
-        const tempC = obsData.properties.temperature.value;
-        const tempF = tempC !== null ? Math.round((tempC * 9/5) + 32) : '--';
-        const desc = obsData.properties.textDescription || 'Unknown conditions';
-        
-        marker.setPopupContent(`
-            <div style="text-align: center; min-width: 120px;">
-                <strong>${city.city}</strong><br>
-                <span style="font-size: 1.5em; font-weight: bold;">${tempF}&deg;F</span><br>
-                ${desc}<br>
-                <small style="color: #666; margin-top: 5px; display: block;">Station: ${stationId}</small>
-            </div>
-        `);
-    } catch (err) {
-        console.error('Error fetching NWS weather:', err);
-        marker.setPopupContent('<div style="text-align:center;">Weather data unavailable</div>');
-    }
-}
-
-async function fetchCityTempDisplay(city, safeCityId) {
-    if (!city.station) return; // Only fetch if there is a known reporting station
-
-    const stationId = city.station;
-
-    if (stationTempsCache[stationId] === 'fetching') return; // Already fetching
-    if (stationTempsCache[stationId]) {
-        const tempDiv = document.getElementById(`temp-${safeCityId}`);
-        if (tempDiv) tempDiv.innerHTML = `${stationTempsCache[stationId]}&deg;`;
-        return;
-    }
-    
-    stationTempsCache[stationId] = 'fetching';
-
-    try {
-        const obsRes = await fetch(`https://api.weather.gov/stations/${stationId}/observations/latest`);
-        const obsData = await obsRes.json();
-        
-        const tempC = obsData.properties.temperature.value;
-        if (tempC !== null) {
-            const tempF = Math.round((tempC * 9/5) + 32);
-            stationTempsCache[stationId] = tempF;
-            // Bulk update all visible cities that share this station
-            document.querySelectorAll(`.station-${stationId}`).forEach(el => el.innerHTML = `${tempF}&deg;`);
-        } else {
-            throw new Error("No temp data");
-        }
-    } catch (err) {
-        console.debug('Failed to load temp for', city.city);
-        stationTempsCache[stationId] = '--';
-        document.querySelectorAll(`.station-${stationId}`).forEach(el => el.innerHTML = '--&deg;');
-    }
-}
-
-// Global initialization
-let selectedRadarId = ''; 
-let NEXRAD_STATIONS = [];
-
-function getNearbyRadars(maxDistance = 200) {
-    if (!NEXRAD_STATIONS || NEXRAD_STATIONS.length === 0) return [];
-    
-    const bounds = map.getBounds();
-    const centerLat = bounds.getCenter().lat;
-    const centerLon = bounds.getCenter().lng;
-    
-    // Simple distance calculation (in miles, approximate)
-    const toMiles = (lat1, lon1, lat2, lon2) => {
-        const R = 3959; // Earth radius in miles
-        const dLat = (lat2 - lat1) * Math.PI / 180;
-        const dLon = (lon2 - lon1) * Math.PI / 180;
-        const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-                  Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
-                  Math.sin(dLon / 2) * Math.sin(dLon / 2);
-        const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-        return R * c;
-    };
-    
-    return NEXRAD_STATIONS
-        .map(station => ({
-            ...station,
-            distance: toMiles(centerLat, centerLon, station.lat, station.lon)
-        }))
-        .filter(station => station.distance < maxDistance)
-        .sort((a, b) => a.distance - b.distance);
-}
-
-function updateRadarSelector() {
-    const select = document.getElementById('radar-select');
-    if (!select) return;
-
-    const nearbyRadars = getNearbyRadars();
-    
-    // Clear existing options except composite
-    while (select.options.length > 1) {
-        select.remove(1);
-    }
-    
-    let isCurrentSelectionAvailable = (selectedRadarId === 'composite');
-
-    // Add nearby radars
-    nearbyRadars.forEach(radar => {
-        const option = document.createElement('option');
-        option.value = radar.id;
-        option.text = `${radar.name} (${Math.round(radar.distance)} mi)`;
-        select.appendChild(option);
-        
-        if (radar.id === selectedRadarId) {
-            isCurrentSelectionAvailable = true;
-        }
-    });
-    
-    const needsSingleSite = currentRadarMode !== 'reflectivity';
-    if (!isCurrentSelectionAvailable || selectedRadarId === '' || (selectedRadarId === 'composite' && needsSingleSite)) {
-        if (nearbyRadars.length > 0) {
-            selectedRadarId = nearbyRadars[0].id;
-        } else {
-            selectedRadarId = 'composite';
-        }
-        
-        if (NEXRAD_STATIONS.length > 0) {
-            updateRadarLayersBasedOnMode();
-        }
-    }
-    
-    select.value = selectedRadarId;
-}
-
-// Update radar selector on map move with debounce
-let mapMoveTimeout = null;
-function handleMapMove() {
-    if (mapMoveTimeout) clearTimeout(mapMoveTimeout);
-    mapMoveTimeout = setTimeout(() => {
-        updateVisibleCities();
-        updateRadarSelector();
-        updateLegend();
-    }, 500); // 500ms debounce
-}
-
-map.on('moveend', handleMapMove);
-map.on('zoomend', handleMapMove);
-
-// 5. Radar Scan Refresh Logic
-function formatIEMTime(date) {
-    const pad = (n) => n.toString().padStart(2, '0');
-    return `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())}T${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}:00Z`;
-}
-
-function checkRadarScan() {
-    updateAlerts(); 
-    
-    const now = new Date();
-    now.setMinutes(now.getMinutes() - 4);
-    now.setMinutes(Math.floor(now.getMinutes() / 5) * 5);
-    now.setSeconds(0);
-    now.setMilliseconds(0);
-    
-    const latest = formatIEMTime(now);
-    
-    if (!isLooping) {
-        document.getElementById('timestamp').innerText = `Last Checked: ${new Date().toLocaleTimeString()}`;
-    }
-    
-    if (latest !== lastScanTime) {
-        lastScanTime = latest;
-        
-        const times = [];
-        const latestDate = new Date(now.getTime());
-        for (let i = 0; i < 6; i++) {
-            const d = new Date(latestDate.getTime() - (i * 5 * 60000));
-            times.push(formatIEMTime(d));
-        }
-        loopTimestamps = times.reverse(); 
-        
-        // Background load loop frames
-        if (!isLooping) {
-            if (typeof radarLayer !== 'undefined' && radarLayer && typeof radarLayer.setParams === 'function') {
-                radarLayer.setParams({ _cb: new Date().getTime() }, false);
-            }
-            
-            if (initialRadarLoadComplete) {
-                preloadLoopLayers(loopTimestamps);
-            } else {
-                pendingLoopPreload = loopTimestamps;
-            }
-        } else {            if (loopLayers.length > 0) {
-                const oldLayer = loopLayers.shift();
-                map.removeLayer(oldLayer); 
-                
-                const newLayer = L.tileLayer.wms('https://mesonet.agron.iastate.edu/cgi-bin/wms/nexrad/n0q-t.cgi', {
-                    layers: 'nexrad-n0q-wmst',
-                    format: 'image/png',
-                    transparent: true,
-                    opacity: 0,
-                    time: latest,
-                    attribution: 'Radar: IEM NEXRAD'
-                }).addTo(map); 
-                
-                loopLayers.push(newLayer);
-                currentLoopIndex = Math.max(0, currentLoopIndex - 1);
-            }
-        }
-    }
-}
-
-checkRadarScan();
-setInterval(checkRadarScan, 30000);
+// Initial update and periodic polling
 updateAlerts();
+setInterval(updateAlerts, 60000); // Update alerts every minute
+map.on('moveend zoomend', () => {
+    updateVisibleCities();
+    if (currentRadarMode === 'temperature') updateTemperatureGradient();
+});
 
-function preloadLoopLayers(timestamps) {
-    // Clear existing loop layers if they exist and we're not looping
-    if (!isLooping) {
-        loopLayers.forEach(l => map.removeLayer(l));
-        loopLayers = timestamps.map(ts => {
-            return L.tileLayer.wms('https://mesonet.agron.iastate.edu/cgi-bin/wms/nexrad/n0q-t.cgi', {
-                layers: 'nexrad-n0q-wmst',
-                format: 'image/png',
-                transparent: true,
-                opacity: 0, 
-                time: ts,
-                attribution: 'Radar: IEM NEXRAD'
-            }).addTo(map);
-        });
-    }
-}
-
-// Radar Playback Loop functions
-function toggleLoop() {
-    const loopBtn = document.getElementById('btn-loop');
-    isLooping = !isLooping;
-    if (isLooping) {
-        if (loopBtn) {
-            loopBtn.classList.add('active');
-            loopBtn.innerText = 'Stop Loop';
-        }
-        
-        if (loopTimestamps.length > 0) {
-            currentLoopIndex = 0;
-            
-            if (map.hasLayer(radarReflectivity)) map.removeLayer(radarReflectivity);
-            
-            // If we don't have loop layers yet (e.g. just started), load them
-            if (loopLayers.length === 0) {
-                let loadedCount = 0;
-                document.getElementById('timestamp').innerText = `Loading loop frames (0/${loopTimestamps.length})...`;
-                loopLayers = loopTimestamps.map(ts => {
-                    const layer = L.tileLayer.wms('https://mesonet.agron.iastate.edu/cgi-bin/wms/nexrad/n0q-t.cgi', {
-                        layers: 'nexrad-n0q-wmst',
-                        format: 'image/png',
-                        transparent: true,
-                        opacity: 0, 
-                        time: ts,
-                        attribution: 'Radar: IEM NEXRAD'
-                    });
-                    
-                    layer.on('load', function onLayerLoad() {
-                        layer.off('load', onLayerLoad);
-                        loadedCount++;
-                        if (isLooping && !loopInterval) {
-                            document.getElementById('timestamp').innerText = `Loading loop frames (${loadedCount}/${loopTimestamps.length})...`;
-                            if (loadedCount === loopTimestamps.length) {
-                                loopInterval = setInterval(advanceLoop, 1000);
-                                advanceLoop();
-                            }
-                        }
-                    });
-                    return layer.addTo(map);
-                });
-            } else {
-                // Use already pre-loaded layers
-                loopInterval = setInterval(advanceLoop, 1000);
-                advanceLoop();
-            }
-        }
-    } else {
-        if (loopBtn) {
-            loopBtn.classList.remove('active');
-            loopBtn.innerText = 'Play Loop';
-        }
-        clearInterval(loopInterval);
-        loopInterval = null;
-        loopLayers.forEach(layer => layer.setOpacity(0)); // Keep them but hide them
-        updateRadarLayersBasedOnMode();
-        if (lastScanTime) document.getElementById('timestamp').innerText = `Last Checked: ${new Date().toLocaleTimeString()}`;
-    }
-}
-
-function advanceLoop() {
-    if (loopLayers.length === 0) return;
-    loopLayers.forEach(layer => layer.setOpacity(0));
-    loopLayers[currentLoopIndex].setOpacity(0.8);
-    const ts = loopTimestamps[currentLoopIndex];
-    const scanDate = new Date(ts);
-    document.getElementById('timestamp').innerText = `Radar Scan: ${scanDate.toLocaleTimeString()} (Looping)`;
-    currentLoopIndex = (currentLoopIndex + 1) % loopLayers.length;
-}
-
-// Live Tracking State
-let liveTrackingLayer = L.layerGroup().addTo(map);
-let radarStationMarker = null;
-let azimuthLine = null;
-let currentLiveMode = 'reflectivity'; // 'reflectivity', 'velocity', 'debris'
-let liveRadarData = null;
+// Live Radar Logic
+let selectedRadarId = 'composite';
 let liveScanInterval = null;
 let liveDataRefreshInterval = null;
+let liveRadarData = null;
 let liveCanvasLayer = null;
+let currentLiveMode = 'reflectivity';
+let radarStationMarker = null;
+let azimuthLine = null;
+const liveTrackingLayer = L.layerGroup().addTo(map);
+
+// Color Scales for Highres Data
+const COLOR_SCALES = {
+    reflectivity: (val) => {
+        if (val < 5) return null;
+        if (val < 10) return '#00ecec';
+        if (val < 15) return '#01a0f6';
+        if (val < 20) return '#0000f6';
+        if (val < 25) return '#00ff00';
+        if (val < 30) return '#00c800';
+        if (val < 35) return '#009000';
+        if (val < 40) return '#ffff00';
+        if (val < 45) return '#e7c000';
+        if (val < 50) return '#ff9000';
+        if (val < 55) return '#ff0000';
+        if (val < 60) return '#d60000';
+        if (val < 65) return '#c00000';
+        if (val < 70) return '#ff00ff';
+        if (val < 75) return '#9955c9';
+        return '#ffffff';
+    },
+    velocity: (val) => {
+        if (Math.abs(val) < 2) return null;
+        if (val <= -100) return '#00ff00';
+        if (val <= -75) return '#00cc00';
+        if (val <= -50) return '#008800';
+        if (val <= -25) return '#004400';
+        if (val < 25) return '#777777';
+        if (val < 50) return '#440000';
+        if (val < 75) return '#880000';
+        if (val < 100) return '#cc0000';
+        return '#ff0000';
+    },
+    debris: (val) => {
+        if (val < 0.2) return null;
+        if (val < 0.45) return '#ff00ff';
+        if (val < 0.7) return '#0000ff';
+        if (val < 0.8) return '#00ffff';
+        if (val < 0.9) return '#00ff00';
+        if (val < 0.95) return '#ffff00';
+        return null; // Don't show high CC (pure rain) as debris
+    }
+};
 
 let socket = null;
-function initWebSocket() {
+function connectWebSocket() {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const host = window.location.host;
-    socket = new WebSocket(`${protocol}//${host}`);
-
+    socket = new WebSocket(`${protocol}//${window.location.host}`);
+    
     socket.onopen = () => {
-        console.log('WebSocket connected');
-        if (currentRadarMode === 'live-tracking' && selectedRadarId && selectedRadarId !== 'composite') {
-            socket.send(JSON.stringify({ action: 'subscribe', station: selectedRadarId }));
+        console.log('Connected to Radar Stream');
+        if (currentRadarMode === 'live-tracking' && selectedRadarId !== 'composite') {
+            let stationId = selectedRadarId;
+            if (stationId.length === 3) stationId = 'K' + stationId;
+            socket.send(JSON.stringify({ action: 'subscribe', station: stationId }));
         }
     };
 
@@ -800,155 +419,171 @@ function initWebSocket() {
     };
 
     socket.onclose = () => {
-        console.warn('WebSocket disconnected, retrying...');
-        setTimeout(initWebSocket, 5000);
+        console.log('WebSocket Closed. Reconnecting...');
+        setTimeout(connectWebSocket, 3000);
     };
 }
+connectWebSocket();
 
 function mergeRealTimeData(newData) {
     if (!liveRadarData) {
-        console.log('Initializing liveRadarData with real-time update');
-        liveRadarData = {
-            radialsMap: new Map(), // roundedAz -> { azimuth, timestamp, revealedUpdate, elevations }
-            azimuths: [],
-            lastUpdated: [],
-            revealedUpdate: [],
-            timestamps: [],
-            elevations: {}
-        };
-    }
-
-    if (!liveRadarData.radialsMap) {
-        liveRadarData.radialsMap = new Map();
+        liveRadarData = newData;
+        liveRadarData.lastUpdated = new Array(liveRadarData.azimuths.length).fill(Date.now());
+        liveRadarData.revealedUpdate = new Array(liveRadarData.azimuths.length).fill(0);
+        return;
     }
 
     const now = Date.now();
-    newData.azimuths.forEach((az, i) => {
-        const roundedAz = Math.round(az * 10) / 10;
-        const timestamp = (newData.timestamps && newData.timestamps[i]) ? newData.timestamps[i] : now;
-
-        if (!liveRadarData.radialsMap.has(roundedAz)) {
-            liveRadarData.radialsMap.set(roundedAz, {
-                azimuth: az,
-                timestamp: timestamp,
-                revealedUpdate: 0,
-                elevations: {}
-            });
-        }
-
-        const radial = liveRadarData.radialsMap.get(roundedAz);
-        radial.timestamp = timestamp;
-
-        for (const [e, elevations] of Object.entries(newData.elevations)) {
-            if (!radial.elevations[e]) radial.elevations[e] = {};
-            for (const [product, moments] of Object.entries(elevations)) {
-                radial.elevations[e][product] = moments[i];
-            }
-        }
-    });
-
-    syncLiveRadarArrays();
-    
-    // CRITICAL: Ensure the layer exists and is ready to render
-    if (!liveCanvasLayer) {
-        renderLiveRadar();
-    }
-}
-
-function syncLiveRadarArrays() {
-    if (!liveRadarData || !liveRadarData.radialsMap) return;
-
-    const sortedAzKeys = Array.from(liveRadarData.radialsMap.keys()).sort((a, b) => a - b);
-    const len = sortedAzKeys.length;
-    
-    liveRadarData.azimuths = new Array(len);
-    liveRadarData.lastUpdated = new Array(len);
-    liveRadarData.revealedUpdate = new Array(len);
-    liveRadarData.timestamps = new Array(len);
-    
-    // Pre-initialize elevation products with null arrays to ensure length consistency
-    liveRadarData.elevations = {};
-    for (let e = 1; e <= 5; e++) {
-        liveRadarData.elevations[e] = {
-            reflectivity: new Array(len).fill(null),
-            velocity: new Array(len).fill(null),
-            debris: new Array(len).fill(null)
-        };
-    }
-
-    sortedAzKeys.forEach((key, i) => {
-        const radial = liveRadarData.radialsMap.get(key);
-        liveRadarData.azimuths[i] = radial.azimuth;
-        liveRadarData.lastUpdated[i] = radial.timestamp;
-        liveRadarData.revealedUpdate[i] = radial.revealedUpdate;
-        liveRadarData.timestamps[i] = radial.timestamp;
-
-        for (const [e, products] of Object.entries(radial.elevations)) {
-            for (const [product, moment] of Object.entries(products)) {
-                if (liveRadarData.elevations[e] && liveRadarData.elevations[e][product]) {
-                    liveRadarData.elevations[e][product][i] = moment;
+    newData.azimuths.forEach((newAz, i) => {
+        const rounded = Math.round(newAz * 10) / 10;
+        
+        // Update the master azimuth array and product data
+        const masterIdx = liveRadarData.azimuths.findIndex(az => Math.round(az * 10) / 10 === rounded);
+        if (masterIdx !== -1) {
+            for (const [e, products] of Object.entries(newData.elevations)) {
+                if (!liveRadarData.elevations[e]) liveRadarData.elevations[e] = {};
+                for (const [product, moments] of Object.entries(products)) {
+                    if (!liveRadarData.elevations[e][product]) liveRadarData.elevations[e][product] = [];
+                    liveRadarData.elevations[e][product][masterIdx] = moments[i];
                 }
             }
+            if (!liveRadarData.lastUpdated) liveRadarData.lastUpdated = new Array(liveRadarData.azimuths.length).fill(0);
+            liveRadarData.lastUpdated[masterIdx] = now;
         }
     });
 }
 
-initWebSocket();
+function updateRadarSelector() {
+    const radarSelect = document.getElementById('radar-select');
+    if (!radarSelect) return;
+    
+    // Clear existing options
+    radarSelect.innerHTML = '<option value="composite">Composite (Multi-site)</option>';
+    
+    // Sort and add stations
+    const sorted = [...NEXRAD_STATIONS].sort((a, b) => a.id.localeCompare(b.id));
+    sorted.forEach(station => {
+        const option = document.createElement('option');
+        option.value = station.id;
+        option.text = `${station.id.toUpperCase()} - ${station.name}`;
+        radarSelect.add(option);
+    });
 
-const COLOR_SCALES = {
-    reflectivity: (val) => {
-        if (val === null || val < 5) return null;
-        if (val < 10) return '#00ecec';
-        if (val < 15) return '#01a0f6';
-        if (val < 20) return '#0000f6';
-        if (val < 25) return '#00ff00';
-        if (val < 30) return '#00c800';
-        if (val < 35) return '#009000';
-        if (val < 40) return '#ffff00';
-        if (val < 45) return '#e7c000';
-        if (val < 50) return '#ff9000';
-        if (val < 55) return '#ff0000';
-        if (val < 60) return '#d60000';
-        if (val < 65) return '#c00000';
-        if (val < 70) return '#ff00ff';
-        if (val < 75) return '#9955c9';
-        return '#ffffff';
-    },
-    velocity: (val) => {
-        if (val === null) return null;
-        if (val < -60) return '#00ff00';
-        if (val < -40) return '#00cc00';
-        if (val < -20) return '#008800';
-        if (val < 0) return '#004400';
-        if (val === 0) return '#777777';
-        if (val < 20) return '#440000';
-        if (val < 40) return '#880000';
-        if (val < 60) return '#cc0000';
-        return '#ff0000';
-    },
-    debris: (val) => {
-        if (val === null || val < 0.7) return null;
-        if (val < 0.8) return '#ff00ff'; 
-        if (val < 0.9) return '#0000ff';
-        if (val < 0.95) return '#00ffff';
-        if (val < 0.98) return '#00ff00';
-        return '#ffff00';
+    if (selectedRadarId) radarSelect.value = selectedRadarId;
+}
+
+function getNearbyRadars() {
+    const center = map.getCenter();
+    return NEXRAD_STATIONS.map(s => ({
+        ...s,
+        dist: center.distanceTo([s.lat, s.lon])
+    })).sort((a, b) => a.dist - b.dist).slice(0, 10);
+}
+
+function updateTemperatureGradient() {
+    if (currentRadarMode !== 'temperature') return;
+    const bounds = map.getBounds();
+    const ne = bounds.getNorthEast();
+    const sw = bounds.getSouthWest();
+    // In a real app, you might fetch temperature contours here.
+    // For this prototype, the NDFD WMS layer is sufficient.
+}
+
+function toggleLoop() {
+    isLooping = !isLooping;
+    const btn = document.getElementById('btn-loop');
+    if (!btn) return;
+
+    if (isLooping) {
+        btn.innerText = 'Stop Loop';
+        btn.classList.add('active');
+        startLoop();
+    } else {
+        btn.innerText = 'Play Loop';
+        btn.classList.remove('active');
+        stopLoop();
     }
-};
+}
+
+function startLoop() {
+    console.log('Starting radar loop...');
+    // IEM maintains a 5-minute interval for the last hour
+    const now = new Date();
+    loopTimestamps = [];
+    for (let i = 11; i >= 0; i--) {
+        const d = new Date(now.getTime() - i * 5 * 60000);
+        const yyyy = d.getUTCFullYear();
+        const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
+        const dd = String(d.getUTCDate()).padStart(2, '0');
+        const hh = String(d.getUTCHours()).padStart(2, '0');
+        const min = String(Math.floor(d.getUTCMinutes() / 5) * 5).padStart(2, '0');
+        loopTimestamps.push(`${yyyy}-${mm}-${dd}T${hh}:${min}:00Z`);
+    }
+
+    if (!initialRadarLoadComplete) {
+        console.log('Prioritizing initial radar view, deferring loop preload.');
+        pendingLoopPreload = loopTimestamps;
+        return;
+    }
+
+    preloadLoopLayers(loopTimestamps);
+}
+
+function preloadLoopLayers(timestamps) {
+    loopLayers = timestamps.map(ts => {
+        return L.tileLayer.wms('https://mesonet.agron.iastate.edu/cgi-bin/wms/nexrad/n0q.cgi', {
+            layers: 'nexrad-n0q',
+            format: 'image/png',
+            transparent: true,
+            opacity: 0.8,
+            time: ts
+        });
+    });
+
+    currentLoopIndex = 0;
+    loopInterval = setInterval(() => {
+        if (loopLayers.length === 0) return;
+        
+        const oldLayer = loopLayers[currentLoopIndex];
+        currentLoopIndex = (currentLoopIndex + 1) % loopLayers.length;
+        const newLayer = loopLayers[currentLoopIndex];
+        
+        if (map.hasLayer(radarReflectivity)) map.removeLayer(radarReflectivity);
+        newLayer.addTo(map);
+        radarReflectivity = newLayer;
+        
+        // Update timestamp display
+        const date = new Date(timestamps[currentLoopIndex]);
+        document.getElementById('timestamp').innerText = date.toLocaleString() + ' (Looping)';
+    }, 800);
+}
+
+function stopLoop() {
+    if (loopInterval) clearInterval(loopInterval);
+    loopInterval = null;
+    updateReflectivityLayer();
+    map.addLayer(radarReflectivity);
+    updateTimestamp();
+}
+
+function updateTimestamp() {
+    const now = new Date();
+    document.getElementById('timestamp').innerText = now.toLocaleString();
+}
+
+setInterval(updateTimestamp, 1000);
+updateTimestamp();
 
 function setupRadarButtons() {
-    console.log('Initializing radar buttons...');
     const reflectivityBtn = document.getElementById('btn-reflectivity');
     const liveTrackingBtn = document.getElementById('btn-live-tracking');
     const velocityBtn = document.getElementById('btn-velocity');
     const temperatureBtn = document.getElementById('btn-temperature');
-    const loopBtn = document.getElementById('btn-loop');
-    
-    const liveOptions = document.getElementById('live-tracking-options');
     const btnLiveReflectivity = document.getElementById('btn-live-reflectivity');
     const btnLiveVelocity = document.getElementById('btn-live-velocity');
     const btnLiveDebris = document.getElementById('btn-live-debris');
-
+    const loopBtn = document.getElementById('btn-loop');
+    
     const reflectivityLegend = document.getElementById('reflectivity-legend');
     const velocityLegend = document.getElementById('velocity-legend');
     const liveIndicator = document.getElementById('live-indicator');
@@ -1412,10 +1047,11 @@ const RadarCanvasLayer = L.Layer.extend({
 
         this._offscreenCanvas = document.createElement('canvas');
         this._offscreenCtx = this._offscreenCanvas.getContext('2d');
+        this._tempCanvas = document.createElement('canvas'); // Reuse for shifting
         this._needsFullRedraw = true;
 
         map.on('viewreset', this._reset, this); 
-        map.on('move', this._onMove, this); // Listen to every move for continuous sync
+        map.on('move', this._onMove, this);
         map.on('moveend', this._reset, this);
         this._reset();
     },
@@ -1430,20 +1066,35 @@ const RadarCanvasLayer = L.Layer.extend({
         this._offscreenCtx = null;
     },
     _onMove: function() {
-        // Continuous repositioning of the canvas container to prevent "floating"
         const topLeft = map.getBounds().getNorthWest();
         const pos = map.latLngToLayerPoint(topLeft);
+        
+        const dx = this._topLeft.x - pos.x;
+        const dy = this._topLeft.y - pos.y;
+        
+        if (dx !== 0 || dy !== 0) {
+            const dpr = window.devicePixelRatio || 1;
+            // Shift offscreen content to stay geographically locked during pans
+            this._tempCanvas.width = this._offscreenCanvas.width;
+            this._tempCanvas.height = this._offscreenCanvas.height;
+            const tCtx = this._tempCanvas.getContext('2d');
+            tCtx.drawImage(this._offscreenCanvas, 0, 0);
+            
+            this._offscreenCtx.clearRect(0, 0, this._offscreenCanvas.width, this._offscreenCanvas.height);
+            this._offscreenCtx.drawImage(this._tempCanvas, dx * dpr, dy * dpr);
+        }
+
         L.DomUtil.setPosition(this._container, pos);
         this._topLeft = pos;
-        this._draw(); // Redraw on every move to keep alignment perfect
+        this._draw(); 
     },
     _getPixelsPerKm: function(stationLat, stationLon) {
-        // High-precision local scale calculation
-        const centerLayer = map.latLngToLayerPoint([stationLat, stationLon]);
-        // 1km North is approx 0.00899 degrees
-        const refPoint = L.latLng(stationLat + 0.00899, stationLon);
-        const refLayer = map.latLngToLayerPoint(refPoint);
-        return centerLayer.distanceTo(refLayer); // 1km in pixels
+        // High-precision scale calculation using geodesic points
+        const lat2 = stationLat + 0.01;
+        const p1 = map.latLngToLayerPoint([stationLat, stationLon]);
+        const p2 = map.latLngToLayerPoint([lat2, stationLon]);
+        const distMeters = L.latLng(stationLat, stationLon).distanceTo(L.latLng(lat2, stationLon));
+        return (p1.distanceTo(p2) / distMeters) * 1000;
     },
     _reset: function() {
         const size = map.getSize();
@@ -1484,7 +1135,7 @@ const RadarCanvasLayer = L.Layer.extend({
 
         const azArray = liveRadarData.azimuths;
         const angularRes = 360 / azArray.length;
-        const arcWidthRad = (angularRes * Math.PI / 180) * 2.2; // Significant overlap for smoothness
+        const arcWidthRad = (angularRes * Math.PI / 180) * 2.5; // High overlap for smoothness
         const zoom = map.getZoom();
         const gateStep = 1; 
         const scale = COLOR_SCALES[momentKey];
@@ -1529,7 +1180,7 @@ const RadarCanvasLayer = L.Layer.extend({
                         const r2 = (firstGateActual + j * gateSizeKm) * pixelsPerKm;
                         ctx.fillStyle = currentColor;
                         ctx.strokeStyle = currentColor;
-                        ctx.lineWidth = 1.2; 
+                        ctx.lineWidth = 1.5; // Thick bleed for manual anti-aliasing
                         ctx.beginPath();
                         ctx.arc(0, 0, r1, -arcWidthRad/2, arcWidthRad/2);
                         ctx.arc(0, 0, r2, arcWidthRad/2, -arcWidthRad/2, true);
@@ -1571,8 +1222,7 @@ const RadarCanvasLayer = L.Layer.extend({
 
         const azArray = liveRadarData.azimuths;
         const angularRes = 360 / azArray.length;
-        const arcWidthRad = (angularRes * Math.PI / 180) * 2.2; 
-        const zoom = map.getZoom();
+        const arcWidthRad = (angularRes * Math.PI / 180) * 2.5; 
         const gateStep = 1; 
         const scale = COLOR_SCALES[momentKey];
 
@@ -1631,7 +1281,7 @@ const RadarCanvasLayer = L.Layer.extend({
                             const r2 = (firstGateActual + j * gateSizeKm) * pixelsPerKm;
                             ctx.fillStyle = currentColor;
                             ctx.strokeStyle = currentColor;
-                            ctx.lineWidth = 1.2;
+                            ctx.lineWidth = 1.5;
                             ctx.beginPath();
                             ctx.arc(0, 0, r1, -arcWidthRad/2, arcWidthRad/2);
                             ctx.arc(0, 0, r2, arcWidthRad/2, -arcWidthRad/2, true);
@@ -1647,7 +1297,7 @@ const RadarCanvasLayer = L.Layer.extend({
                 const roundedAz = Math.round(radialAz * 10) / 10;
                 if (liveRadarData.radialsMap && liveRadarData.radialsMap.has(roundedAz)) {
                     const radial = liveRadarData.radialsMap.get(roundedAz);
-                    radial.revealedUpdate = 1;
+                    radial.revealedUpdate = 1; // Mark as revealed
                 }
                 liveRadarData.revealedUpdate[i] = 1;
             }
