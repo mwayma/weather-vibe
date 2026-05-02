@@ -1632,8 +1632,9 @@ const RadarCanvasLayer = L.Layer.extend({
             const radialAz = azArray[i];
             let diff = (currentAz - radialAz + 360) % 360;
             
-            // Draw a wider 60-degree fading tail for a more dramatic effect
-            if (diff > 60) continue; 
+            // Allow the highlight/trail to persist for the full revolution (360 degrees)
+            // This ensures the data is always visible.
+            if (diff > 360) continue; 
 
             const moment = momentArray[i];
             if (!moment || !moment.moment_data) continue;
@@ -1642,10 +1643,15 @@ const RadarCanvasLayer = L.Layer.extend({
             ctx.save();
             ctx.rotate(-azimuth);
 
-            // Stronger highlight near the leading edge, fading out over 60 degrees
-            let alpha = 0.4 * (1 - diff / 60);
-            // Add a sharp "glow" boost at the very front (first 2 degrees)
-            if (diff < 2) alpha += 0.4;
+            // Base alpha: high visibility (0.8) for the first 90 degrees, 
+            // then slowly fading to 0.4 over the remaining 270 degrees.
+            let alpha = 0.8;
+            if (diff > 90) {
+                alpha = 0.8 - (0.4 * ((diff - 90) / 270));
+            }
+
+            // Add a sharp "glow" boost at the very front (first 5 degrees)
+            if (diff < 5) alpha = Math.min(1.0, alpha + 0.3);
             
             ctx.globalAlpha = alpha;
 
