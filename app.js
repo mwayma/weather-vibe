@@ -89,6 +89,20 @@ const stationTempsCache = {};
 // Track the currently active radar layer to allow redraws
 let radarLayer = radarReflectivity;
 
+// Track initial load for prioritization
+let initialRadarLoadComplete = false;
+let pendingLoopPreload = null;
+
+radarReflectivity.once('load', () => {
+    console.log('Initial radar precipitation tiles loaded.');
+    initialRadarLoadComplete = true;
+    if (pendingLoopPreload) {
+        console.log('Starting deferred loop pre-loading.');
+        preloadLoopLayers(pendingLoopPreload);
+        pendingLoopPreload = null;
+    }
+});
+
 // Track current mode globally so the selector knows what is allowed
 let currentRadarMode = 'reflectivity';
 
@@ -294,38 +308,6 @@ function renderAlerts() {
     
 }
 
-function checkRadarStatus() {
-    const warningDiv = document.getElementById('radar-status-warning');
-    if (!selectedRadarId || selectedRadarId === 'composite') {
-        if (warningDiv) warningDiv.style.display = 'none';
-        return;
-    }
-
-    const metaUrl = `https://mesonet.agron.iastate.edu/api/1/radar/${selectedRadarId}/meta`;
-
-    fetch(metaUrl)
-        .then(res => {
-            if (!res.ok) throw new Error('API not available');
-            return res.json();
-        })
-        .then(meta => {
-            if (meta && meta.vcp) {
-                const vcp = meta.vcp;
-                if ((vcp === 31 || vcp === 32) && warningDiv) {
-                    warningDiv.innerText = `WARNING: ${selectedRadarId} is in Clear Air Mode (VCP ${vcp}). Velocity, CC, and ZDR products may be unavailable.`;
-                    warningDiv.style.display = 'block';
-                } else if (warningDiv) {
-                    warningDiv.style.display = 'none';
-                }
-            } else if (warningDiv) {
-                warningDiv.style.display = 'none';
-            }
-        })
-        .catch(err => {
-            if (warningDiv) warningDiv.style.display = 'none';
-        });
-}
-
 // 4. Dynamic City Labels with Collision Detection
 const cityLayer = L.layerGroup().addTo(map);
 let allCities = [];
@@ -336,92 +318,81 @@ fetch('data/cities.json')
     .then(res => res.json())
     .then(cities => {
         allCities = cities.map(c => ({
-            ...c,
+            city: c.city,
+            state: c.state,
+            latitude: c.latitude,
+            longitude: c.longitude,
+            population: c.population,
             pop: parseInt(c.population) || 5000,
-            latlng: L.latLng(c.latitude, c.longitude)
+            station: c.station
         }));
         // Sort by population descending so we process larger cities first
         allCities.sort((a, b) => b.pop - a.pop);
+        citiesWorker.postMessage({ type: 'init', data: allCities });
         updateVisibleCities();
     });
+
+const citiesWorker = new Worker('cities-worker.js');
+citiesWorker.onmessage = function(e) {
+    const { visibleMarkers } = e.data;
+    renderVisibleCities(visibleMarkers);
+};
 
 function updateVisibleCities() {
     if (!isCitiesVisible) return;
     if (!allCities || allCities.length === 0) return;
     
-    cityLayer.clearLayers();
-
     const bounds = map.getBounds();
-    const north = bounds.getNorth();
-    const south = bounds.getSouth();
-    const east = bounds.getEast();
-    const west = bounds.getWest();
     const zoom = map.getZoom();
     
-    // Calculate collision gaps based on zoom
-    const minGapLat = 45 / Math.pow(2, zoom);
-    const minGapLng = 75 / Math.pow(2, zoom); 
+    const data = {
+        bounds: {
+            south: bounds.getSouth(),
+            north: bounds.getNorth(),
+            west: bounds.getWest(),
+            east: bounds.getEast()
+        },
+        zoom: zoom,
+        minGapLat: 45 / Math.pow(2, zoom),
+        minGapLng: 75 / Math.pow(2, zoom),
+        maxCitiesOnScreen: zoom < 7 ? 12 : 25
+    };
+
+    citiesWorker.postMessage({ type: 'update', data });
+}
+
+function renderVisibleCities(visibleMarkers) {
+    cityLayer.clearLayers();
     
-    // Dynamically limit how many cities to draw based on zoom level
-    const maxCitiesOnScreen = zoom < 7 ? 12 : 25;
-    
-    const visibleMarkers = [];
+    visibleMarkers.forEach(city => {
+        let tempHtml = '';
+        const safeCityId = (city.city + city.state).replace(/[^a-zA-Z0-9]/g, '');
 
-    for (let i = 0; i < allCities.length; i++) {
-        const city = allCities[i];
-
-        // 1. Raw math check for bounding box (vastly faster than Leaflet's bounds.contains)
-        if (city.latitude >= south && city.latitude <= north && 
-            city.longitude >= west && city.longitude <= east) {
-            
-            // 2. Collision detection
-            const isTooClose = visibleMarkers.some(m => {
-                return Math.abs(m.latitude - city.latitude) < minGapLat && 
-                       Math.abs(m.longitude - city.longitude) < minGapLng;
-            });
-
-            // 3. Add to map if it fits
-            if (!isTooClose) {
-                let tempHtml = '';
-                const safeCityId = (city.city + city.state).replace(/[^a-zA-Z0-9]/g, '');
-
-                if (currentRadarMode === 'temperature' && city.station) {
-                    const stationId = city.station;
-                    if (stationTempsCache[stationId] && stationTempsCache[stationId] !== 'fetching') {
-                        tempHtml = `<div id="temp-${safeCityId}" class="station-${stationId}" style="color: #ffcc00; font-size: 1.1em; font-weight: bold; text-shadow: 1px 1px 2px #000;">${stationTempsCache[stationId]}&deg;</div>`;
-                    } else {
-                        tempHtml = `<div id="temp-${safeCityId}" class="station-${stationId}" style="color: #ffcc00; font-size: 1.1em; font-weight: bold; text-shadow: 1px 1px 2px #000;">...</div>`;
-                        fetchCityTempDisplay(city, safeCityId);
-                    }
-                }
-
-                const marker = L.marker(city.latlng, {
-                    icon: L.divIcon({
-                        className: 'city-label',
-                        html: `<div style="text-align: center;"><span>${city.city}</span>${tempHtml}</div>`,
-                        iconAnchor: [0, 0]
-                    }),
-                    interactive: true
-                });
-                
-                marker.on('click', () => {
-                    fetchCityWeather(city, marker);
-                });
-
-                // Store raw coords on the marker for faster collision checking
-                marker.latitude = city.latitude;
-                marker.longitude = city.longitude;
-                
-                marker.addTo(cityLayer);
-                visibleMarkers.push(marker);
+        if (currentRadarMode === 'temperature' && city.station) {
+            const stationId = city.station;
+            if (stationTempsCache[stationId] && stationTempsCache[stationId] !== 'fetching') {
+                tempHtml = `<div id="temp-${safeCityId}" class="station-${stationId}" style="color: #ffcc00; font-size: 1.1em; font-weight: bold; text-shadow: 1px 1px 2px #000;">${stationTempsCache[stationId]}&deg;</div>`;
+            } else {
+                tempHtml = `<div id="temp-${safeCityId}" class="station-${stationId}" style="color: #ffcc00; font-size: 1.1em; font-weight: bold; text-shadow: 1px 1px 2px #000;">...</div>`;
+                fetchCityTempDisplay(city, safeCityId);
             }
         }
+
+        const marker = L.marker(L.latLng(city.latitude, city.longitude), {
+            icon: L.divIcon({
+                className: 'city-label',
+                html: `<div style="text-align: center;"><span>${city.city}</span>${tempHtml}</div>`,
+                iconAnchor: [0, 0]
+            }),
+            interactive: true
+        });
         
-        // 4. THE MAGIC: Stop processing entirely once we have enough cities!
-        if (visibleMarkers.length >= maxCitiesOnScreen) {
-            break;
-        }
-    }
+        marker.on('click', () => {
+            fetchCityWeather(city, marker);
+        });
+
+        marker.addTo(cityLayer);
+    });
 }
 
 async function fetchCityWeather(city, marker) {
@@ -611,19 +582,24 @@ function checkRadarScan() {
         
         const times = [];
         const latestDate = new Date(now.getTime());
-        for (let i = 0; i < 12; i++) {
+        for (let i = 0; i < 6; i++) {
             const d = new Date(latestDate.getTime() - (i * 5 * 60000));
             times.push(formatIEMTime(d));
         }
         loopTimestamps = times.reverse(); 
         
+        // Background load loop frames
         if (!isLooping) {
             if (typeof radarLayer !== 'undefined' && radarLayer && typeof radarLayer.setParams === 'function') {
                 radarLayer.setParams({ _cb: new Date().getTime() }, false);
             }
-            checkRadarStatus(); 
-        } else {
-            if (loopLayers.length > 0) {
+            
+            if (initialRadarLoadComplete) {
+                preloadLoopLayers(loopTimestamps);
+            } else {
+                pendingLoopPreload = loopTimestamps;
+            }
+        } else {            if (loopLayers.length > 0) {
                 const oldLayer = loopLayers.shift();
                 map.removeLayer(oldLayer); 
                 
@@ -647,6 +623,23 @@ checkRadarScan();
 setInterval(checkRadarScan, 30000);
 updateAlerts();
 
+function preloadLoopLayers(timestamps) {
+    // Clear existing loop layers if they exist and we're not looping
+    if (!isLooping) {
+        loopLayers.forEach(l => map.removeLayer(l));
+        loopLayers = timestamps.map(ts => {
+            return L.tileLayer.wms('https://mesonet.agron.iastate.edu/cgi-bin/wms/nexrad/n0q-t.cgi', {
+                layers: 'nexrad-n0q-wmst',
+                format: 'image/png',
+                transparent: true,
+                opacity: 0, 
+                time: ts,
+                attribution: 'Radar: IEM NEXRAD'
+            }).addTo(map);
+        });
+    }
+}
+
 // Radar Playback Loop functions
 function toggleLoop() {
     const loopBtn = document.getElementById('btn-loop');
@@ -659,34 +652,41 @@ function toggleLoop() {
         
         if (loopTimestamps.length > 0) {
             currentLoopIndex = 0;
-            let loadedCount = 0;
-            document.getElementById('timestamp').innerText = `Loading loop frames (0/${loopTimestamps.length})...`;
             
             if (map.hasLayer(radarReflectivity)) map.removeLayer(radarReflectivity);
             
-            loopLayers = loopTimestamps.map(ts => {
-                const layer = L.tileLayer.wms('https://mesonet.agron.iastate.edu/cgi-bin/wms/nexrad/n0q-t.cgi', {
-                    layers: 'nexrad-n0q-wmst',
-                    format: 'image/png',
-                    transparent: true,
-                    opacity: 0, 
-                    time: ts,
-                    attribution: 'Radar: IEM NEXRAD'
-                });
-                
-                layer.on('load', function onLayerLoad() {
-                    layer.off('load', onLayerLoad);
-                    loadedCount++;
-                    if (isLooping && !loopInterval) {
-                        document.getElementById('timestamp').innerText = `Loading loop frames (${loadedCount}/${loopTimestamps.length})...`;
-                        if (loadedCount === loopTimestamps.length) {
-                            loopInterval = setInterval(advanceLoop, 1000);
-                            advanceLoop();
+            // If we don't have loop layers yet (e.g. just started), load them
+            if (loopLayers.length === 0) {
+                let loadedCount = 0;
+                document.getElementById('timestamp').innerText = `Loading loop frames (0/${loopTimestamps.length})...`;
+                loopLayers = loopTimestamps.map(ts => {
+                    const layer = L.tileLayer.wms('https://mesonet.agron.iastate.edu/cgi-bin/wms/nexrad/n0q-t.cgi', {
+                        layers: 'nexrad-n0q-wmst',
+                        format: 'image/png',
+                        transparent: true,
+                        opacity: 0, 
+                        time: ts,
+                        attribution: 'Radar: IEM NEXRAD'
+                    });
+                    
+                    layer.on('load', function onLayerLoad() {
+                        layer.off('load', onLayerLoad);
+                        loadedCount++;
+                        if (isLooping && !loopInterval) {
+                            document.getElementById('timestamp').innerText = `Loading loop frames (${loadedCount}/${loopTimestamps.length})...`;
+                            if (loadedCount === loopTimestamps.length) {
+                                loopInterval = setInterval(advanceLoop, 1000);
+                                advanceLoop();
+                            }
                         }
-                    }
+                    });
+                    return layer.addTo(map);
                 });
-                return layer.addTo(map);
-            });
+            } else {
+                // Use already pre-loaded layers
+                loopInterval = setInterval(advanceLoop, 1000);
+                advanceLoop();
+            }
         }
     } else {
         if (loopBtn) {
@@ -695,8 +695,7 @@ function toggleLoop() {
         }
         clearInterval(loopInterval);
         loopInterval = null;
-        loopLayers.forEach(layer => map.removeLayer(layer));
-        loopLayers = [];
+        loopLayers.forEach(layer => layer.setOpacity(0)); // Keep them but hide them
         updateRadarLayersBasedOnMode();
         if (lastScanTime) document.getElementById('timestamp').innerText = `Last Checked: ${new Date().toLocaleTimeString()}`;
     }
@@ -1037,7 +1036,6 @@ function setupRadarSelector() {
     radarSelect.addEventListener('change', (e) => {
         selectedRadarId = e.target.value;
         updateRadarLayersBasedOnMode();
-        checkRadarStatus();
     });
     updateRadarSelector();
 }
@@ -1102,6 +1100,10 @@ function updateRadarLayersBasedOnMode() {
     if (map.hasLayer(radarVelocity)) map.removeLayer(radarVelocity);
     if (map.hasLayer(radarTemperature)) map.removeLayer(radarTemperature);
     
+    // Explicitly de-reference large data objects before clearing
+    liveRadarData = null;
+    liveCanvasLayer = null;
+    
     liveTrackingLayer.clearLayers();
     if (liveScanInterval) { cancelAnimationFrame(liveScanInterval); liveScanInterval = null; }
     if (liveDataRefreshInterval) { clearInterval(liveDataRefreshInterval); liveDataRefreshInterval = null; }
@@ -1123,17 +1125,29 @@ function updateRadarLayersBasedOnMode() {
 }
 
 function startLiveTracking() {
-    if (!NEXRAD_STATIONS || NEXRAD_STATIONS.length === 0) return;
+    console.log('startLiveTracking called');
+    if (!NEXRAD_STATIONS || NEXRAD_STATIONS.length === 0) {
+        console.warn('NEXRAD_STATIONS is empty');
+        return;
+    }
     if (!selectedRadarId || selectedRadarId === 'composite') {
         const nearby = getNearbyRadars();
+        console.log('Nearby radars:', nearby.map(s => s.id));
         if (nearby.length > 0) {
             selectedRadarId = nearby[0].id;
             const select = document.getElementById('radar-select');
             if (select) select.value = selectedRadarId;
-        } else return;
+        } else {
+            console.warn('No nearby radars found');
+            return;
+        }
     }
     const station = NEXRAD_STATIONS.find(s => s.id === selectedRadarId);
-    if (!station) return;
+    if (!station) {
+        console.warn('Station not found:', selectedRadarId);
+        return;
+    }
+    console.log('Tracking station:', station.id, station.lat, station.lon);
 
     radarStationMarker = L.circleMarker([station.lat, station.lon], {
         radius: 10, fillColor: '#ffffff', color: '#000', weight: 2, opacity: 1, fillOpacity: 1
@@ -1155,7 +1169,6 @@ function startLiveTracking() {
         const dt = time - lastTime;
         lastTime = time;
         
-        // 20 seconds per rev = 360 / 20000 = 0.018 deg/ms
         angle = (angle + 0.018 * dt) % 360; 
         window.currentScanAzimuth = angle;
         
@@ -1208,13 +1221,22 @@ async function fetchLatestLevel2Data(radarId) {
         let parsed = false;
         // Try the latest 3 files (in case the very latest is still being written to S3 and is truncated)
         for (let i = contents.length - 1; i >= Math.max(0, contents.length - 3); i--) {
+            // Stop trying if the user has panned away or selected a different radar
+            if (selectedRadarId !== radarId) break;
+
             const key = contents[i].getElementsByTagName('Key')[0].textContent;
             const fileUrl = `https://unidata-nexrad-level2.s3.amazonaws.com/${key}`;
             
-            const success = await loadAndParseLevel2(fileUrl);
-            if (success) {
-                parsed = true;
-                break;
+            try {
+                console.log(`Attempting to load radar file: ${key}`);
+                const success = await loadAndParseLevel2(fileUrl);
+                if (success) {
+                    parsed = true;
+                    break;
+                }
+            } catch (err) {
+                console.warn(`Failed to parse ${key}, trying older file...`, err.message);
+                // Continue to next iteration (older file)
             }
         }
         
@@ -1227,158 +1249,224 @@ async function fetchLatestLevel2Data(radarId) {
     }
 }
 
-async function loadAndParseLevel2(url) {
-    document.getElementById('timestamp').innerText = `Downloading...`;
-    try {
-        const res = await fetch(url);
-        const arrayBuffer = await res.arrayBuffer();
-        let data = new Uint8Array(arrayBuffer);
-        if (url.endsWith('.gz')) data = pako.ungzip(data);
-        else if (url.endsWith('.bz2')) data = new Uint8Array(bzip2.decode(data));
-        
-        // Use the bundled parsing function which includes the correct Buffer polyfill internally
-        const parsedRadar = window.parseRadarData(data);
-        
-        // The parsing library catches its own offset errors and returns an empty/truncated object
-        // We must manually reject these so the fallback loop tries an older, complete file.
-        if (parsedRadar.isTruncated || !parsedRadar.data || Object.keys(parsedRadar.data).length === 0) {
-            throw new Error('File is truncated or empty (actively being written by NOAA)');
-        }
-        
-        liveRadarData = parsedRadar;
-        
+const radarWorker = new Worker('radar-worker.js');
+const pendingWorkerRequests = new Map();
+
+radarWorker.onmessage = function(e) {
+    const { result, error, url } = e.data;
+    
+    const promise = pendingWorkerRequests.get(url);
+    if (promise) {
+        if (error) promise.reject(new Error(error));
+        else promise.resolve(result);
+        pendingWorkerRequests.delete(url);
+    }
+
+    if (!error) {
+        liveRadarData = result;
         document.getElementById('timestamp').innerText = `Live: ${url.split('/').pop()}`;
         renderLiveRadar();
-        return true;
-    } catch (err) { 
-        console.warn('Parse error for', url, ':', err.message); 
-        return false;
     }
+};
+
+async function loadAndParseLevel2(url) {
+    document.getElementById('timestamp').innerText = `Downloading...`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const arrayBuffer = await res.arrayBuffer();
+    
+    return new Promise((resolve, reject) => {
+        pendingWorkerRequests.set(url, { resolve, reject });
+        radarWorker.postMessage({ data: arrayBuffer, url: url }, [arrayBuffer]);
+    });
 }
 
+const RadarCanvasLayer = L.Layer.extend({
+    onAdd: function(map) {
+        this._container = L.DomUtil.create('canvas', 'leaflet-zoom-animated');
+        this._container.style.pointerEvents = 'none';
+        map.getPanes().overlayPane.appendChild(this._container);
+
+        this._offscreenCanvas = document.createElement('canvas');
+        this._offscreenCtx = this._offscreenCanvas.getContext('2d');
+        this._needsFullRedraw = true;
+
+        map.on('viewreset', this._reset, this); 
+        map.on('moveend', this._reset, this);
+        this._reset();
+    },
+    onRemove: function(map) {
+        if (this._container && this._container.parentNode) {
+            this._container.parentNode.removeChild(this._container);
+        }
+        map.off('viewreset', this._reset, this); 
+        map.off('moveend', this._reset, this);
+        this._offscreenCanvas = null;
+        this._offscreenCtx = null;
+    },
+    _reset: function() {
+        const size = map.getSize();
+        this._container.width = size.x; 
+        this._container.height = size.y;
+        const pos = map.latLngToLayerPoint(map.getBounds().getNorthWest());
+        L.DomUtil.setPosition(this._container, pos);
+        this._topLeft = pos;
+        this._needsFullRedraw = true;
+        this._draw();
+    },
+    _renderToOffscreen: function(center, pixelsPerKm) {
+        if (!this._offscreenCanvas || !this._offscreenCtx) return;
+        const ctx = this._offscreenCtx;
+        this._offscreenCanvas.width = this._container.width;
+        this._offscreenCanvas.height = this._container.height;
+        ctx.clearRect(0, 0, this._offscreenCanvas.width, this._offscreenCanvas.height);
+
+        if (!liveRadarData || !liveRadarData.elevations) return;
+
+        let momentKey = 'reflectivity';
+        if (currentLiveMode === 'velocity') { momentKey = 'velocity'; }
+        else if (currentLiveMode === 'debris') { momentKey = 'debris'; }
+
+        let momentArray = [];
+        for (let e = 1; e <= 5; e++) {
+            const temp = liveRadarData.elevations[e] ? liveRadarData.elevations[e][momentKey] : null;
+            if (temp && temp.some(m => m && m.moment_data)) { momentArray = temp; break; }
+        }
+        if (momentArray.length === 0) return;
+
+        const azArray = liveRadarData.azimuths;
+        const angularRes = 360 / azArray.length;
+        const arcWidthRad = (angularRes * Math.PI / 180) * 1.1;
+        const zoom = map.getZoom();
+        const gateStep = zoom < 7 ? 4 : (zoom < 9 ? 2 : 1);
+        const scale = COLOR_SCALES[momentKey];
+
+        ctx.save();
+        ctx.translate(center.x, center.y);
+        ctx.globalAlpha = 0.65;
+
+        for (let i = 0; i < azArray.length; i++) {
+            const radialAz = azArray[i];
+            const moment = momentArray[i];
+            if (!moment || !moment.moment_data) continue;
+
+            const azimuth = (90 - radialAz) * Math.PI / 180;
+            ctx.save();
+            ctx.rotate(-azimuth);
+
+            const firstGateKm = moment.first_gate / 1000;
+            const firstGateActual = firstGateKm < 1 ? moment.first_gate : firstGateKm;
+            const gateSizeKm = moment.gate_size;
+            const data = moment.moment_data;
+
+            for (let j = 0; j < data.length; j += gateStep) {
+                const val = data[j];
+                if (val === null || val === undefined) continue;
+                const color = scale(val);
+                if (color) {
+                    const r1 = (firstGateActual + j * gateSizeKm) * pixelsPerKm;
+                    const r2 = r1 + (gateSizeKm * gateStep) * pixelsPerKm;
+                    ctx.fillStyle = color;
+                    const width = arcWidthRad * r1;
+                    ctx.fillRect(r1, -width/2, r2 - r1 + 0.5, Math.max(1, width));
+                }
+            }
+            ctx.restore();
+        }
+        ctx.restore();
+        this._needsFullRedraw = false;
+    },
+    _draw: function() {
+        if (!this._topLeft || !this._container || !this._offscreenCanvas) return;
+        const ctx = this._container.getContext('2d');
+        const station = NEXRAD_STATIONS.find(s => s.id === selectedRadarId);
+        if (!station || !liveRadarData) return;
+
+        const centerLayer = map.latLngToLayerPoint([station.lat, station.lon]);
+        const center = { x: centerLayer.x - this._topLeft.x, y: centerLayer.y - this._topLeft.y };
+        const edge = L.latLng(station.lat, station.lon).toBounds(2000).getNorthEast();
+        const edgeLayer = map.latLngToLayerPoint(edge);
+        const pixelsPerKm = centerLayer.distanceTo(edgeLayer) / Math.sqrt(2);
+
+        if (this._needsFullRedraw) {
+            this._renderToOffscreen(center, pixelsPerKm);
+        }
+
+        ctx.clearRect(0, 0, this._container.width, this._container.height);
+        ctx.drawImage(this._offscreenCanvas, 0, 0);
+
+        const currentAz = window.currentScanAzimuth || 0;
+        let momentKey = 'reflectivity';
+        if (currentLiveMode === 'velocity') { momentKey = 'velocity'; }
+        else if (currentLiveMode === 'debris') { momentKey = 'debris'; }
+
+        let momentArray = [];
+        for (let e = 1; e <= 5; e++) {
+            const temp = liveRadarData.elevations[e] ? liveRadarData.elevations[e][momentKey] : null;
+            if (temp && temp.some(m => m && m.moment_data)) { momentArray = temp; break; }
+        }
+        if (momentArray.length === 0) return;
+
+        const azArray = liveRadarData.azimuths;
+        const angularRes = 360 / azArray.length;
+        const arcWidthRad = (angularRes * Math.PI / 180) * 1.1;
+        const zoom = map.getZoom();
+        const gateStep = zoom < 7 ? 4 : (zoom < 9 ? 2 : 1);
+        const scale = COLOR_SCALES[momentKey];
+
+        ctx.save();
+        ctx.translate(center.x, center.y);
+
+        for (let i = 0; i < azArray.length; i++) {
+            const radialAz = azArray[i];
+            let diff = (currentAz - radialAz + 360) % 360;
+            if (diff > 30) continue;
+
+            const moment = momentArray[i];
+            if (!moment || !moment.moment_data) continue;
+
+            const azimuth = (90 - radialAz) * Math.PI / 180;
+            ctx.save();
+            ctx.rotate(-azimuth);
+            ctx.globalAlpha = 0.35 * (1 - diff / 30);
+
+            const firstGateKm = moment.first_gate / 1000;
+            const firstGateActual = firstGateKm < 1 ? moment.first_gate : firstGateKm;
+            const gateSizeKm = moment.gate_size;
+            const data = moment.moment_data;
+
+            for (let j = 0; j < data.length; j += gateStep) {
+                const val = data[j];
+                if (val === null || val === undefined) continue;
+                const color = scale(val);
+                if (color) {
+                    const r1 = (firstGateActual + j * gateSizeKm) * pixelsPerKm;
+                    const r2 = r1 + (gateSizeKm * gateStep) * pixelsPerKm;
+                    ctx.fillStyle = color;
+                    const width = arcWidthRad * r1;
+                    ctx.fillRect(r1, -width/2, r2 - r1 + 0.5, Math.max(1, width));
+                }
+            }
+            ctx.restore();
+        }
+        ctx.restore();
+    }
+});
+
 function renderLiveRadar() {
+    console.log('renderLiveRadar called, mode:', currentRadarMode, 'hasData:', !!liveRadarData);
     if (currentRadarMode !== 'live-tracking') return;
     if (!liveRadarData) return;
-    if (liveCanvasLayer) liveTrackingLayer.removeLayer(liveCanvasLayer);
-    const CanvasLayer = L.Layer.extend({
-        onAdd: function(map) {
-            this._container = L.DomUtil.create('canvas', 'leaflet-zoom-animated');
-            this._container.style.pointerEvents = 'none';
-            map.getPanes().overlayPane.appendChild(this._container);
-            map.on('viewreset', this._reset, this); map.on('moveend', this._reset, this);
-            this._reset();
-        },
-        onRemove: function(map) {
-            map.getPanes().overlayPane.removeChild(this._container);
-            map.off('viewreset', this._reset, this); map.off('moveend', this._reset, this);
-        },
-        _reset: function() {
-            const size = map.getSize();
-            this._container.width = size.x; this._container.height = size.y;
-            const pos = map.latLngToLayerPoint(map.getBounds().getNorthWest());
-            L.DomUtil.setPosition(this._container, pos);
-            this._topLeft = pos;
-            this._draw();
-        },
-        _draw: function() {
-            if (!this._topLeft) return;
-            const ctx = this._container.getContext('2d');
-            ctx.clearRect(0, 0, this._container.width, this._container.height);
-            const station = NEXRAD_STATIONS.find(s => s.id === selectedRadarId);
-            if (!station || !liveRadarData) return;
-            
-            const centerLayer = map.latLngToLayerPoint([station.lat, station.lon]);
-            const center = {
-                x: centerLayer.x - this._topLeft.x,
-                y: centerLayer.y - this._topLeft.y
-            };
-            
-            const edge = L.latLng(station.lat, station.lon).toBounds(2000).getNorthEast(); 
-            const edgeLayer = map.latLngToLayerPoint(edge);
-            const pixelsPerKm = centerLayer.distanceTo(edgeLayer) / Math.sqrt(2);
-            
-            let scale = COLOR_SCALES.reflectivity;
-            let momentArray = [];
-            let method = 'getHighresReflectivity';
-            
-            if (currentLiveMode === 'velocity') { 
-                scale = COLOR_SCALES.velocity; 
-                method = 'getHighresVelocity';
-            } else if (currentLiveMode === 'debris') { 
-                scale = COLOR_SCALES.debris; 
-                method = 'getHighresCorrelationCoefficient';
-            }
-            
-            let foundElevation = false;
-            // Iterate through the lowest elevations to find the requested product (handling Split Cuts)
-            for (let e = 1; e <= 5; e++) {
-                try {
-                    liveRadarData.setElevation(e);
-                    const tempMomentArray = liveRadarData[method]();
-                    
-                    if (tempMomentArray && tempMomentArray.some(m => m !== undefined && m.moment_data)) {
-                        momentArray = tempMomentArray;
-                        foundElevation = true;
-                        break; 
-                    }
-                } catch (err) {}
-            }
 
-            if (!foundElevation) {
-                console.warn(`Moment ${method} not available on any low elevation for this volume scan.`);
-                return;
-            }
-            
-            let azArray;
-            try {
-                azArray = liveRadarData.getAzimuth();
-            } catch(e) { return; }
-
-            const currentAz = window.currentScanAzimuth || 0;
-            const angularRes = 360 / azArray.length;
-            const arcWidthRad = (angularRes * Math.PI / 180) * 1.1; // 10% overlap
-            
-            for (let i = 0; i < azArray.length; i++) {
-                const radialAz = azArray[i];
-                const moment = momentArray[i];
-                if (!moment || !moment.moment_data) continue;
-                
-                let diff = (currentAz - radialAz + 360) % 360;
-                const azimuth = (90 - radialAz) * Math.PI / 180;
-                
-                ctx.save(); 
-                ctx.translate(center.x, center.y); 
-                ctx.rotate(-azimuth); 
-                
-                let alpha = 0.65;
-                if (diff < 30) {
-                    alpha = 0.65 + 0.35 * (1 - diff / 30);
-                }
-                ctx.globalAlpha = alpha;
-                
-                const firstGateKm = moment.first_gate / 1000;
-                const gateSizeKm = moment.gate_size; 
-                const firstGateActual = firstGateKm < 1 ? moment.first_gate : moment.first_gate / 1000;
-                
-                for (let j = 0; j < moment.moment_data.length; j += 2) {
-                    const val = moment.moment_data[j];
-                    if (val === null || val === undefined) continue;
-                    
-                    const color = scale(val);
-                    if (color) {
-                        const r1 = (firstGateActual + j * gateSizeKm) * pixelsPerKm;
-                        const r2 = r1 + (gateSizeKm * 2) * pixelsPerKm;
-                        ctx.fillStyle = color;
-                        const width = arcWidthRad * r1;
-                        ctx.fillRect(r1, -width/2, r2-r1 + 0.5, Math.max(1, width));
-                    }
-                }
-                ctx.restore();
-            }
-        }
-    });
-    liveCanvasLayer = new CanvasLayer();
-    liveCanvasLayer.addTo(liveTrackingLayer);
+    if (!liveCanvasLayer) {
+        console.log('Creating liveCanvasLayer');
+        liveCanvasLayer = new RadarCanvasLayer();
+        liveCanvasLayer.addTo(liveTrackingLayer);
+    } else {
+        console.log('Updating liveCanvasLayer');
+        liveCanvasLayer._needsFullRedraw = true;
+        liveCanvasLayer._draw();
+    }
 }
 
 function initializeAppWithStations(data) {

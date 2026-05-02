@@ -19295,13 +19295,22 @@ module.exports = function whichTypedArray(value) {
 
 }).call(this)}).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
 },{"available-typed-arrays":5,"call-bind":17,"call-bound":18,"for-each":31,"get-proto":38,"gopd":40,"has-tostringtag/shams":44}],122:[function(require,module,exports){
-(function (Buffer){(function (){
+(function (global,Buffer){(function (){
 const { Level2Radar } = require('nexrad-level-2-data');
 
-window.parseRadarData = function(uint8array) {
+const parseRadarData = function(uint8array) {
     const buf = Buffer.from(uint8array);
     return new Level2Radar(buf);
 };
 
-}).call(this)}).call(this,require("buffer").Buffer)
+// Use self as the primary global scope for both Workers and Browsers
+if (typeof self !== 'undefined') {
+    self.parseRadarData = parseRadarData;
+} else if (typeof window !== 'undefined') {
+    window.parseRadarData = parseRadarData;
+} else if (typeof global !== 'undefined') {
+    global.parseRadarData = parseRadarData;
+}
+
+}).call(this)}).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {},require("buffer").Buffer)
 },{"buffer":10,"nexrad-level-2-data":72}]},{},[122]);

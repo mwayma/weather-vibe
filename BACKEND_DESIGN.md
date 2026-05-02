@@ -5,13 +5,19 @@ The current client-side application successfully decodes NEXRAD Level 2 volume s
 
 This document outlines the architecture for an **On-Demand Real-Time Radar Backend**. This backend will only process data for radar stations actively being viewed by a user, parsing sub-minute data "chunks" and pushing them to the client via WebSockets to achieve a broadcast-quality, fluid radar visualization.
 
+This app is for personal amusement to track weather events as they unfold. The live radar tracking must be as near real-time as possible, and highly performant for the end-user. The interface must be responsive, ensuring functionality on mobile browsers is equal to that of desktop browsers.
+
 ## 2. Architecture & Tech Stack
 
 *   **Backend Server:** Node.js or Python (FastAPI).
     *   *Node.js Advantage:* Can easily reuse the existing `nexrad-level-2-data` library (which natively supports chunked processing in its v2+ API).
     *   *Python Advantage:* Access to `Py-ART` (Python ARM Radar Toolkit), the industry standard for meteorological data processing, interpolation, and grid mapping.
 *   **Real-Time Transport:** WebSockets (e.g., `Socket.io` or standard `ws`).
-*   **Data Source:** AWS S3 `unidata-nexrad-level2-chunks` bucket. (Alternatively, a direct LDM (Local Data Manager) feed if running on academic/research infrastructure, but S3 chunks are vastly easier to manage).
+*   **Data Source:** AWS S3 `unidata-nexrad-level2-chunks` bucket.
+*   **Containerization & CI/CD:**
+    *   **Containerization:** Docker container wrapping the application (initially Nginx for static assets, moving to a Node.js/Python backend later). Automated via GitHub Actions.
+    *   **Orchestration:** Deployed to a Kubernetes cluster using ArgoCD Autopilot for GitOps deployment.
+    *   **Hostname:** Exposed at `weather.waymack.org`.
 
 ## 3. Core Data Flow (On-Demand Model)
 
@@ -35,13 +41,12 @@ Even with sub-minute chunks, radar data arrives in discrete slices. To achieve t
 3.  **Intermediate Frames:** Based on the vectors, the backend calculates where the storm will be 1 second from now, 2 seconds from now, etc., generating "fake" intermediate frames.
 4.  **Streaming:** The backend streams these interpolated frames to the client at 30-60 FPS, completely decoupling the visual animation from the radar's physical rotation speed.
 
-*Note: Interpolation requires heavy CPU/GPU processing and is best implemented in Python using libraries like OpenCV (`cv2.calcOpticalFlowFarneback`) or specialized meteorological toolkits.*
-
 ## 5. Client-Side (Browser) Changes
 
 If moving to this architecture, the client app (`app.js`) will become significantly "dumber" and faster:
 
-*   **Remove Binary Parsers:** Remove `pako`, `bzip2-js`, and `nexrad-level-2-data` from the browser.
+*   **Responsive UI:** Ensure CSS and Leaflet configurations are strictly mobile-friendly, providing a seamless experience across desktop and mobile.
+*   **Remove Binary Parsers:** Remove `pako` and `nexrad-level-2-data` from the browser.
 *   **WebSocket Integration:** Implement a persistent WebSocket connection to receive parsed data.
 *   **Incremental Rendering:** Instead of redrawing the entire volume scan every time, the Canvas will simply draw the *new* radials as they arrive over the socket, directly behind the simulated WSR-88D sweep line.
 
