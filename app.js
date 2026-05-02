@@ -739,6 +739,10 @@ function initWebSocket() {
         if (message.type === 'radial_update') {
             console.log('Received real-time radial update:', message.chunk);
             mergeRealTimeData(message.data);
+        } else if (message.type === 'status') {
+            console.log('WebSocket Status:', message.message);
+        } else if (message.type === 'heartbeat') {
+            // Heartbeat received, server is alive
         }
     };
 
