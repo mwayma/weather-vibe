@@ -1431,6 +1431,7 @@ function startLiveTracking() {
             const lastAngle = window._lastSweepAngle !== undefined ? window._lastSweepAngle : currentAngle;
             
             // Sequential Merge: Find buffered radials that fall within this frame's sweep window
+            let mergedAny = false;
             const keys = Array.from(incomingRadialBuffer.keys());
             keys.forEach(roundedAz => {
                 let isInside = false;
@@ -1442,24 +1443,66 @@ function startLiveTracking() {
 
                 if (isInside) {
                     const radial = incomingRadialBuffer.get(roundedAz);
-                    const singleExtracted = {
-                        azimuths: [radial.azimuth],
-                        timestamps: [radial.timestamp],
-                        elevations: {}
-                    };
-                    for (const [e, products] of Object.entries(radial.elevations)) {
-                        singleExtracted.elevations[e] = {};
-                        for (const [product, moment] of Object.entries(products)) {
-                            singleExtracted.elevations[e][product] = [moment];
-                        }
+                    
+                    // Inline merging logic for performance to avoid multiple syncLiveRadarArrays calls
+                    if (!liveRadarData) {
+                        liveRadarData = { radialsMap: new Map(), azimuths: [], lastUpdated: [], revealedUpdate: [], timestamps: [], elevations: {} };
                     }
-                    mergeRealTimeData(singleExtracted);
+                    if (!liveRadarData.radialsMap) liveRadarData.radialsMap = new Map();
+
+                    liveRadarData.radialsMap.set(roundedAz, {
+                        azimuth: radial.azimuth,
+                        timestamp: radial.timestamp,
+                        revealedUpdate: 0,
+                        elevations: radial.elevations
+                    });
+
                     incomingRadialBuffer.delete(roundedAz);
+                    mergedAny = true;
                 }
             });
 
-            liveCanvasLayer._drawIncremental(lastAngle, currentAngle);
-            liveCanvasLayer._draw();
+            if (mergedAny) {
+                syncLiveRadarArrays();
+                renderLiveRadar(); // Ensure layer is initialized
+            }
+
+            if (liveCanvasLayer) {
+                liveCanvasLayer._drawIncremental(lastAngle, currentAngle);
+                liveCanvasLayer._draw();
+            }
+        } else if (liveRadarData || incomingRadialBuffer.size > 0) {
+            // Even if liveCanvasLayer isn't ready, we might need to initialize it 
+            // if we have data in the buffer that should be merged.
+            const lastAngle = window._lastSweepAngle !== undefined ? window._lastSweepAngle : currentAngle;
+            let mergedAny = false;
+            const keys = Array.from(incomingRadialBuffer.keys());
+            keys.forEach(roundedAz => {
+                let isInside = false;
+                if (lastAngle <= currentAngle) {
+                    isInside = (roundedAz >= lastAngle && roundedAz <= currentAngle);
+                } else {
+                    isInside = (roundedAz >= lastAngle || roundedAz <= currentAngle);
+                }
+                if (isInside) {
+                    const radial = incomingRadialBuffer.get(roundedAz);
+                    if (!liveRadarData) {
+                        liveRadarData = { radialsMap: new Map(), azimuths: [], lastUpdated: [], revealedUpdate: [], timestamps: [], elevations: {} };
+                    }
+                    if (!liveRadarData.radialsMap) liveRadarData.radialsMap = new Map();
+                    liveRadarData.radialsMap.set(roundedAz, {
+                        azimuth: radial.azimuth, timestamp: radial.timestamp, revealedUpdate: 0, elevations: radial.elevations
+                    });
+                    incomingRadialBuffer.delete(roundedAz);
+                    mergedAny = true;
+                }
+            });
+            if (mergedAny) {
+                syncLiveRadarArrays();
+            }
+            if (liveRadarData) {
+                renderLiveRadar();
+            }
         }
         
         window._lastSweepAngle = currentAngle;
