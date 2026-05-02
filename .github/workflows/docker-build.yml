@@ -22,11 +22,19 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Extract short SHA
+        id: vars
+        run: echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
       - name: Extract metadata (tags, labels) for Docker
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=latest
+            type=raw,value=main
+            type=raw,value=${{ steps.vars.outputs.sha_short }}
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
@@ -35,3 +43,15 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Update ArgoCD Manifest
+        run: |
+          git config --global user.email "github-actions@github.com"
+          git config --global user.name "GitHub Actions"
+          git clone https://x-access-token:${{ secrets.ARGO }}@github.com/mwayma/argo-manifests.git
+          cd argo-manifests
+          # Update the image tag in the manifest. Assumes image is ghcr.io/mwayma/weather-vibe
+          sed -i "s|image: ghcr.io/mwayma/weather-vibe:.*|image: ghcr.io/mwayma/weather-vibe:${{ steps.vars.outputs.sha_short }}|g" weather-vibe/manifest.yaml
+          git add weather-vibe/manifest.yaml
+          git commit -m "chore: update weather-vibe image to ${{ steps.vars.outputs.sha_short }}"
+          git push origin master
