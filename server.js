@@ -347,12 +347,17 @@ async function pollChunks(stationId) {
                         }
                     });
 
-                    broadcast(stationId, { 
-                        type: 'radial_batch', 
-                        stationId: stationId,
-                        radials: allRadials,
-                        latestAzimuth: allRadials[allRadials.length - 1].azimuth
-                    });
+                    // Split into smaller batches if necessary to avoid WebSocket buffer overflow
+                    const MAX_RADIALS_PER_MESSAGE = 200;
+                    for (let i = 0; i < allRadials.length; i += MAX_RADIALS_PER_MESSAGE) {
+                        const batch = allRadials.slice(i, i + MAX_RADIALS_PER_MESSAGE);
+                        broadcast(stationId, { 
+                            type: 'radial_batch', 
+                            stationId: stationId,
+                            radials: batch,
+                            latestAzimuth: batch[batch.length - 1].azimuth
+                        });
+                    }
                 }
                 
                 if (volPrefix === latestVolPrefix) {
