@@ -34,8 +34,10 @@ function sendStatus(stationId, message) {
 
 function mergeRealTimeData(stationId, newData) {
     if (!stationCache.has(stationId)) {
+        // Initialize with fixed-size structure for O(1) access
+        // We use a Map keyed by rounded azimuth (1 decimal place)
         const initialState = {
-            radials: new Map(),
+            radials: new Map(), // roundedAz -> { timestamp, elevations: { e: { product: moments } } }
             stationId: stationId
         };
         stationCache.set(stationId, initialState);
@@ -56,7 +58,7 @@ function mergeRealTimeData(stationId, newData) {
         }
         
         const radial = state.radials.get(roundedAz);
-        radial.timestamp = timestamp;
+        radial.timestamp = timestamp; // Update to latest
 
         for (const [e, elevations] of Object.entries(newData.elevations)) {
             if (!radial.elevations[e]) radial.elevations[e] = {};
@@ -67,6 +69,7 @@ function mergeRealTimeData(stationId, newData) {
     });
 }
 
+// Helper to convert the Map-based cache to the flat format the client expects
 function getConsolidatedData(stationId) {
     const state = stationCache.get(stationId);
     if (!state) return null;
@@ -112,6 +115,7 @@ async function fetchWithTimeout(url, options = {}, timeout = 15000) {
 async function findTrulyLatestVolume(stationId, commonPrefixes) {
     if (commonPrefixes.length === 0) return null;
 
+    // Sort numerically: 1, 2, 3... 999
     const sorted = [...commonPrefixes].sort((a, b) => {
         const numA = parseInt(a.Prefix.split('/')[1]);
         const numB = parseInt(b.Prefix.split('/')[1]);
@@ -121,6 +125,7 @@ async function findTrulyLatestVolume(stationId, commonPrefixes) {
     const highestNumPrefix = sorted[sorted.length - 1].Prefix;
     const lowestNumPrefix = sorted[0].Prefix;
 
+    // Peek at the first chunk of both to compare timestamps
     async function getVolTimestamp(prefix) {
         try {
             const listUrl = `${BUCKET_URL}/?list-type=2&prefix=${prefix}&max-keys=5`;
@@ -131,6 +136,7 @@ async function findTrulyLatestVolume(stationId, commonPrefixes) {
             const firstChunk = Array.isArray(contents) ? contents[0] : contents;
             const match = firstChunk.Key.match(/(\d{8}-\d{6})/);
             if (!match) return 0;
+            // Parse YYYYMMDD-HHMMSS to a comparable number or date
             return parseInt(match[1].replace('-', ''));
         } catch (e) {
             return 0;
@@ -140,7 +146,9 @@ async function findTrulyLatestVolume(stationId, commonPrefixes) {
     const highTs = await getVolTimestamp(highestNumPrefix);
     const lowTs = await getVolTimestamp(lowestNumPrefix);
 
+    // If the lowest numerical folder is newer than the highest, we've wrapped around
     if (lowTs > highTs) {
+        // Find the HIGHEST volume in the NEW sequence (usually only a few folders)
         let latest = lowestNumPrefix;
         let latestTs = lowTs;
         for (let i = 1; i < Math.min(sorted.length, 50); i++) {
@@ -181,9 +189,11 @@ async function pollChunks(stationId) {
         commonPrefixes = commonPrefixes.filter(p => /^[A-Z0-9]{4}\/\d+\/$/.test(p.Prefix));
         if (commonPrefixes.length === 0) return;
 
+        // Use helper to find the truly latest volume (handles wrap-around)
         const latestVolPrefix = await findTrulyLatestVolume(stationId, commonPrefixes);
         if (!latestVolPrefix) return;
 
+        // For transition logic, we still want to know the previous folder to catch late chunks
         const sortedNumerically = [...commonPrefixes].sort((a, b) => {
             const numA = parseInt(a.Prefix.split('/')[1]);
             const numB = parseInt(b.Prefix.split('/')[1]);
@@ -217,19 +227,31 @@ async function pollChunks(stationId) {
             const timestampMatch = firstChunkKey.match(/(\d{8}-\d{6})/);
             const volumeId = volPrefix + (timestampMatch ? timestampMatch[1] : '');
 
+            // Detect Volume Transition (on the newest folder)
             if (volPrefix === latestVolPrefix && volumeId !== state.lastVolume) {
                 console.log(`[${stationId}] Transitioning to new volume: ${volumeId}`);
+                // stationCache.delete(stationId); // Keep old data to avoid blanking out the client
+                // broadcast(stationId, { type: 'clear_data' }); 
                 state.lastVolume = volumeId;
                 state.lastChunkKey = null; 
                 state.headerChunk = null;
+                // DO NOT clear processedChunks here, we want to maintain the "seen" list 
+                // to avoid re-processing the tail of the previous volume.
                 stationState.set(stationId, state);
             }
 
+            // Filter for truly new chunks using the Set to prevent redundant broadcasts
             const unseen = contents.filter(c => !state.processedChunks.has(c.Key));
 
             if (unseen.length > 0) {
-                console.log(`[${stationId}] Found ${unseen.length} unseen chunks in ${volPrefix}`);
                 const latestKey = unseen[unseen.length - 1].Key;
+                const firstId = unseen[0].Key.split('/').pop();
+                const lastId = latestKey.split('/').pop();
+                console.log(`[${stationId}] Vol ${volPrefix}: Processing ${unseen.length} new chunks (${firstId} to ${lastId})`);
+                
+                if (latestKey.includes('-E')) {
+                    console.log(`[${stationId}] Vol ${volPrefix} completed.`);
+                }
 
                 if (!state.headerChunk) {
                     const headerKey = contents.find(c => c.Key.includes('-001-S'))?.Key;
@@ -240,41 +262,40 @@ async function pollChunks(stationId) {
                 }
 
                 const CONCURRENCY = 5;
-                const chunkResults = [];
-                for (let i = 0; i < unseen.length; i += CONCURRENCY) {
-                    const batch = unseen.slice(i, i + CONCURRENCY);
-                    const results = await Promise.all(batch.map(async (chunk) => {
-                        try {
-                            const chunkId = chunk.Key.split('/').pop();
-                            const dataRes = await fetchWithTimeout(`${BUCKET_URL}/${chunk.Key}`);
-                            const chunkBuffer = await dataRes.arrayBuffer();
-                            
-                            let combinedBuffer;
-                            if (state.headerChunk && !chunk.Key.includes('-001-S')) {
-                                combinedBuffer = Buffer.concat([Buffer.from(state.headerChunk), Buffer.from(chunkBuffer)]);
-                            } else {
-                                combinedBuffer = Buffer.from(chunkBuffer);
-                            }
-
-                            const parsed = new Level2Radar(combinedBuffer);
-                            const extracted = extractRadialData(parsed, stationId, chunkId);
-                            
-                            state.processedChunks.add(chunk.Key);
-                            if (state.processedChunks.size > 1000) {
-                                const firstKey = state.processedChunks.values().next().value;
-                                state.processedChunks.delete(firstKey);
-                            }
-
-                            return extracted;
-                        } catch (e) {
-                            console.warn(`[${stationId}] Chunk ${chunk.Key} error: ${e.message}`);
-                            state.processedChunks.add(chunk.Key);
-                            return null;
+                const batchRadials = [];
+                const chunkResults = await Promise.all(unseen.map(async (chunk) => {
+                    try {
+                        const chunkId = chunk.Key.split('/').pop();
+                        const dataRes = await fetchWithTimeout(`${BUCKET_URL}/${chunk.Key}`);
+                        const chunkBuffer = await dataRes.arrayBuffer();
+                        
+                        let combinedBuffer;
+                        if (state.headerChunk && !chunk.Key.includes('-001-S')) {
+                            combinedBuffer = Buffer.concat([Buffer.from(state.headerChunk), Buffer.from(chunkBuffer)]);
+                        } else {
+                            combinedBuffer = Buffer.from(chunkBuffer);
                         }
-                    }));
-                    chunkResults.push(...results);
-                }
 
+                        const parsed = new Level2Radar(combinedBuffer);
+                        const extracted = extractRadialData(parsed, stationId, chunkId);
+                        
+                        // Mark as processed
+                        state.processedChunks.add(chunk.Key);
+                        // Prevent memory leak
+                        if (state.processedChunks.size > 1000) {
+                            const firstKey = state.processedChunks.values().next().value;
+                            state.processedChunks.delete(firstKey);
+                        }
+
+                        return extracted;
+                    } catch (e) {
+                        console.warn(`[${stationId}] Chunk ${chunk.Key} error: ${e.message}`);
+                        state.processedChunks.add(chunk.Key);
+                        return null;
+                    }
+                }));
+
+                // Flatten and aggregate all radials from all chunks in this poll
                 const allRadials = [];
                 chunkResults.forEach(extracted => {
                     if (extracted && extracted.azimuths.length > 0) {
@@ -296,15 +317,17 @@ async function pollChunks(stationId) {
                 });
 
                 if (allRadials.length > 0) {
-                    console.log(`[${stationId}] Broadcasting ${allRadials.length} radials`);
+                    // Sort by timestamp to handle out-of-order chunks
                     allRadials.sort((a, b) => a.timestamp - b.timestamp);
 
+                    // Merge into cache
                     allRadials.forEach(radial => {
                         const roundedAz = Math.round(radial.azimuth * 10) / 10;
                         if (!stationCache.has(stationId)) {
                             stationCache.set(stationId, { radials: new Map(), stationId });
                         }
                         const cache = stationCache.get(stationId);
+                        
                         if (!cache.radials.has(roundedAz)) {
                             cache.radials.set(roundedAz, {
                                 azimuth: radial.azimuth,
@@ -312,8 +335,10 @@ async function pollChunks(stationId) {
                                 elevations: {}
                             });
                         }
+                        
                         const cachedRadial = cache.radials.get(roundedAz);
                         cachedRadial.timestamp = radial.timestamp;
+
                         for (const [e, products] of Object.entries(radial.elevations)) {
                             if (!cachedRadial.elevations[e]) cachedRadial.elevations[e] = {};
                             for (const [product, moment] of Object.entries(products)) {
@@ -322,16 +347,12 @@ async function pollChunks(stationId) {
                         }
                     });
 
-                    const MAX_RADIALS_PER_MESSAGE = 200;
-                    for (let i = 0; i < allRadials.length; i += MAX_RADIALS_PER_MESSAGE) {
-                        const batch = allRadials.slice(i, i + MAX_RADIALS_PER_MESSAGE);
-                        broadcast(stationId, { 
-                            type: 'radial_batch', 
-                            stationId: stationId,
-                            radials: batch,
-                            latestAzimuth: batch[batch.length - 1].azimuth
-                        });
-                    }
+                    broadcast(stationId, { 
+                        type: 'radial_batch', 
+                        stationId: stationId,
+                        radials: allRadials,
+                        latestAzimuth: allRadials[allRadials.length - 1].azimuth
+                    });
                 }
                 
                 if (volPrefix === latestVolPrefix) {
@@ -363,6 +384,8 @@ function extractRadialData(parsed, stationId, chunkId) {
     for (const e of elevations) {
         try {
             parsed.setElevation(e);
+            
+            // Capture azimuths and timestamps from the first valid elevation
             if (!azimuths) {
                 azimuths = parsed.getAzimuth();
                 const headers = parsed.getHeader();
@@ -376,11 +399,12 @@ function extractRadialData(parsed, stationId, chunkId) {
             
             for (const [productKey, methodList] of Object.entries(methodGroups)) {
                 let moments = null;
+                // Try each method in the group until we find data
                 for (const methodName of methodList) {
                     if (typeof parsed[methodName] === 'function') {
                         moments = parsed[methodName]();
                         if (moments && moments.some(m => m && m.moment_data)) {
-                            break;
+                            break; // Found data with this method
                         }
                     }
                 }
@@ -389,7 +413,7 @@ function extractRadialData(parsed, stationId, chunkId) {
                     hasAnyData = true;
                     elevationHasData = true;
                     elevationProducts[productKey] = moments.map(m => m ? {
-                        moment_data: Array.from(m.moment_data),
+                        moment_data: m.moment_data,
                         first_gate: m.first_gate,
                         gate_size: m.gate_size
                     } : null);
@@ -400,14 +424,18 @@ function extractRadialData(parsed, stationId, chunkId) {
                 extractedElevations[e] = elevationProducts;
             }
         } catch (err) {
+            // Only log if it's not a simple 'no data for elevation' error
+            if (!err.message.includes('No data for elevation')) {
+                // console.warn(`[${stationId}] ${chunkId} Elev ${e} error: ${err.message}`);
+            }
         }
     }
 
     if (!hasAnyData) return null;
 
     return {
-        azimuths: azimuths ? Array.from(azimuths) : [],
-        timestamps: timestamps ? Array.from(timestamps) : [],
+        azimuths: azimuths || [],
+        timestamps: timestamps || [],
         elevations: extractedElevations
     };
 }
@@ -447,6 +475,7 @@ wss.on('connection', (ws) => {
                 if (!subscriptions.has(stationId)) subscriptions.set(stationId, new Set());
                 subscriptions.get(stationId).add(ws);
 
+                // 1. ALWAYS send initial state if we have it in the cache
                 if (stationCache.has(stationId)) {
                     ws.send(JSON.stringify({ 
                         type: 'initial_state', 
@@ -455,6 +484,7 @@ wss.on('connection', (ws) => {
                     }));
                 }
 
+                // 2. Start or trigger the poller
                 if (!activePollers.has(stationId)) {
                     const poller = setInterval(() => pollChunks(stationId), 1000); 
                     activePollers.set(stationId, poller);

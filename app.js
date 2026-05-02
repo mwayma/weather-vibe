@@ -726,52 +726,6 @@ let currentAngle = 0;
 let sweepSpeed = 0.009; // Degrees per millisecond
 let lastSweepTime = performance.now();
 
-const radarWorker = new Worker('radar-worker.js');
-radarWorker.onmessage = function(e) {
-    const message = e.data;
-    
-    let currentStationId = selectedRadarId;
-    if (currentStationId && currentStationId.length === 3) currentStationId = 'K' + currentStationId;
-
-    if (message.type === 'processed_batch') {
-        if (message.stationId && message.stationId !== currentStationId) return;
-        
-        if (message.latestAzimuth !== undefined) {
-            targetAzimuth = message.latestAzimuth;
-        }
-        
-        message.radials.forEach(item => {
-            incomingRadialBuffer.set(item.roundedAz, item.radial);
-        });
-    } else if (message.type === 'initial_state') {
-        if (message.stationId && message.stationId !== currentStationId) return;
-        console.log('Received initial state for', message.stationId);
-        
-        liveRadarData = { radialsMap: new Map() };
-        if (message.data && message.data.azimuths) {
-            const data = message.data;
-            data.azimuths.forEach((az, i) => {
-                const rounded = Math.round(az * 10) / 10;
-                const radialElevations = {};
-                for (const [e, products] of Object.entries(data.elevations)) {
-                    radialElevations[e] = {};
-                    for (const [product, moments] of Object.entries(products)) {
-                        radialElevations[e][product] = moments[i];
-                    }
-                }
-                liveRadarData.radialsMap.set(rounded, {
-                    azimuth: az,
-                    timestamp: data.timestamps ? data.timestamps[i] : Date.now(),
-                    elevations: radialElevations
-                });
-            });
-        }
-        renderLiveRadar();
-    } else if (message.type === 'status') {
-        console.log('WebSocket Status:', message.message);
-    }
-};
-
 let socket = null;
 function initWebSocket() {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -786,8 +740,85 @@ function initWebSocket() {
     };
 
     socket.onmessage = (event) => {
-        // Offload parsing and processing to the worker
-        radarWorker.postMessage({ type: 'parse_batch', data: event.data });
+        const message = JSON.parse(event.data);
+        
+        // 4-letter normalization for verification
+        let currentStationId = selectedRadarId;
+        if (currentStationId && currentStationId.length === 3) currentStationId = 'K' + currentStationId;
+
+        if (message.type === 'initial_state') {
+            // Verify stationId to prevent cross-session contamination
+            if (message.stationId && message.stationId !== currentStationId) {
+                console.warn('Ignoring initial_state for mismatched station:', message.stationId);
+                return;
+            }
+
+            console.log('Received initial state for', message.stationId);
+            liveRadarData = message.data;
+            if (liveRadarData) {
+                // Initialize metadata arrays if missing
+                if (!liveRadarData.lastUpdated) {
+                    liveRadarData.lastUpdated = new Array(liveRadarData.azimuths.length).fill(Date.now());
+                }
+                if (!liveRadarData.revealedUpdate) {
+                    // Mark as already revealed so initial state is visible immediately
+                    liveRadarData.revealedUpdate = new Array(liveRadarData.azimuths.length).fill(1);
+                }
+                if (!liveRadarData.timestamps) {
+                    liveRadarData.timestamps = [...liveRadarData.lastUpdated];
+                }
+                
+                // Build the radialsMap for future incremental updates
+                liveRadarData.radialsMap = new Map();
+                liveRadarData.azimuths.forEach((az, i) => {
+                    const rounded = Math.round(az * 10) / 10;
+                    const radialElevations = {};
+                    for (const [e, products] of Object.entries(liveRadarData.elevations)) {
+                        radialElevations[e] = {};
+                        for (const [product, moments] of Object.entries(products)) {
+                            radialElevations[e][product] = moments[i];
+                        }
+                    }
+                    liveRadarData.radialsMap.set(rounded, {
+                        azimuth: az,
+                        timestamp: liveRadarData.timestamps[i],
+                        revealedUpdate: liveRadarData.revealedUpdate[i],
+                        elevations: radialElevations
+                    });
+                });
+            }
+            renderLiveRadar();
+        } else if (message.type === 'radial_batch') {
+            // Verify stationId
+            if (message.stationId && message.stationId !== currentStationId) return;
+
+            console.log(`Received batch of ${message.radials.length} radials`);
+            if (message.latestAzimuth !== undefined) {
+                targetAzimuth = message.latestAzimuth;
+            }
+            
+            // Buffer the radials instead of merging them immediately
+            message.radials.forEach(radial => {
+                const roundedAz = Math.round(radial.azimuth * 10) / 10;
+                incomingRadialBuffer.set(roundedAz, radial);
+            });
+        } else if (message.type === 'radial_update') {
+            // Verify stationId
+            if (message.stationId && message.stationId !== currentStationId) return;
+
+            console.log('Received real-time update:', message.chunk);
+            if (message.latestAzimuth !== undefined) {
+                targetAzimuth = message.latestAzimuth;
+            }
+            mergeRealTimeData(message.data);
+        } else if (message.type === 'clear_data') {
+            console.log('Server requested data clear (New Volume) - ignoring to persist display');
+            // We ignore clear_data to keep the old volume visible until overwritten
+        } else if (message.type === 'status') {
+            console.log('WebSocket Status:', message.message);
+        } else if (message.type === 'heartbeat') {
+            // Heartbeat received, server is alive
+        }
     };
 
     socket.onclose = () => {
@@ -1399,8 +1430,9 @@ function startLiveTracking() {
         if (liveCanvasLayer && liveCanvasLayer._topLeft) {
             const lastAngle = window._lastSweepAngle !== undefined ? window._lastSweepAngle : currentAngle;
             
-            const keys = Array.from(incomingRadialBuffer.keys());
+            // 1. Surgical Merge & Draw
             let mergedAny = false;
+            const keys = Array.from(incomingRadialBuffer.keys());
             keys.forEach(roundedAz => {
                 let isInside = false;
                 if (lastAngle <= currentAngle) {
@@ -1411,28 +1443,40 @@ function startLiveTracking() {
 
                 if (isInside) {
                     const radial = incomingRadialBuffer.get(roundedAz);
-                    if (!liveRadarData) liveRadarData = { radialsMap: new Map() };
+                    if (!liveRadarData) {
+                        liveRadarData = { radialsMap: new Map(), azimuths: [], lastUpdated: [], revealedUpdate: [], timestamps: [], elevations: {} };
+                    }
                     liveRadarData.radialsMap.set(roundedAz, radial);
                     
+                    // Surgically draw this new radial to the offscreen buffer
                     liveCanvasLayer._drawRadialToOffscreen(radial);
+                    
                     incomingRadialBuffer.delete(roundedAz);
                     mergedAny = true;
                 }
             });
 
-            liveCanvasLayer._drawIncremental(lastAngle, currentAngle);
-            liveCanvasLayer._draw();
-        } else if (liveRadarData || incomingRadialBuffer.size > 0) {
-            if (incomingRadialBuffer.size > 0) {
-                // Initialize liveRadarData if we have buffered radials
-                if (!liveRadarData) liveRadarData = { radialsMap: new Map() };
-                // Merge first few radials to bootstrap
-                const firstKey = incomingRadialBuffer.keys().next().value;
-                if (firstKey !== undefined) {
-                    liveRadarData.radialsMap.set(firstKey, incomingRadialBuffer.get(firstKey));
+            // 2. Continuous Sweep Visuals
+            liveCanvasLayer._drawIncremental(lastAngle, currentAngle); // Clears the wedge ahead
+            liveCanvasLayer._draw(); // Blits the buffer with gradient mask
+        } else if (incomingRadialBuffer.size > 0) {
+            // Initialize rendering if data is waiting
+            const lastAngle = window._lastSweepAngle !== undefined ? window._lastSweepAngle : currentAngle;
+            const keys = Array.from(incomingRadialBuffer.keys());
+            keys.forEach(roundedAz => {
+                let isInside = false;
+                if (lastAngle <= currentAngle) {
+                    isInside = (roundedAz >= lastAngle && roundedAz <= currentAngle);
+                } else {
+                    isInside = (roundedAz >= lastAngle || roundedAz <= currentAngle);
                 }
-            }
-            renderLiveRadar();
+                if (isInside) {
+                    if (!liveRadarData) liveRadarData = { radialsMap: new Map(), azimuths: [], lastUpdated: [], revealedUpdate: [], timestamps: [], elevations: {} };
+                    liveRadarData.radialsMap.set(roundedAz, incomingRadialBuffer.get(roundedAz));
+                    incomingRadialBuffer.delete(roundedAz);
+                }
+            });
+            if (liveRadarData) renderLiveRadar();
         }
         
         window._lastSweepAngle = currentAngle;
@@ -1502,7 +1546,6 @@ const RadarCanvasLayer = L.Layer.extend({
     },
     _drawRadialToOffscreen: function(radial) {
         if (!this._offscreenCanvas || !this._offscreenCtx) return;
-        // console.log(`Drawing radial at azimuth ${radial.azimuth}`);
         const station = NEXRAD_STATIONS.find(s => s.id === selectedRadarId);
         if (!station) return;
 
@@ -1619,25 +1662,19 @@ const RadarCanvasLayer = L.Layer.extend({
 
         // Apply Conical Mask for Persistence Effect
         ctx.save();
-        try {
-            const sweepRad = (currentAngle - 90) * Math.PI / 180;
-            const grad = ctx.createConicGradient(sweepRad, center.x, center.y);
-            
-            grad.addColorStop(0, 'rgba(0,0,0,0.9)');
-            grad.addColorStop(0.08, 'rgba(0,0,0,0.9)'); 
-            grad.addColorStop(0.5, 'rgba(0,0,0,0.4)');
-            grad.addColorStop(0.92, 'rgba(0,0,0,0.9)');
-            grad.addColorStop(1, 'rgba(0,0,0,0.9)');
+        const sweepRad = (currentAngle - 90) * Math.PI / 180;
+        const grad = ctx.createConicGradient(sweepRad, center.x, center.y);
+        
+        grad.addColorStop(0, 'rgba(0,0,0,0.9)');
+        grad.addColorStop(0.08, 'rgba(0,0,0,0.9)'); 
+        grad.addColorStop(0.5, 'rgba(0,0,0,0.4)');
+        grad.addColorStop(0.92, 'rgba(0,0,0,0.9)');
+        grad.addColorStop(1, 'rgba(0,0,0,0.9)');
 
-            ctx.drawImage(this._offscreenCanvas, 0, 0);
-            ctx.globalCompositeOperation = 'destination-in';
-            ctx.fillStyle = grad;
-            ctx.fillRect(0, 0, this._container.width, this._container.height);
-        } catch (e) {
-            // Fallback: simple blit if conic gradient fails
-            ctx.globalAlpha = 0.8;
-            ctx.drawImage(this._offscreenCanvas, 0, 0);
-        }
+        ctx.drawImage(this._offscreenCanvas, 0, 0);
+        ctx.globalCompositeOperation = 'destination-in';
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, this._container.width, this._container.height);
         ctx.restore();
     }
 });
