@@ -98,63 +98,58 @@ function mergeRealTimeData(stationId, newData) {
 }
 
 async function pollChunks(stationId) {
+    // Ensure stationId is 4 letters (ICAO code)
+    if (stationId.length === 3) stationId = 'K' + stationId;
+    
     if (pollingLocks.has(stationId)) return;
     pollingLocks.add(stationId);
     
     try {
-        const listVolUrl = `${BUCKET_URL}/?list-type=2&prefix=${stationId}/&delimiter=/`;
-        const volRes = await fetch(listVolUrl);
-        const volText = await volRes.text();
-        const volJson = parser.parse(volText);
+        // Unidata chunk bucket is flat: station/station_YYYYMMDD_HHMMSS_chunk
+        const listUrl = `${BUCKET_URL}/?list-type=2&prefix=${stationId}/${stationId}_`;
+        const res = await fetch(listUrl);
+        const text = await res.text();
+        const json = parser.parse(text);
         
-        let commonPrefixes = volJson.ListBucketResult.CommonPrefixes;
-        if (!commonPrefixes) return;
-        if (!Array.isArray(commonPrefixes)) commonPrefixes = [commonPrefixes];
-
-        // Filter for folders that look like NEXRAD volume timestamps (YYYYMMDD-HHMMSS)
-        commonPrefixes = commonPrefixes.filter(p => /^[A-Z0-9]{4}\/\d{8}-\d{6}\/$/.test(p.Prefix));
-        if (commonPrefixes.length === 0) return;
-
-        // Correct lexicographical sort for prefix timestamps
-        commonPrefixes.sort((a, b) => a.Prefix.localeCompare(b.Prefix));
-        
-        const latestVolPrefix = commonPrefixes[commonPrefixes.length - 1].Prefix;
-        let state = stationState.get(stationId) || { lastVolume: null, lastChunkKey: null, headerChunk: null };
-
-        // Handle volume transition
-        if (latestVolPrefix !== state.lastVolume) {
-            console.log(`[${stationId}] New volume detected: ${latestVolPrefix}`);
-            sendStatus(stationId, `New volume: ${latestVolPrefix.split('/')[1]}`);
-            stationCache.delete(stationId);
-            broadcast(stationId, { type: 'clear_data' });
-            state.lastVolume = latestVolPrefix;
-            state.lastChunkKey = null; // Start fresh in new volume
-            state.headerChunk = null;
-            stationState.set(stationId, state); // Save immediately to prevent re-detecting
-        }
-
-        const listChunksUrl = `${BUCKET_URL}/?list-type=2&prefix=${latestVolPrefix}`;
-        const chunkRes = await fetch(listChunksUrl);
-        const chunkText = await chunkRes.text();
-        const chunkJson = parser.parse(chunkText);
-        
-        let contents = chunkJson.ListBucketResult.Contents;
-        if (!contents) {
-            return;
-        }
+        let contents = json.ListBucketResult.Contents;
+        if (!contents) return;
         if (!Array.isArray(contents)) contents = [contents];
 
+        // Sort lexicographically to ensure chronological order of chunks
         contents.sort((a, b) => a.Key.localeCompare(b.Key));
         
-        // Find all chunks we haven't seen yet in this volume
-        const unseen = contents.filter(c => !state.lastChunkKey || c.Key.localeCompare(state.lastChunkKey) > 0);
+        let state = stationState.get(stationId) || { lastVolume: null, lastChunkKey: null, headerChunk: null };
+
+        // Identify the latest volume from the keys (e.g., KSRX_20240502_123000_...)
+        // We look at the timestamp part of the key
+        const latestKey = contents[contents.length - 1].Key;
+        const latestTimestampMatch = latestKey.match(/_(\d{8}_\d{6})/);
+        if (!latestTimestampMatch) return;
+        
+        const latestVolume = latestTimestampMatch[1];
+
+        // Handle volume transition
+        if (latestVolume !== state.lastVolume) {
+            console.log(`[${stationId}] New volume detected: ${latestVolume}`);
+            sendStatus(stationId, `New volume: ${latestVolume}`);
+            stationCache.delete(stationId);
+            broadcast(stationId, { type: 'clear_data' });
+            state.lastVolume = latestVolume;
+            state.lastChunkKey = null; 
+            state.headerChunk = null;
+            stationState.set(stationId, state);
+        }
+
+        // Filter for chunks belonging to the current volume and newer than last seen
+        const volumeChunks = contents.filter(c => c.Key.includes(`_${latestVolume}_`));
+        const unseen = volumeChunks.filter(c => !state.lastChunkKey || c.Key.localeCompare(state.lastChunkKey) > 0);
 
         if (unseen.length > 0) {
-            console.log(`[${stationId}] Processing ${unseen.length} new chunks`);
+            console.log(`[${stationId}] Processing ${unseen.length} new chunks in volume ${latestVolume}`);
             
-            // If new volume, we MUST get the header chunk (001-S)
+            // Ensure we have the header chunk for this volume
             if (!state.headerChunk) {
-                const headerKey = contents.find(c => c.Key.endsWith('-001-S'))?.Key;
+                const headerKey = volumeChunks.find(c => c.Key.includes('-001-S'))?.Key;
                 if (headerKey) {
                     console.log(`[${stationId}] Fetching header chunk: ${headerKey}`);
                     const hRes = await fetch(`${BUCKET_URL}/${headerKey}`);
@@ -169,7 +164,8 @@ async function pollChunks(stationId) {
                 
                 try {
                     let combinedBuffer;
-                    if (state.headerChunk && !chunk.Key.endsWith('-001-S')) {
+                    // Prepend header chunk to all chunks except the header itself
+                    if (state.headerChunk && !chunk.Key.includes('-001-S')) {
                         combinedBuffer = Buffer.concat([
                             Buffer.from(state.headerChunk),
                             Buffer.from(chunkBuffer)
@@ -181,7 +177,6 @@ async function pollChunks(stationId) {
                     const parsed = new Level2Radar(combinedBuffer);
                     const extracted = extractRadialData(parsed);
                     if (extracted && extracted.azimuths.length > 0) {
-                        console.log(`[${stationId}] Parsed chunk ${chunkId}: ${extracted.azimuths.length} radials`);
                         mergeRealTimeData(stationId, extracted);
                         broadcast(stationId, { 
                             type: 'radial_update', 

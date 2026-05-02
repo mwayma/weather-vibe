@@ -1308,9 +1308,13 @@ function startLiveTracking() {
         }
     }
 
+    // Ensure 4-letter ICAO
+    let stationId = selectedRadarId;
+    if (stationId.length === 3) stationId = 'K' + stationId;
+
     // Subscribe via WebSocket
     if (socket && socket.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({ action: 'subscribe', station: selectedRadarId }));
+        socket.send(JSON.stringify({ action: 'subscribe', station: stationId }));
     }
 
     const station = NEXRAD_STATIONS.find(s => s.id === selectedRadarId);
@@ -1329,7 +1333,7 @@ function startLiveTracking() {
     }).addTo(liveTrackingLayer);
 
     // Wait for initial_state from WebSocket
-    document.getElementById('timestamp').innerText = `Connecting to Live Stream: ${selectedRadarId}...`;
+    document.getElementById('timestamp').innerText = `Connecting to Live Stream: ${stationId}...`;
     
     // We remove the 5-minute polling interval here because the WebSocket
     // provides much more frequent (sub-minute) updates.
@@ -1395,6 +1399,14 @@ const RadarCanvasLayer = L.Layer.extend({
         map.off('moveend', this._reset, this);
         this._offscreenCanvas = null;
         this._offscreenCtx = null;
+    },
+    _getPixelsPerKm: function(stationLat, stationLon) {
+        // Use a 100km reference point for better stability at high zoom levels
+        // 0.899 degrees is approximately 100km North
+        const centerLayer = map.latLngToLayerPoint([stationLat, stationLon]);
+        const refPoint = L.latLng(stationLat + 0.899, stationLon);
+        const refLayer = map.latLngToLayerPoint(refPoint);
+        return centerLayer.distanceTo(refLayer) / 100;
     },
     _reset: function() {
         const size = map.getSize();
@@ -1492,9 +1504,7 @@ const RadarCanvasLayer = L.Layer.extend({
 
         const centerLayer = map.latLngToLayerPoint([station.lat, station.lon]);
         const center = { x: centerLayer.x - this._topLeft.x, y: centerLayer.y - this._topLeft.y };
-        const edge = L.latLng(station.lat, station.lon).toBounds(2000).getNorthEast();
-        const edgeLayer = map.latLngToLayerPoint(edge);
-        const pixelsPerKm = centerLayer.distanceTo(edgeLayer) / Math.sqrt(2);
+        const pixelsPerKm = this._getPixelsPerKm(station.lat, station.lon);
 
         const ctx = this._offscreenCtx;
 
@@ -1538,11 +1548,11 @@ const RadarCanvasLayer = L.Layer.extend({
             ctx.rotate(-azimuth);
 
             // 1. ALWAYS clear the slice ahead of the sweep. 
-            // This fulfills the "removing the previous data on sweep" requirement.
+            // Wider arc (approx 0.02 rad extra) to prevent ghosting
             ctx.globalCompositeOperation = 'destination-out';
             ctx.beginPath();
             ctx.moveTo(0, 0);
-            ctx.arc(0, 0, 2000, -arcWidthRad/2, arcWidthRad/2); 
+            ctx.arc(0, 0, 460 * pixelsPerKm, -arcWidthRad/2 - 0.01, arcWidthRad/2 + 0.01); 
             ctx.fill();
             ctx.globalCompositeOperation = 'source-over';
 
@@ -1598,9 +1608,7 @@ const RadarCanvasLayer = L.Layer.extend({
 
         const centerLayer = map.latLngToLayerPoint([station.lat, station.lon]);
         const center = { x: centerLayer.x - this._topLeft.x, y: centerLayer.y - this._topLeft.y };
-        const edge = L.latLng(station.lat, station.lon).toBounds(2000).getNorthEast();
-        const edgeLayer = map.latLngToLayerPoint(edge);
-        const pixelsPerKm = centerLayer.distanceTo(edgeLayer) / Math.sqrt(2);
+        const pixelsPerKm = this._getPixelsPerKm(station.lat, station.lon);
 
         // Initial full render if needed (e.g. on load or after pan/zoom)
         if (this._needsFullRedraw) {
