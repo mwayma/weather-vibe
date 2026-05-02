@@ -760,21 +760,29 @@ function mergeRealTimeData(newData) {
     if (!liveRadarData) {
         console.log('Initializing liveRadarData with real-time update');
         liveRadarData = newData;
+        if (!liveRadarData.lastUpdated) {
+            liveRadarData.lastUpdated = new Array(liveRadarData.azimuths.length).fill(Date.now());
+        }
+        if (!liveRadarData.revealedUpdate) {
+            liveRadarData.revealedUpdate = new Array(liveRadarData.azimuths.length).fill(0);
+        }
         renderLiveRadar();
         return;
     }
 
-    console.log(`Merging ${newData.azimuths.length} new radials into existing data`);
     let addedCount = 0;
     let updatedCount = 0;
 
     newData.azimuths.forEach((az, i) => {
-        // Round to 1 decimal place to handle floating point jitter
         const roundedAz = Math.round(az * 10) / 10;
         const existingIdx = liveRadarData.azimuths.findIndex(a => Math.round(a * 10) / 10 === roundedAz);
         
+        const now = newData.timestamps ? newData.timestamps[i] : Date.now();
+
         if (existingIdx !== -1) {
-            // Update existing radials for all elevations/products
+            liveRadarData.lastUpdated[existingIdx] = now;
+            if (newData.timestamps) liveRadarData.timestamps[existingIdx] = newData.timestamps[i];
+            
             for (const [e, elevations] of Object.entries(newData.elevations)) {
                 for (const [product, moments] of Object.entries(elevations)) {
                     if (liveRadarData.elevations[e] && liveRadarData.elevations[e][product]) {
@@ -784,8 +792,14 @@ function mergeRealTimeData(newData) {
             }
             updatedCount++;
         } else {
-            // New azimuth, append it
             liveRadarData.azimuths.push(az);
+            liveRadarData.lastUpdated.push(now);
+            liveRadarData.revealedUpdate.push(0);
+            if (newData.timestamps) {
+                if (!liveRadarData.timestamps) liveRadarData.timestamps = [];
+                liveRadarData.timestamps.push(newData.timestamps[i]);
+            }
+            
             for (const [e, elevations] of Object.entries(newData.elevations)) {
                 for (const [product, moments] of Object.entries(elevations)) {
                     if (liveRadarData.elevations[e] && liveRadarData.elevations[e][product]) {
@@ -797,11 +811,31 @@ function mergeRealTimeData(newData) {
         }
     });
 
-    console.log(`Radar data updated: ${addedCount} added, ${updatedCount} updated radials`);
-
     if (liveCanvasLayer) {
-        // We no longer set _needsFullRedraw = true here.
-        // Instead, the incremental sweep will pick up the new data as it passes each azimuth.
+        // OPTIMIZATION: Keep azimuths sorted for consistent rendering order
+        const indices = liveRadarData.azimuths.map((_, i) => i);
+        indices.sort((a, b) => liveRadarData.azimuths[a] - liveRadarData.azimuths[b]);
+        
+        const sortedAz = indices.map(i => liveRadarData.azimuths[i]);
+        const sortedLu = indices.map(i => liveRadarData.lastUpdated[i]);
+        const sortedRu = indices.map(i => liveRadarData.revealedUpdate[i]);
+        const sortedTs = liveRadarData.timestamps ? indices.map(i => liveRadarData.timestamps[i]) : null;
+        
+        const sortedElevations = {};
+        for (const [e, products] of Object.entries(liveRadarData.elevations)) {
+            sortedElevations[e] = {};
+            for (const [product, moments] of Object.entries(products)) {
+                sortedElevations[e][product] = indices.map(i => moments[i]);
+            }
+        }
+        
+        liveRadarData.azimuths = sortedAz;
+        liveRadarData.lastUpdated = sortedLu;
+        liveRadarData.revealedUpdate = sortedRu;
+        if (sortedTs) liveRadarData.timestamps = sortedTs;
+        liveRadarData.elevations = sortedElevations;
+        
+        // The incremental sweep will pick up the new data as it passes each azimuth.
     }
 }
 
@@ -1290,8 +1324,9 @@ function startLiveTracking() {
         const dt = time - lastTime;
         lastTime = time;
         
-        // 60 seconds per rev = 360 / 60000 = 0.006 deg/ms
-        angle = (angle + 0.006 * dt) % 360; 
+        // 20 seconds per rev = 360 / 20000 = 0.018 deg/ms
+        // This speed is more characteristic of professional weather broadcasts during severe events.
+        angle = (angle + 0.018 * dt) % 360; 
         window.currentScanAzimuth = angle;
         
         const rad = (90 - angle) * Math.PI / 180; 
@@ -1383,9 +1418,17 @@ const RadarCanvasLayer = L.Layer.extend({
         ctx.translate(center.x, center.y);
         ctx.globalAlpha = 1.0;
 
+        if (!liveRadarData.revealedUpdate) {
+            liveRadarData.revealedUpdate = new Array(azArray.length).fill(0);
+        }
+
         for (let i = 0; i < azArray.length; i++) {
             const radialAz = azArray[i];
             const moment = momentArray[i];
+            
+            // Mark as revealed so the incremental sweep knows it's already on the screen
+            liveRadarData.revealedUpdate[i] = liveRadarData.lastUpdated ? liveRadarData.lastUpdated[i] : Date.now();
+
             if (!moment || !moment.moment_data) continue;
 
             const azimuth = (90 - radialAz) * Math.PI / 180;
@@ -1470,46 +1513,52 @@ const RadarCanvasLayer = L.Layer.extend({
 
             if (!isInside) continue;
 
-            const moment = momentArray[i];
-            if (!moment || !moment.moment_data) continue;
-
             const azimuth = (90 - radialAz) * Math.PI / 180;
             ctx.save();
             ctx.rotate(-azimuth);
 
-            // Clear ONLY the slice we are about to draw. 
-            // The arc width should match the radial's angular width.
+            // 1. ALWAYS clear the slice ahead of the sweep. 
+            // This fulfills the "removing the previous data on sweep" requirement.
             ctx.globalCompositeOperation = 'destination-out';
             ctx.beginPath();
             ctx.moveTo(0, 0);
-            // arcWidthRad covers the 10% overlap we use for drawing
             ctx.arc(0, 0, 2000, -arcWidthRad/2, arcWidthRad/2); 
             ctx.fill();
             ctx.globalCompositeOperation = 'source-over';
 
-            const firstGateKm = moment.first_gate / 1000;
-            const firstGateActual = firstGateKm < 1 ? moment.first_gate : firstGateKm;
-            const gateSizeKm = moment.gate_size;
-            const data = moment.moment_data;
-
-            let startJ = null;
-            let currentColor = null;
-
-            for (let j = 0; j <= data.length; j += gateStep) {
-                const val = j < data.length ? data[j] : null;
-                const color = val !== null && val !== undefined ? scale(val) : null;
+            // 2. ONLY draw if we have "new" data for this radial that hasn't been revealed yet.
+            // If the data is stale (from the previous revolution), we leave the slice empty.
+            if (liveRadarData.lastUpdated && liveRadarData.revealedUpdate && 
+                liveRadarData.lastUpdated[i] > liveRadarData.revealedUpdate[i]) {
                 
-                if (color !== currentColor) {
-                    if (currentColor !== null && startJ !== null) {
-                        const r1 = (firstGateActual + startJ * gateSizeKm) * pixelsPerKm;
-                        const r2 = (firstGateActual + j * gateSizeKm) * pixelsPerKm;
-                        ctx.fillStyle = currentColor;
-                        const width = arcWidthRad * r2;
-                        // Use a slightly wider fill to prevent gaps
-                        ctx.fillRect(r1, -width/2 - 0.5, r2 - r1 + 0.5, width + 1);
+                const moment = momentArray[i];
+                if (moment && moment.moment_data) {
+                    const firstGateKm = moment.first_gate / 1000;
+                    const firstGateActual = firstGateKm < 1 ? moment.first_gate : firstGateKm;
+                    const gateSizeKm = moment.gate_size;
+                    const data = moment.moment_data;
+
+                    let startJ = null;
+                    let currentColor = null;
+
+                    for (let j = 0; j <= data.length; j += gateStep) {
+                        const val = j < data.length ? data[j] : null;
+                        const color = val !== null && val !== undefined ? scale(val) : null;
+                        
+                        if (color !== currentColor) {
+                            if (currentColor !== null && startJ !== null) {
+                                const r1 = (firstGateActual + startJ * gateSizeKm) * pixelsPerKm;
+                                const r2 = (firstGateActual + j * gateSizeKm) * pixelsPerKm;
+                                ctx.fillStyle = currentColor;
+                                const width = arcWidthRad * r2;
+                                ctx.fillRect(r1, -width/2 - 0.5, r2 - r1 + 0.5, width + 1);
+                            }
+                            currentColor = color;
+                            startJ = j;
+                        }
                     }
-                    currentColor = color;
-                    startJ = j;
+                    // Mark as revealed
+                    liveRadarData.revealedUpdate[i] = liveRadarData.lastUpdated[i];
                 }
             }
             ctx.restore();
@@ -1568,7 +1617,9 @@ const RadarCanvasLayer = L.Layer.extend({
         for (let i = 0; i < azArray.length; i++) {
             const radialAz = azArray[i];
             let diff = (currentAz - radialAz + 360) % 360;
-            if (diff > 30) continue; // Only draw the highlight beam slice
+            
+            // Draw a wider 60-degree fading tail for a more dramatic effect
+            if (diff > 60) continue; 
 
             const moment = momentArray[i];
             if (!moment || !moment.moment_data) continue;
@@ -1577,8 +1628,12 @@ const RadarCanvasLayer = L.Layer.extend({
             ctx.save();
             ctx.rotate(-azimuth);
 
-            // Subtle highlight on top of the base scan
-            ctx.globalAlpha = 0.35 * (1 - diff / 30);
+            // Stronger highlight near the leading edge, fading out over 60 degrees
+            let alpha = 0.4 * (1 - diff / 60);
+            // Add a sharp "glow" boost at the very front (first 2 degrees)
+            if (diff < 2) alpha += 0.4;
+            
+            ctx.globalAlpha = alpha;
 
             const firstGateKm = moment.first_gate / 1000;
             const firstGateActual = firstGateKm < 1 ? moment.first_gate : firstGateKm;

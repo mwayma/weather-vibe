@@ -45,6 +45,10 @@ function mergeRealTimeData(stationId, newData) {
         const existingIdx = liveRadarData.azimuths.findIndex(a => Math.round(a * 10) / 10 === roundedAz);
         
         if (existingIdx !== -1) {
+            // Update timestamp
+            if (newData.timestamps && newData.timestamps[i]) {
+                liveRadarData.timestamps[existingIdx] = newData.timestamps[i];
+            }
             for (const [e, elevations] of Object.entries(newData.elevations)) {
                 for (const [product, moments] of Object.entries(elevations)) {
                     if (liveRadarData.elevations[e] && liveRadarData.elevations[e][product]) {
@@ -53,7 +57,15 @@ function mergeRealTimeData(stationId, newData) {
                 }
             }
         } else {
+            // Add new azimuth and keep arrays synchronized
             liveRadarData.azimuths.push(az);
+            if (newData.timestamps && newData.timestamps[i]) {
+                if (!liveRadarData.timestamps) liveRadarData.timestamps = [];
+                liveRadarData.timestamps.push(newData.timestamps[i]);
+            } else if (liveRadarData.timestamps) {
+                liveRadarData.timestamps.push(Date.now());
+            }
+            
             for (const [e, elevations] of Object.entries(newData.elevations)) {
                 for (const [product, moments] of Object.entries(elevations)) {
                     if (liveRadarData.elevations[e] && liveRadarData.elevations[e][product]) {
@@ -63,6 +75,25 @@ function mergeRealTimeData(stationId, newData) {
             }
         }
     });
+
+    // OPTIMIZATION: Keep azimuths sorted to allow for faster range searches in the client
+    const indices = liveRadarData.azimuths.map((_, i) => i);
+    indices.sort((a, b) => liveRadarData.azimuths[a] - liveRadarData.azimuths[b]);
+    
+    const sortedAz = indices.map(i => liveRadarData.azimuths[i]);
+    const sortedTs = liveRadarData.timestamps ? indices.map(i => liveRadarData.timestamps[i]) : null;
+    
+    const sortedElevations = {};
+    for (const [e, products] of Object.entries(liveRadarData.elevations)) {
+        sortedElevations[e] = {};
+        for (const [product, moments] of Object.entries(products)) {
+            sortedElevations[e][product] = indices.map(i => moments[i]);
+        }
+    }
+    
+    liveRadarData.azimuths = sortedAz;
+    if (sortedTs) liveRadarData.timestamps = sortedTs;
+    liveRadarData.elevations = sortedElevations;
 }
 
 async function pollChunks(stationId) {
@@ -155,6 +186,7 @@ function extractRadialData(parsed) {
     const elevations = [1, 2, 3, 4, 5];
     const extracted = {
         azimuths: parsed.getAzimuth(),
+        timestamps: parsed.getTimestamp(), // Add this line
         elevations: {}
     };
 
