@@ -143,77 +143,94 @@ async function pollChunks(stationId) {
         });
         
         const latestVolPrefix = commonPrefixes[commonPrefixes.length - 1].Prefix;
+        const previousVolPrefix = commonPrefixes.length > 1 ? commonPrefixes[commonPrefixes.length - 2].Prefix : null;
+        
+        // We poll both the latest and the previous volume to catch transitions and tail-end data
+        const volumesToPoll = previousVolPrefix ? [previousVolPrefix, latestVolPrefix] : [latestVolPrefix];
         let state = stationState.get(stationId) || { lastVolume: null, lastChunkKey: null, headerChunk: null };
 
-        const listChunksUrl = `${BUCKET_URL}/?list-type=2&prefix=${latestVolPrefix}`;
-        const chunkRes = await fetchWithTimeout(listChunksUrl);
-        const chunkJson = parser.parse(await chunkRes.text());
-        
-        let contents = chunkJson.ListBucketResult.Contents;
-        if (!contents) return;
-        if (!Array.isArray(contents)) contents = [contents];
-        contents.sort((a, b) => a.Key.localeCompare(b.Key));
-        
-        const firstChunkKey = contents[0].Key;
-        const timestampMatch = firstChunkKey.match(/(\d{8}-\d{6})/);
-        const volumeId = latestVolPrefix + (timestampMatch ? timestampMatch[1] : '');
-
-        if (volumeId !== state.lastVolume) {
-            console.log(`[${stationId}] New volume detected: ${volumeId}`);
-            stationCache.delete(stationId);
-            broadcast(stationId, { type: 'clear_data' });
-            state.lastVolume = volumeId;
-            state.lastChunkKey = null; 
-            state.headerChunk = null;
-            stationState.set(stationId, state);
-        }
-
-        const unseen = contents.filter(c => !state.lastChunkKey || c.Key.localeCompare(state.lastChunkKey) > 0);
-
-        if (unseen.length > 0) {
-            console.log(`[${stationId}] Polling: Found ${unseen.length} new chunks (Latest: ${unseen[unseen.length-1].Key.split('/').pop()})`);
+        for (const volPrefix of volumesToPoll) {
+            const listChunksUrl = `${BUCKET_URL}/?list-type=2&prefix=${volPrefix}`;
+            const chunkRes = await fetchWithTimeout(listChunksUrl);
+            const chunkJson = parser.parse(await chunkRes.text());
             
-            if (!state.headerChunk) {
-                const headerKey = contents.find(c => c.Key.includes('-001-S'))?.Key;
-                if (headerKey) {
-                    const hRes = await fetchWithTimeout(`${BUCKET_URL}/${headerKey}`);
-                    state.headerChunk = await hRes.arrayBuffer();
+            let contents = chunkJson.ListBucketResult.Contents;
+            if (!contents) continue;
+            if (!Array.isArray(contents)) contents = [contents];
+            contents.sort((a, b) => a.Key.localeCompare(b.Key));
+            
+            const firstChunkKey = contents[0].Key;
+            const timestampMatch = firstChunkKey.match(/(\d{8}-\d{6})/);
+            const volumeId = volPrefix + (timestampMatch ? timestampMatch[1] : '');
+
+            // Volume transition detection (only trigger on the newest folder)
+            if (volPrefix === latestVolPrefix && volumeId !== state.lastVolume) {
+                console.log(`[${stationId}] New volume detected: ${volumeId}`);
+                stationCache.delete(stationId);
+                broadcast(stationId, { type: 'clear_data' });
+                state.lastVolume = volumeId;
+                state.lastChunkKey = null; 
+                state.headerChunk = null;
+                stationState.set(stationId, state);
+            }
+
+            // Only process chunks we haven't seen for this specific volume session
+            const unseen = contents.filter(c => !state.lastChunkKey || c.Key.localeCompare(state.lastChunkKey) > 0);
+
+            if (unseen.length > 0) {
+                const latestKey = unseen[unseen.length - 1].Key;
+                console.log(`[${stationId}] Volume ${volPrefix}: Found ${unseen.length} new chunks (Latest: ${latestKey.split('/').pop()})`);
+                
+                if (latestKey.includes('-E')) {
+                    console.log(`[${stationId}] Volume ${volPrefix} reached end-of-volume chunk.`);
+                }
+
+                if (!state.headerChunk) {
+                    const headerKey = contents.find(c => c.Key.includes('-001-S'))?.Key;
+                    if (headerKey) {
+                        const hRes = await fetchWithTimeout(`${BUCKET_URL}/${headerKey}`);
+                        state.headerChunk = await hRes.arrayBuffer();
+                    }
+                }
+
+                const CONCURRENCY = 5;
+                for (let i = 0; i < unseen.length; i += CONCURRENCY) {
+                    const batch = unseen.slice(i, i + CONCURRENCY);
+                    await Promise.all(batch.map(async (chunk) => {
+                        try {
+                            const chunkId = chunk.Key.split('/').pop();
+                            const dataRes = await fetchWithTimeout(`${BUCKET_URL}/${chunk.Key}`);
+                            const chunkBuffer = await dataRes.arrayBuffer();
+                            
+                            let combinedBuffer;
+                            if (state.headerChunk && !chunk.Key.includes('-001-S')) {
+                                combinedBuffer = Buffer.concat([Buffer.from(state.headerChunk), Buffer.from(chunkBuffer)]);
+                            } else {
+                                combinedBuffer = Buffer.from(chunkBuffer);
+                            }
+
+                            const parsed = new Level2Radar(combinedBuffer);
+                            const extracted = extractRadialData(parsed, stationId, chunkId);
+                            if (extracted && extracted.azimuths.length > 0) {
+                                mergeRealTimeData(stationId, extracted);
+                                broadcast(stationId, { 
+                                    type: 'radial_update', 
+                                    data: extracted, 
+                                    chunk: chunkId 
+                                });
+                            }
+                        } catch (e) {
+                            console.warn(`[${stationId}] Chunk ${chunk.Key} error: ${e.message}`);
+                        }
+                    }));
+                }
+                
+                // Track progress in the latest volume to avoid reprocessing
+                if (volPrefix === latestVolPrefix) {
+                    state.lastChunkKey = unseen[unseen.length - 1].Key;
+                    stationState.set(stationId, state);
                 }
             }
-
-            const CONCURRENCY = 5;
-            for (let i = 0; i < unseen.length; i += CONCURRENCY) {
-                const batch = unseen.slice(i, i + CONCURRENCY);
-                await Promise.all(batch.map(async (chunk) => {
-                    try {
-                        const chunkId = chunk.Key.split('/').pop();
-                        const dataRes = await fetchWithTimeout(`${BUCKET_URL}/${chunk.Key}`);
-                        const chunkBuffer = await dataRes.arrayBuffer();
-                        
-                        let combinedBuffer;
-                        if (state.headerChunk && !chunk.Key.includes('-001-S')) {
-                            combinedBuffer = Buffer.concat([Buffer.from(state.headerChunk), Buffer.from(chunkBuffer)]);
-                        } else {
-                            combinedBuffer = Buffer.from(chunkBuffer);
-                        }
-
-                        const parsed = new Level2Radar(combinedBuffer);
-                        const extracted = extractRadialData(parsed, stationId, chunkId);
-                        if (extracted && extracted.azimuths.length > 0) {
-                            mergeRealTimeData(stationId, extracted);
-                            broadcast(stationId, { 
-                                type: 'radial_update', 
-                                data: extracted, 
-                                chunk: chunkId 
-                            });
-                        }
-                    } catch (e) {
-                        console.warn(`[${stationId}] Chunk ${chunk.Key} error: ${e.message}`);
-                    }
-                }));
-            }
-            state.lastChunkKey = unseen[unseen.length - 1].Key;
-            stationState.set(stationId, state);
         }
     } catch (e) {
         console.error(`[${stationId}] Poll error:`, e.message);
@@ -319,7 +336,7 @@ wss.on('connection', (ws) => {
                 subscriptions.get(stationId).add(ws);
 
                 if (!activePollers.has(stationId)) {
-                    const poller = setInterval(() => pollChunks(stationId), 2000); // More aggressive polling (2s)
+                    const poller = setInterval(() => pollChunks(stationId), 1000); // 1s polling for faster volume transitions
                     activePollers.set(stationId, poller);
                     pollChunks(stationId);
                 } else if (stationCache.has(stationId)) {
