@@ -1289,7 +1289,7 @@ function updateRadarLayersBasedOnMode() {
             socket.send(JSON.stringify({ action: 'unsubscribe' }));
         }
         liveTrackingLayer.clearLayers();
-        if (liveScanInterval) { clearInterval(liveScanInterval); liveScanInterval = null; }
+        if (liveScanInterval) { cancelAnimationFrame(liveScanInterval); liveScanInterval = null; }
         if (liveDataRefreshInterval) { clearInterval(liveDataRefreshInterval); liveDataRefreshInterval = null; }
     }
 
@@ -1344,12 +1344,12 @@ function startLiveTracking() {
 
     document.getElementById('timestamp').innerText = `Connecting to Live Stream: ${stationId}...`;
     
-    if (liveScanInterval) clearInterval(liveScanInterval);
+    if (liveScanInterval) cancelAnimationFrame(liveScanInterval);
     if (liveDataRefreshInterval) clearInterval(liveDataRefreshInterval);
 
     function animateSweep() {
-        // Reduced buffer to 15s for more real-time feel
-        const SWEEP_BUFFER_MS = 15000; 
+        // Sync sweep to 1 RPM (6 degrees per second) with a lag buffer
+        const SWEEP_BUFFER_MS = 20000; // 20s lag buffer to ensure data availability
         const replayTime = Date.now() - SWEEP_BUFFER_MS;
         const secondsInMinute = (replayTime / 1000) % 60;
         const currentAngle = secondsInMinute * 6; 
@@ -1373,10 +1373,10 @@ function startLiveTracking() {
         }
         
         window._lastSweepAngle = currentAngle;
+        liveScanInterval = requestAnimationFrame(animateSweep);
     }
     
-    // Use setInterval instead of requestAnimationFrame to avoid Linux focus issues
-    liveScanInterval = setInterval(animateSweep, 33); // ~30fps
+    liveScanInterval = requestAnimationFrame(animateSweep);
 }
 
 
@@ -1531,7 +1531,7 @@ const RadarCanvasLayer = L.Layer.extend({
 
         const azArray = liveRadarData.azimuths;
         const angularRes = 360 / azArray.length;
-        const arcWidthRad = (angularRes * Math.PI / 180) * 1.1;
+        const arcWidthRad = (angularRes * Math.PI / 180) * 1.2; // Slightly more overlap for persistence
         const zoom = map.getZoom();
         const gateStep = zoom < 7 ? 4 : (zoom < 9 ? 2 : 1);
         const scale = COLOR_SCALES[momentKey];
@@ -1541,24 +1541,22 @@ const RadarCanvasLayer = L.Layer.extend({
         ctx.translate(center.x, center.y);
         ctx.globalAlpha = 1.0; 
 
-        // 1. CLEAR the arc between startAz and endAz (continuous clearing)
+        // 1. CLEAR A WEDGE AHEAD of the current sweep line (the 'dark' zone)
+        // We clear 5 degrees ahead of the current position to erase old data before new data arrives
         ctx.globalCompositeOperation = 'destination-out';
         ctx.beginPath();
         ctx.moveTo(0, 0);
-        // Canvas angles are clockwise from positive X-axis. 
-        // Our azimuth is North-relative clockwise. 
-        // Conversion: CanvasAngle = (Azimuth - 90) * PI / 180
-        const startRad = (startAz - 90) * Math.PI / 180;
-        const endRad = (endAz - 90) * Math.PI / 180;
         
-        // Add a small buffer to the clear arc to avoid slivers
-        const CLEAR_BUFFER = 0.02; 
-        ctx.arc(0, 0, 460 * pixelsPerKm, startRad - CLEAR_BUFFER, endRad + CLEAR_BUFFER);
+        // Conversion: CanvasAngle = (Azimuth - 90) * PI / 180
+        const clearStartRad = (endAz - 90) * Math.PI / 180;
+        const clearEndRad = (endAz - 85) * Math.PI / 180; // Clear 5 degrees ahead
+        
+        ctx.arc(0, 0, 460 * pixelsPerKm, clearStartRad, clearEndRad);
         ctx.lineTo(0, 0);
         ctx.fill();
         ctx.globalCompositeOperation = 'source-over';
 
-        // 2. PAINT radials that fall within the sweep window
+        // 2. PAINT radials that fall within the sweep window (lastAngle to currentAngle)
         for (let i = 0; i < azArray.length; i++) {
             const radialAz = azArray[i];
 
@@ -1576,13 +1574,8 @@ const RadarCanvasLayer = L.Layer.extend({
             ctx.rotate(-azimuth);
 
             const moment = momentArray[i];
-            const radialTs = liveRadarData.lastUpdated ? liveRadarData.lastUpdated[i] : 0;
-            
-            // We use a small lag buffer to ensure we aren't painting "ahead" of what's likely available in S3
-            const SWEEP_BUFFER_MS = 45000;
-            const isDataEligible = radialTs <= (Date.now() - SWEEP_BUFFER_MS);
-
-            if (moment && moment.moment_data && isDataEligible) {
+            // PAINT data if it exists for this radial
+            if (moment && moment.moment_data) {
                 const firstGateKm = moment.first_gate / 1000;
                 const firstGateActual = firstGateKm < 1 ? moment.first_gate : firstGateKm;
                 const gateSizeKm = moment.gate_size;
@@ -1614,9 +1607,9 @@ const RadarCanvasLayer = L.Layer.extend({
                 const roundedAz = Math.round(radialAz * 10) / 10;
                 if (liveRadarData.radialsMap && liveRadarData.radialsMap.has(roundedAz)) {
                     const radial = liveRadarData.radialsMap.get(roundedAz);
-                    radial.revealedUpdate = radialTs;
+                    radial.revealedUpdate = 1; // Mark as revealed
                 }
-                liveRadarData.revealedUpdate[i] = radialTs;
+                liveRadarData.revealedUpdate[i] = 1;
             }
             ctx.restore();
         }
@@ -1639,9 +1632,6 @@ const RadarCanvasLayer = L.Layer.extend({
 
         ctx.clearRect(0, 0, this._container.width, this._container.height);
         ctx.drawImage(this._offscreenCanvas, 0, 0);
-
-        // Linux/Chrome hack: tiny opacity change forces a compositor flush
-        this._container.style.opacity = (this._container.style.opacity === '0.99') ? '1.0' : '0.99';
     }
 });
 
