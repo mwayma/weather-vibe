@@ -721,6 +721,69 @@ let liveScanInterval = null;
 let liveDataRefreshInterval = null;
 let liveCanvasLayer = null;
 
+let socket = null;
+function initWebSocket() {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const host = window.location.host;
+    socket = new WebSocket(`${protocol}//${host}`);
+
+    socket.onopen = () => {
+        console.log('WebSocket connected');
+        if (currentRadarMode === 'live-tracking' && selectedRadarId && selectedRadarId !== 'composite') {
+            socket.send(JSON.stringify({ action: 'subscribe', station: selectedRadarId }));
+        }
+    };
+
+    socket.onmessage = (event) => {
+        const message = JSON.parse(event.data);
+        if (message.type === 'radial_update') {
+            console.log('Received real-time radial update:', message.chunk);
+            mergeRealTimeData(message.data);
+        }
+    };
+
+    socket.onclose = () => {
+        console.warn('WebSocket disconnected, retrying...');
+        setTimeout(initWebSocket, 5000);
+    };
+}
+
+function mergeRealTimeData(newData) {
+    if (!liveRadarData) {
+        liveRadarData = newData;
+        renderLiveRadar();
+        return;
+    }
+
+    newData.azimuths.forEach((az, i) => {
+        const existingIdx = liveRadarData.azimuths.indexOf(az);
+        if (existingIdx !== -1) {
+            for (const [e, elevations] of Object.entries(newData.elevations)) {
+                for (const [product, moments] of Object.entries(elevations)) {
+                    if (liveRadarData.elevations[e] && liveRadarData.elevations[e][product]) {
+                        liveRadarData.elevations[e][product][existingIdx] = moments[i];
+                    }
+                }
+            }
+        } else {
+            liveRadarData.azimuths.push(az);
+            for (const [e, elevations] of Object.entries(newData.elevations)) {
+                for (const [product, moments] of Object.entries(elevations)) {
+                    if (liveRadarData.elevations[e] && liveRadarData.elevations[e][product]) {
+                        liveRadarData.elevations[e][product].push(moments[i]);
+                    }
+                }
+            }
+        }
+    });
+
+    if (liveCanvasLayer) {
+        liveCanvasLayer._needsFullRedraw = true;
+    }
+}
+
+initWebSocket();
+
 const COLOR_SCALES = {
     reflectivity: (val) => {
         if (val === null || val < 5) return null;
@@ -1103,6 +1166,10 @@ function updateRadarLayersBasedOnMode() {
     // Explicitly de-reference large data objects before clearing
     liveRadarData = null;
     liveCanvasLayer = null;
+
+    if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({ action: 'unsubscribe' }));
+    }
     
     liveTrackingLayer.clearLayers();
     if (liveScanInterval) { cancelAnimationFrame(liveScanInterval); liveScanInterval = null; }
@@ -1142,6 +1209,12 @@ function startLiveTracking() {
             return;
         }
     }
+
+    // Subscribe via WebSocket
+    if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({ action: 'subscribe', station: selectedRadarId }));
+    }
+
     const station = NEXRAD_STATIONS.find(s => s.id === selectedRadarId);
     if (!station) {
         console.warn('Station not found:', selectedRadarId);

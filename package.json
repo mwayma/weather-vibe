@@ -1,6 +1,13 @@
 {
   "dependencies": {
-    "nexrad-level-2-data": "^2.4.3"
+    "adm-zip": "^0.5.17",
+    "compression": "^1.8.1",
+    "cors": "^2.8.6",
+    "express": "^5.2.1",
+    "fast-xml-parser": "^5.7.2",
+    "nexrad-level-2-data": "^2.4.3",
+    "node-fetch": "^2.7.0",
+    "ws": "^8.20.0"
   },
   "devDependencies": {
     "browserify": "^17.0.1",
