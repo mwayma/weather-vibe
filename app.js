@@ -1430,7 +1430,7 @@ function startLiveTracking() {
         if (liveCanvasLayer && liveCanvasLayer._topLeft) {
             const lastAngle = window._lastSweepAngle !== undefined ? window._lastSweepAngle : currentAngle;
             
-            // Sequential Merge: Find buffered radials that fall within this frame's sweep window
+            // 1. Surgical Merge & Draw
             let mergedAny = false;
             const keys = Array.from(incomingRadialBuffer.keys());
             keys.forEach(roundedAz => {
@@ -1443,39 +1443,25 @@ function startLiveTracking() {
 
                 if (isInside) {
                     const radial = incomingRadialBuffer.get(roundedAz);
+                    if (!liveRadarData) {
+                        liveRadarData = { radialsMap: new Map(), azimuths: [], lastUpdated: [], revealedUpdate: [], timestamps: [], elevations: {} };
+                    }
+                    liveRadarData.radialsMap.set(roundedAz, radial);
                     
-                    // Inline merging logic for performance to avoid multiple syncLiveRadarArrays calls
-                    if (!liveRadarData) {
-                        liveRadarData = { radialsMap: new Map(), azimuths: [], lastUpdated: [], revealedUpdate: [], timestamps: [], elevations: {} };
-                    }
-                    if (!liveRadarData.radialsMap) liveRadarData.radialsMap = new Map();
-
-                    liveRadarData.radialsMap.set(roundedAz, {
-                        azimuth: radial.azimuth,
-                        timestamp: radial.timestamp,
-                        revealedUpdate: 0,
-                        elevations: radial.elevations
-                    });
-
+                    // Surgically draw this new radial to the offscreen buffer
+                    liveCanvasLayer._drawRadialToOffscreen(radial);
+                    
                     incomingRadialBuffer.delete(roundedAz);
                     mergedAny = true;
                 }
             });
 
-            if (mergedAny) {
-                syncLiveRadarArrays();
-                renderLiveRadar(); // Ensure layer is initialized
-            }
-
-            if (liveCanvasLayer) {
-                liveCanvasLayer._drawIncremental(lastAngle, currentAngle);
-                liveCanvasLayer._draw();
-            }
-        } else if (liveRadarData || incomingRadialBuffer.size > 0) {
-            // Even if liveCanvasLayer isn't ready, we might need to initialize it 
-            // if we have data in the buffer that should be merged.
+            // 2. Continuous Sweep Visuals
+            liveCanvasLayer._drawIncremental(lastAngle, currentAngle); // Clears the wedge ahead
+            liveCanvasLayer._draw(); // Blits the buffer with gradient mask
+        } else if (incomingRadialBuffer.size > 0) {
+            // Initialize rendering if data is waiting
             const lastAngle = window._lastSweepAngle !== undefined ? window._lastSweepAngle : currentAngle;
-            let mergedAny = false;
             const keys = Array.from(incomingRadialBuffer.keys());
             keys.forEach(roundedAz => {
                 let isInside = false;
@@ -1485,24 +1471,12 @@ function startLiveTracking() {
                     isInside = (roundedAz >= lastAngle || roundedAz <= currentAngle);
                 }
                 if (isInside) {
-                    const radial = incomingRadialBuffer.get(roundedAz);
-                    if (!liveRadarData) {
-                        liveRadarData = { radialsMap: new Map(), azimuths: [], lastUpdated: [], revealedUpdate: [], timestamps: [], elevations: {} };
-                    }
-                    if (!liveRadarData.radialsMap) liveRadarData.radialsMap = new Map();
-                    liveRadarData.radialsMap.set(roundedAz, {
-                        azimuth: radial.azimuth, timestamp: radial.timestamp, revealedUpdate: 0, elevations: radial.elevations
-                    });
+                    if (!liveRadarData) liveRadarData = { radialsMap: new Map(), azimuths: [], lastUpdated: [], revealedUpdate: [], timestamps: [], elevations: {} };
+                    liveRadarData.radialsMap.set(roundedAz, incomingRadialBuffer.get(roundedAz));
                     incomingRadialBuffer.delete(roundedAz);
-                    mergedAny = true;
                 }
             });
-            if (mergedAny) {
-                syncLiveRadarArrays();
-            }
-            if (liveRadarData) {
-                renderLiveRadar();
-            }
+            if (liveRadarData) renderLiveRadar();
         }
         
         window._lastSweepAngle = currentAngle;
@@ -1525,7 +1499,7 @@ const RadarCanvasLayer = L.Layer.extend({
         this._needsFullRedraw = true;
 
         map.on('viewreset', this._reset, this); 
-        map.on('move', this._onMove, this); // Listen to every move for continuous sync
+        map.on('move', this._onMove, this);
         map.on('moveend', this._reset, this);
         this._reset();
     },
@@ -1540,20 +1514,17 @@ const RadarCanvasLayer = L.Layer.extend({
         this._offscreenCtx = null;
     },
     _onMove: function() {
-        // Continuous repositioning of the canvas container to prevent "floating"
         const topLeft = map.getBounds().getNorthWest();
         const pos = map.latLngToLayerPoint(topLeft);
         L.DomUtil.setPosition(this._container, pos);
         this._topLeft = pos;
-        this._draw(); // Redraw on every move to keep alignment perfect
+        this._draw(); 
     },
     _getPixelsPerKm: function(stationLat, stationLon) {
-        // High-precision local scale calculation
         const centerLayer = map.latLngToLayerPoint([stationLat, stationLon]);
-        // 1km North is approx 0.00899 degrees
         const refPoint = L.latLng(stationLat + 0.00899, stationLon);
         const refLayer = map.latLngToLayerPoint(refPoint);
-        return centerLayer.distanceTo(refLayer); // 1km in pixels
+        return centerLayer.distanceTo(refLayer);
     },
     _reset: function() {
         const size = map.getSize();
@@ -1573,60 +1544,40 @@ const RadarCanvasLayer = L.Layer.extend({
         this._needsFullRedraw = true;
         this._draw();
     },
-    _renderFull: function(center, pixelsPerKm) {
+    _drawRadialToOffscreen: function(radial) {
         if (!this._offscreenCanvas || !this._offscreenCtx) return;
+        const station = NEXRAD_STATIONS.find(s => s.id === selectedRadarId);
+        if (!station) return;
+
         const ctx = this._offscreenCtx;
         const dpr = window.devicePixelRatio || 1;
-        ctx.clearRect(0, 0, this._offscreenCanvas.width, this._offscreenCanvas.height);
-
-        if (!liveRadarData || !liveRadarData.elevations) return;
+        const centerLayer = map.latLngToLayerPoint([station.lat, station.lon]);
+        const center = { x: (centerLayer.x - this._topLeft.x) * dpr, y: (centerLayer.y - this._topLeft.y) * dpr };
+        const pixelsPerKm = this._getPixelsPerKm(station.lat, station.lon) * dpr;
 
         let momentKey = 'reflectivity';
         if (currentLiveMode === 'velocity') { momentKey = 'velocity'; }
         else if (currentLiveMode === 'debris') { momentKey = 'debris'; }
-
-        let momentArray = [];
-        for (let e = 1; e <= 5; e++) {
-            const temp = liveRadarData.elevations[e] ? liveRadarData.elevations[e][momentKey] : null;
-            if (temp && temp.some(m => m && m.moment_data)) { momentArray = temp; break; }
-        }
-        if (momentArray.length === 0) return;
-
-        const azArray = liveRadarData.azimuths;
-        const angularRes = 360 / azArray.length;
-        const arcWidthRad = (angularRes * Math.PI / 180) * 2.2; 
-        const gateStep = 1; 
+        
         const scale = COLOR_SCALES[momentKey];
+        // Assume 720 radials if unknown to avoid gaps
+        const arcWidthRad = ( (360 / 720) * Math.PI / 180) * 2.5; 
+        const gateStep = 1;
 
+        const azimuth = (90 - radial.azimuth) * Math.PI / 180;
         ctx.save();
-        ctx.scale(dpr, dpr);
         ctx.translate(center.x, center.y);
-        ctx.lineJoin = 'round';
-        ctx.lineCap = 'round';
+        ctx.rotate(-azimuth);
 
-        if (!liveRadarData.revealedUpdate) {
-            liveRadarData.revealedUpdate = new Array(azArray.length).fill(1);
+        let moment = null;
+        for (let e = 1; e <= 5; e++) {
+            if (radial.elevations[e] && radial.elevations[e][momentKey]) {
+                moment = radial.elevations[e][momentKey];
+                if (moment && moment.moment_data) break;
+            }
         }
 
-        for (let i = 0; i < azArray.length; i++) {
-            const radialAz = azArray[i];
-            const moment = momentArray[i];
-            
-            if (!liveRadarData.revealedUpdate || !liveRadarData.revealedUpdate[i]) continue;
-            if (!moment || !moment.moment_data) continue;
-
-            // Calculate persistence alpha based on distance from currentAngle
-            const angularDiff = Math.abs((radialAz - currentAngle + 540) % 360 - 180);
-            let alpha = 0.9;
-            if (angularDiff > 30) {
-                alpha = 0.9 - ((angularDiff - 30) / (180 - 30)) * (0.9 - 0.4);
-            }
-            ctx.globalAlpha = Math.max(0, alpha);
-
-            const azimuth = (90 - radialAz) * Math.PI / 180;
-            ctx.save();
-            ctx.rotate(-azimuth);
-
+        if (moment && moment.moment_data) {
             const firstGateKm = moment.first_gate / 1000;
             const firstGateActual = firstGateKm < 1 ? moment.first_gate : firstGateKm;
             const gateSizeKm = moment.gate_size;
@@ -1645,7 +1596,7 @@ const RadarCanvasLayer = L.Layer.extend({
                         const r2 = (firstGateActual + j * gateSizeKm) * pixelsPerKm;
                         ctx.fillStyle = currentColor;
                         ctx.strokeStyle = currentColor;
-                        ctx.lineWidth = 1.2; 
+                        ctx.lineWidth = 1.0;
                         ctx.beginPath();
                         ctx.arc(0, 0, r1, -arcWidthRad/2, arcWidthRad/2);
                         ctx.arc(0, 0, r2, arcWidthRad/2, -arcWidthRad/2, true);
@@ -1657,118 +1608,40 @@ const RadarCanvasLayer = L.Layer.extend({
                     startJ = j;
                 }
             }
-            ctx.restore();
         }
         ctx.restore();
+    },
+    _renderFull: function() {
+        if (!this._offscreenCanvas || !this._offscreenCtx) return;
+        const ctx = this._offscreenCtx;
+        ctx.clearRect(0, 0, this._offscreenCanvas.width, this._offscreenCanvas.height);
+        if (!liveRadarData || !liveRadarData.radialsMap) return;
+        for (const radial of liveRadarData.radialsMap.values()) {
+            this._drawRadialToOffscreen(radial);
+        }
         this._needsFullRedraw = false;
     },
     _drawIncremental: function(startAz, endAz) {
         if (!this._offscreenCanvas || !this._offscreenCtx) return;
         const station = NEXRAD_STATIONS.find(s => s.id === selectedRadarId);
-        if (!station || !liveRadarData || !liveRadarData.elevations) return;
+        if (!station) return;
 
-        const centerLayer = map.latLngToLayerPoint([station.lat, station.lon]);
-        const center = { x: centerLayer.x - this._topLeft.x, y: centerLayer.y - this._topLeft.y };
-        const pixelsPerKm = this._getPixelsPerKm(station.lat, station.lon);
         const dpr = window.devicePixelRatio || 1;
-
+        const centerLayer = map.latLngToLayerPoint([station.lat, station.lon]);
+        const center = { x: (centerLayer.x - this._topLeft.x) * dpr, y: (centerLayer.y - this._topLeft.y) * dpr };
+        const pixelsPerKm = this._getPixelsPerKm(station.lat, station.lon) * dpr;
         const ctx = this._offscreenCtx;
 
-        let momentKey = 'reflectivity';
-        if (currentLiveMode === 'velocity') { momentKey = 'velocity'; }
-        else if (currentLiveMode === 'debris') { momentKey = 'debris'; }
-
-        let momentArray = [];
-        for (let e = 1; e <= 5; e++) {
-            const temp = liveRadarData.elevations[e] ? liveRadarData.elevations[e][momentKey] : null;
-            if (temp && temp.some(m => m && m.moment_data)) { momentArray = temp; break; }
-        }
-        if (momentArray.length === 0) return;
-
-        const azArray = liveRadarData.azimuths;
-        const angularRes = 360 / azArray.length;
-        const arcWidthRad = (angularRes * Math.PI / 180) * 2.2; 
-        const zoom = map.getZoom();
-        const gateStep = 1; 
-        const scale = COLOR_SCALES[momentKey];
-
+        // CLEAR A WEDGE AHEAD of the sweep to avoid ghosting
         ctx.save();
-        ctx.scale(dpr, dpr);
-        ctx.translate(center.x, center.y);
-        ctx.globalAlpha = 1.0; 
-        ctx.lineJoin = 'round';
-        ctx.lineCap = 'round';
-
-        // 1. CLEAR A WEDGE AHEAD of the current sweep line (the 'dark' zone)
         ctx.globalCompositeOperation = 'destination-out';
         ctx.beginPath();
-        ctx.moveTo(0, 0);
+        ctx.moveTo(center.x, center.y);
         const clearStartRad = (endAz - 90) * Math.PI / 180;
-        const clearEndRad = (endAz - 88) * Math.PI / 180; // Clear 2 degrees ahead (minimal gap)
-        ctx.arc(0, 0, 460 * pixelsPerKm, clearStartRad, clearEndRad);
-        ctx.lineTo(0, 0);
+        const clearEndRad = (endAz - 88) * Math.PI / 180; 
+        ctx.arc(center.x, center.y, 460 * pixelsPerKm, clearStartRad, clearEndRad);
+        ctx.lineTo(center.x, center.y);
         ctx.fill();
-        ctx.globalCompositeOperation = 'source-over';
-
-        // 2. PAINT radials that fall within the sweep window (lastAngle to currentAngle)
-        for (let i = 0; i < azArray.length; i++) {
-            const radialAz = azArray[i];
-
-            let isInside = false;
-            if (startAz <= endAz) {
-                isInside = (radialAz >= startAz && radialAz <= endAz);
-            } else {
-                isInside = (radialAz >= startAz || radialAz <= endAz);
-            }
-
-            if (!isInside) continue;
-
-            const azimuth = (90 - radialAz) * Math.PI / 180;
-            ctx.save();
-            ctx.rotate(-azimuth);
-
-            const moment = momentArray[i];
-            if (moment && moment.moment_data) {
-                const firstGateKm = moment.first_gate / 1000;
-                const firstGateActual = firstGateKm < 1 ? moment.first_gate : firstGateKm;
-                const gateSizeKm = moment.gate_size;
-                const data = moment.moment_data;
-
-                let startJ = null;
-                let currentColor = null;
-
-                for (let j = 0; j <= data.length; j += gateStep) {
-                    const val = j < data.length ? data[j] : null;
-                    const color = val !== null && val !== undefined ? scale(val) : null;
-                    
-                    if (color !== currentColor) {
-                        if (currentColor !== null && startJ !== null) {
-                            const r1 = (firstGateActual + startJ * gateSizeKm) * pixelsPerKm;
-                            const r2 = (firstGateActual + j * gateSizeKm) * pixelsPerKm;
-                            ctx.fillStyle = currentColor;
-                            ctx.strokeStyle = currentColor;
-                            ctx.lineWidth = 1.2;
-                            ctx.beginPath();
-                            ctx.arc(0, 0, r1, -arcWidthRad/2, arcWidthRad/2);
-                            ctx.arc(0, 0, r2, arcWidthRad/2, -arcWidthRad/2, true);
-                            ctx.closePath();
-                            ctx.fill();
-                            ctx.stroke();
-                        }
-                        currentColor = color;
-                        startJ = j;
-                    }
-                }
-                
-                const roundedAz = Math.round(radialAz * 10) / 10;
-                if (liveRadarData.radialsMap && liveRadarData.radialsMap.has(roundedAz)) {
-                    const radial = liveRadarData.radialsMap.get(roundedAz);
-                    radial.revealedUpdate = 1;
-                }
-                liveRadarData.revealedUpdate[i] = 1;
-            }
-            ctx.restore();
-        }
         ctx.restore();
     },
     _draw: function() {
@@ -1778,15 +1651,31 @@ const RadarCanvasLayer = L.Layer.extend({
         const station = NEXRAD_STATIONS.find(s => s.id === selectedRadarId);
         if (!station || !liveRadarData) return;
 
-        const centerLayer = map.latLngToLayerPoint([station.lat, station.lon]);
-        const center = { x: centerLayer.x - this._topLeft.x, y: centerLayer.y - this._topLeft.y };
-        const pixelsPerKm = this._getPixelsPerKm(station.lat, station.lon);
+        if (this._needsFullRedraw) {
+            this._renderFull();
+        }
 
-        // Always redraw full to apply the alpha persistence gradient synchronously with sweep
-        this._renderFull(center, pixelsPerKm);
+        const centerLayer = map.latLngToLayerPoint([station.lat, station.lon]);
+        const center = { x: (centerLayer.x - this._topLeft.x) * dpr, y: (centerLayer.y - this._topLeft.y) * dpr };
 
         ctx.clearRect(0, 0, this._container.width, this._container.height);
+
+        // Apply Conical Mask for Persistence Effect
+        ctx.save();
+        const sweepRad = (currentAngle - 90) * Math.PI / 180;
+        const grad = ctx.createConicGradient(sweepRad, center.x, center.y);
+        
+        grad.addColorStop(0, 'rgba(0,0,0,0.9)');
+        grad.addColorStop(0.08, 'rgba(0,0,0,0.9)'); 
+        grad.addColorStop(0.5, 'rgba(0,0,0,0.4)');
+        grad.addColorStop(0.92, 'rgba(0,0,0,0.9)');
+        grad.addColorStop(1, 'rgba(0,0,0,0.9)');
+
         ctx.drawImage(this._offscreenCanvas, 0, 0);
+        ctx.globalCompositeOperation = 'destination-in';
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, this._container.width, this._container.height);
+        ctx.restore();
     }
 });
 
