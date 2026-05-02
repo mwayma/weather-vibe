@@ -1472,7 +1472,7 @@ const RadarCanvasLayer = L.Layer.extend({
 
         const azArray = liveRadarData.azimuths;
         const angularRes = 360 / azArray.length;
-        const arcWidthRad = (angularRes * Math.PI / 180) * 1.1;
+        const arcWidthRad = (angularRes * Math.PI / 180) * 1.3;
         const zoom = map.getZoom();
         const gateStep = zoom < 7 ? 4 : (zoom < 9 ? 2 : 1);
         const scale = COLOR_SCALES[momentKey];
@@ -1515,9 +1515,12 @@ const RadarCanvasLayer = L.Layer.extend({
                         const r1 = (firstGateActual + startJ * gateSizeKm) * pixelsPerKm;
                         const r2 = (firstGateActual + j * gateSizeKm) * pixelsPerKm;
                         ctx.fillStyle = currentColor;
-                        const width = arcWidthRad * r2;
-                        // Use a slightly wider fill to prevent gaps
-                        ctx.fillRect(r1, -width/2 - 0.5, r2 - r1 + 0.5, width + 1);
+                        // Use smooth annular sectors instead of blocky fillRect
+                        ctx.beginPath();
+                        ctx.arc(0, 0, r1 - 0.5, -arcWidthRad/2 - 0.001, arcWidthRad/2 + 0.001);
+                        ctx.arc(0, 0, r2 + 0.5, arcWidthRad/2 + 0.001, -arcWidthRad/2 - 0.001, true);
+                        ctx.closePath();
+                        ctx.fill();
                     }
                     currentColor = color;
                     startJ = j;
@@ -1552,7 +1555,7 @@ const RadarCanvasLayer = L.Layer.extend({
 
         const azArray = liveRadarData.azimuths;
         const angularRes = 360 / azArray.length;
-        const arcWidthRad = (angularRes * Math.PI / 180) * 1.1;
+        const arcWidthRad = (angularRes * Math.PI / 180) * 1.3;
         const zoom = map.getZoom();
         const gateStep = zoom < 7 ? 4 : (zoom < 9 ? 2 : 1);
         const scale = COLOR_SCALES[momentKey];
@@ -1610,8 +1613,12 @@ const RadarCanvasLayer = L.Layer.extend({
                             const r1 = (firstGateActual + startJ * gateSizeKm) * pixelsPerKm;
                             const r2 = (firstGateActual + j * gateSizeKm) * pixelsPerKm;
                             ctx.fillStyle = currentColor;
-                            const width = arcWidthRad * r2;
-                            ctx.fillRect(r1, -width/2 - 0.5, r2 - r1 + 0.5, width + 1);
+                            // Use smooth annular sectors instead of blocky fillRect
+                            ctx.beginPath();
+                            ctx.arc(0, 0, r1 - 0.5, -arcWidthRad/2 - 0.001, arcWidthRad/2 + 0.001);
+                            ctx.arc(0, 0, r2 + 0.5, arcWidthRad/2 + 0.001, -arcWidthRad/2 - 0.001, true);
+                            ctx.closePath();
+                            ctx.fill();
                         }
                         currentColor = color;
                         startJ = j;

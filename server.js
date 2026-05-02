@@ -186,7 +186,9 @@ async function pollChunks(stationId) {
 
             if (unseen.length > 0) {
                 const latestKey = unseen[unseen.length - 1].Key;
-                console.log(`[${stationId}] Vol ${volPrefix}: Processing ${unseen.length} new chunks`);
+                const firstId = unseen[0].Key.split('/').pop();
+                const lastId = latestKey.split('/').pop();
+                console.log(`[${stationId}] Vol ${volPrefix}: Processing ${unseen.length} new chunks (${firstId} to ${lastId})`);
                 
                 if (latestKey.includes('-E')) {
                     console.log(`[${stationId}] Vol ${volPrefix} completed.`);
@@ -342,7 +344,6 @@ wss.on('connection', (ws) => {
                     if (subscriptions.get(currentStation)?.size === 0) {
                         clearInterval(activePollers.get(currentStation));
                         activePollers.delete(currentStation);
-                        stationState.delete(currentStation);
                     }
                 }
 
@@ -365,7 +366,6 @@ wss.on('connection', (ws) => {
                     if (subscriptions.get(currentStation)?.size === 0) {
                         clearInterval(activePollers.get(currentStation));
                         activePollers.delete(currentStation);
-                        stationState.delete(currentStation);
                     }
                     currentStation = null;
                 }
@@ -381,7 +381,6 @@ wss.on('connection', (ws) => {
             if (subscriptions.get(currentStation)?.size === 0) {
                 clearInterval(activePollers.get(currentStation));
                 activePollers.delete(currentStation);
-                stationState.delete(currentStation);
             }
         }
     });
