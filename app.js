@@ -1472,7 +1472,7 @@ const RadarCanvasLayer = L.Layer.extend({
 
         const azArray = liveRadarData.azimuths;
         const angularRes = 360 / azArray.length;
-        const arcWidthRad = (angularRes * Math.PI / 180) * 1.3;
+        const arcWidthRad = (angularRes * Math.PI / 180) * 1.6;
         const zoom = map.getZoom();
         const gateStep = zoom < 7 ? 4 : (zoom < 9 ? 2 : 1);
         const scale = COLOR_SCALES[momentKey];
@@ -1555,7 +1555,7 @@ const RadarCanvasLayer = L.Layer.extend({
 
         const azArray = liveRadarData.azimuths;
         const angularRes = 360 / azArray.length;
-        const arcWidthRad = (angularRes * Math.PI / 180) * 1.3;
+        const arcWidthRad = (angularRes * Math.PI / 180) * 1.6;
         const zoom = map.getZoom();
         const gateStep = zoom < 7 ? 4 : (zoom < 9 ? 2 : 1);
         const scale = COLOR_SCALES[momentKey];

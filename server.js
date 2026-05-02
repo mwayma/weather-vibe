@@ -351,12 +351,16 @@ wss.on('connection', (ws) => {
                 if (!subscriptions.has(stationId)) subscriptions.set(stationId, new Set());
                 subscriptions.get(stationId).add(ws);
 
+                // 1. ALWAYS send initial state if we have it in the cache
+                if (stationCache.has(stationId)) {
+                    ws.send(JSON.stringify({ type: 'initial_state', data: getConsolidatedData(stationId) }));
+                }
+
+                // 2. Start or trigger the poller
                 if (!activePollers.has(stationId)) {
-                    const poller = setInterval(() => pollChunks(stationId), 1000); // 1s polling for faster volume transitions
+                    const poller = setInterval(() => pollChunks(stationId), 1000); 
                     activePollers.set(stationId, poller);
                     pollChunks(stationId);
-                } else if (stationCache.has(stationId)) {
-                    ws.send(JSON.stringify({ type: 'initial_state', data: getConsolidatedData(stationId) }));
                 }
                 
                 ws.send(JSON.stringify({ type: 'status', message: `Subscribed to real-time chunks for ${stationId}` }));
