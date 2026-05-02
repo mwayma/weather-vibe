@@ -1065,6 +1065,28 @@ function setupRadarButtons() {
             }
         });
     }
+
+    // Legend Toggle
+    const legend = document.getElementById('legend');
+    const legendToggle = document.getElementById('legend-toggle-btn');
+    if (legend && legendToggle) {
+        // Show toggle only on mobile or small screens
+        if (window.innerWidth <= 768) {
+            legendToggle.style.display = 'block';
+            legend.style.display = 'none'; // Start hidden on mobile
+        }
+
+        legendToggle.addEventListener('click', () => {
+            const icon = legendToggle.querySelector('span');
+            if (legend.style.display === 'none') {
+                legend.style.display = 'block';
+                if (icon) icon.innerText = '▲';
+            } else {
+                legend.style.display = 'none';
+                if (icon) icon.innerText = '▼';
+            }
+        });
+    }
     
     if (loopBtn) {
         loopBtn.addEventListener('click', (e) => {
