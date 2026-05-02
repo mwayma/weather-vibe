@@ -814,22 +814,12 @@ function mergeRealTimeData(newData) {
 
     if (!liveRadarData.radialsMap) {
         liveRadarData.radialsMap = new Map();
-        // Migrating existing arrays to map if needed (unlikely in normal flow)
-        liveRadarData.azimuths.forEach((az, i) => {
-            const rounded = Math.round(az * 10) / 10;
-            liveRadarData.radialsMap.set(rounded, {
-                azimuth: az,
-                timestamp: liveRadarData.timestamps ? liveRadarData.timestamps[i] : Date.now(),
-                revealedUpdate: liveRadarData.revealedUpdate ? liveRadarData.revealedUpdate[i] : 0,
-                elevations: {} // populate if needed
-            });
-        });
     }
 
     const now = Date.now();
     newData.azimuths.forEach((az, i) => {
         const roundedAz = Math.round(az * 10) / 10;
-        const timestamp = newData.timestamps ? newData.timestamps[i] : now;
+        const timestamp = (newData.timestamps && newData.timestamps[i]) ? newData.timestamps[i] : now;
 
         if (!liveRadarData.radialsMap.has(roundedAz)) {
             liveRadarData.radialsMap.set(roundedAz, {
@@ -852,31 +842,46 @@ function mergeRealTimeData(newData) {
     });
 
     syncLiveRadarArrays();
+    
+    // CRITICAL: Ensure the layer exists and is ready to render
+    if (!liveCanvasLayer) {
+        renderLiveRadar();
+    }
 }
 
 function syncLiveRadarArrays() {
     if (!liveRadarData || !liveRadarData.radialsMap) return;
 
     const sortedAzKeys = Array.from(liveRadarData.radialsMap.keys()).sort((a, b) => a - b);
+    const len = sortedAzKeys.length;
     
-    liveRadarData.azimuths = [];
-    liveRadarData.lastUpdated = [];
-    liveRadarData.revealedUpdate = [];
-    liveRadarData.timestamps = [];
+    liveRadarData.azimuths = new Array(len);
+    liveRadarData.lastUpdated = new Array(len);
+    liveRadarData.revealedUpdate = new Array(len);
+    liveRadarData.timestamps = new Array(len);
+    
+    // Pre-initialize elevation products with null arrays to ensure length consistency
     liveRadarData.elevations = {};
+    for (let e = 1; e <= 5; e++) {
+        liveRadarData.elevations[e] = {
+            reflectivity: new Array(len).fill(null),
+            velocity: new Array(len).fill(null),
+            debris: new Array(len).fill(null)
+        };
+    }
 
-    sortedAzKeys.forEach(key => {
+    sortedAzKeys.forEach((key, i) => {
         const radial = liveRadarData.radialsMap.get(key);
-        liveRadarData.azimuths.push(radial.azimuth);
-        liveRadarData.lastUpdated.push(radial.timestamp);
-        liveRadarData.revealedUpdate.push(radial.revealedUpdate);
-        liveRadarData.timestamps.push(radial.timestamp);
+        liveRadarData.azimuths[i] = radial.azimuth;
+        liveRadarData.lastUpdated[i] = radial.timestamp;
+        liveRadarData.revealedUpdate[i] = radial.revealedUpdate;
+        liveRadarData.timestamps[i] = radial.timestamp;
 
         for (const [e, products] of Object.entries(radial.elevations)) {
-            if (!liveRadarData.elevations[e]) liveRadarData.elevations[e] = {};
             for (const [product, moment] of Object.entries(products)) {
-                if (!liveRadarData.elevations[e][product]) liveRadarData.elevations[e][product] = [];
-                liveRadarData.elevations[e][product].push(moment);
+                if (liveRadarData.elevations[e] && liveRadarData.elevations[e][product]) {
+                    liveRadarData.elevations[e][product][i] = moment;
+                }
             }
         }
     });
