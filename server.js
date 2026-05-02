@@ -148,10 +148,19 @@ async function findTrulyLatestVolume(stationId, commonPrefixes) {
 
     // If the lowest numerical folder is newer than the highest, we've wrapped around
     if (lowTs > highTs) {
-        // Find the boundary where it wraps (highest TS in the low numerical range)
-        // For efficiency, we just start from the bottom and find the latest consecutive new one
-        // or just return the highest in the low range that is "recent"
-        return lowestNumPrefix; // Simplest: just take the lowest for now, next poll will move up
+        // Find the HIGHEST volume in the NEW sequence (usually only a few folders)
+        let latest = lowestNumPrefix;
+        let latestTs = lowTs;
+        for (let i = 1; i < Math.min(sorted.length, 50); i++) {
+            const currentTs = await getVolTimestamp(sorted[i].Prefix);
+            if (currentTs >= latestTs) {
+                latest = sorted[i].Prefix;
+                latestTs = currentTs;
+            } else {
+                break;
+            }
+        }
+        return latest;
     }
 
     return highestNumPrefix;
@@ -421,7 +430,6 @@ wss.on('connection', (ws) => {
                         clearInterval(activePollers.get(currentStation));
                         activePollers.delete(currentStation);
                     }
-                    currentStation = null;
                 }
             }
         } catch (e) {
