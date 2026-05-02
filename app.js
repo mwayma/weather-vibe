@@ -1412,11 +1412,10 @@ const RadarCanvasLayer = L.Layer.extend({
 
         this._offscreenCanvas = document.createElement('canvas');
         this._offscreenCtx = this._offscreenCanvas.getContext('2d');
-        this._tempCanvas = document.createElement('canvas'); // Reuse for shifting
         this._needsFullRedraw = true;
 
         map.on('viewreset', this._reset, this); 
-        map.on('move', this._onMove, this);
+        map.on('move', this._onMove, this); // Listen to every move for continuous sync
         map.on('moveend', this._reset, this);
         this._reset();
     },
@@ -1431,35 +1430,20 @@ const RadarCanvasLayer = L.Layer.extend({
         this._offscreenCtx = null;
     },
     _onMove: function() {
+        // Continuous repositioning of the canvas container to prevent "floating"
         const topLeft = map.getBounds().getNorthWest();
         const pos = map.latLngToLayerPoint(topLeft);
-        
-        const dx = this._topLeft.x - pos.x;
-        const dy = this._topLeft.y - pos.y;
-        
-        if (dx !== 0 || dy !== 0) {
-            const dpr = window.devicePixelRatio || 1;
-            // Shift offscreen content to stay geographically locked during pans
-            this._tempCanvas.width = this._offscreenCanvas.width;
-            this._tempCanvas.height = this._offscreenCanvas.height;
-            const tCtx = this._tempCanvas.getContext('2d');
-            tCtx.drawImage(this._offscreenCanvas, 0, 0);
-            
-            this._offscreenCtx.clearRect(0, 0, this._offscreenCanvas.width, this._offscreenCanvas.height);
-            this._offscreenCtx.drawImage(this._tempCanvas, dx * dpr, dy * dpr);
-        }
-
         L.DomUtil.setPosition(this._container, pos);
         this._topLeft = pos;
-        this._draw(); 
+        this._draw(); // Redraw on every move to keep alignment perfect
     },
     _getPixelsPerKm: function(stationLat, stationLon) {
-        // High-precision scale calculation using geodesic points
-        const lat2 = stationLat + 0.01;
-        const p1 = map.latLngToLayerPoint([stationLat, stationLon]);
-        const p2 = map.latLngToLayerPoint([lat2, stationLon]);
-        const distMeters = L.latLng(stationLat, stationLon).distanceTo(L.latLng(lat2, stationLon));
-        return (p1.distanceTo(p2) / distMeters) * 1000;
+        // High-precision local scale calculation
+        const centerLayer = map.latLngToLayerPoint([stationLat, stationLon]);
+        // 1km North is approx 0.00899 degrees
+        const refPoint = L.latLng(stationLat + 0.00899, stationLon);
+        const refLayer = map.latLngToLayerPoint(refPoint);
+        return centerLayer.distanceTo(refLayer); // 1km in pixels
     },
     _reset: function() {
         const size = map.getSize();
@@ -1500,7 +1484,7 @@ const RadarCanvasLayer = L.Layer.extend({
 
         const azArray = liveRadarData.azimuths;
         const angularRes = 360 / azArray.length;
-        const arcWidthRad = (angularRes * Math.PI / 180) * 2.5; // High overlap for smoothness
+        const arcWidthRad = (angularRes * Math.PI / 180) * 2.2; // Significant overlap for smoothness
         const zoom = map.getZoom();
         const gateStep = 1; 
         const scale = COLOR_SCALES[momentKey];
@@ -1545,7 +1529,7 @@ const RadarCanvasLayer = L.Layer.extend({
                         const r2 = (firstGateActual + j * gateSizeKm) * pixelsPerKm;
                         ctx.fillStyle = currentColor;
                         ctx.strokeStyle = currentColor;
-                        ctx.lineWidth = 1.5; // Thick bleed for manual anti-aliasing
+                        ctx.lineWidth = 1.2; 
                         ctx.beginPath();
                         ctx.arc(0, 0, r1, -arcWidthRad/2, arcWidthRad/2);
                         ctx.arc(0, 0, r2, arcWidthRad/2, -arcWidthRad/2, true);
@@ -1587,7 +1571,7 @@ const RadarCanvasLayer = L.Layer.extend({
 
         const azArray = liveRadarData.azimuths;
         const angularRes = 360 / azArray.length;
-        const arcWidthRad = (angularRes * Math.PI / 180) * 2.5; 
+        const arcWidthRad = (angularRes * Math.PI / 180) * 2.2; 
         const zoom = map.getZoom();
         const gateStep = 1; 
         const scale = COLOR_SCALES[momentKey];
@@ -1647,7 +1631,7 @@ const RadarCanvasLayer = L.Layer.extend({
                             const r2 = (firstGateActual + j * gateSizeKm) * pixelsPerKm;
                             ctx.fillStyle = currentColor;
                             ctx.strokeStyle = currentColor;
-                            ctx.lineWidth = 1.5;
+                            ctx.lineWidth = 1.2;
                             ctx.beginPath();
                             ctx.arc(0, 0, r1, -arcWidthRad/2, arcWidthRad/2);
                             ctx.arc(0, 0, r2, arcWidthRad/2, -arcWidthRad/2, true);
