@@ -746,17 +746,14 @@ radarWorker.onmessage = function(e) {
     } else if (message.type === 'initial_state') {
         if (message.stationId && message.stationId !== currentStationId) return;
         console.log('Received initial state for', message.stationId);
-        liveRadarData = message.data;
-        if (liveRadarData) {
-            if (!liveRadarData.lastUpdated) liveRadarData.lastUpdated = new Array(liveRadarData.azimuths.length).fill(Date.now());
-            if (!liveRadarData.revealedUpdate) liveRadarData.revealedUpdate = new Array(liveRadarData.azimuths.length).fill(1);
-            if (!liveRadarData.timestamps) liveRadarData.timestamps = [...liveRadarData.lastUpdated];
-            
-            liveRadarData.radialsMap = new Map();
-            liveRadarData.azimuths.forEach((az, i) => {
+        
+        liveRadarData = { radialsMap: new Map() };
+        if (message.data && message.data.azimuths) {
+            const data = message.data;
+            data.azimuths.forEach((az, i) => {
                 const rounded = Math.round(az * 10) / 10;
                 const radialElevations = {};
-                for (const [e, products] of Object.entries(liveRadarData.elevations)) {
+                for (const [e, products] of Object.entries(data.elevations)) {
                     radialElevations[e] = {};
                     for (const [product, moments] of Object.entries(products)) {
                         radialElevations[e][product] = moments[i];
@@ -764,8 +761,7 @@ radarWorker.onmessage = function(e) {
                 }
                 liveRadarData.radialsMap.set(rounded, {
                     azimuth: az,
-                    timestamp: liveRadarData.timestamps[i],
-                    revealedUpdate: liveRadarData.revealedUpdate[i],
+                    timestamp: data.timestamps ? data.timestamps[i] : Date.now(),
                     elevations: radialElevations
                 });
             });
@@ -1403,8 +1399,6 @@ function startLiveTracking() {
         if (liveCanvasLayer && liveCanvasLayer._topLeft) {
             const lastAngle = window._lastSweepAngle !== undefined ? window._lastSweepAngle : currentAngle;
             
-            // 1. Surgical Merge & Draw
-            let mergedAny = false;
             const keys = Array.from(incomingRadialBuffer.keys());
             keys.forEach(roundedAz => {
                 let isInside = false;
@@ -1416,40 +1410,19 @@ function startLiveTracking() {
 
                 if (isInside) {
                     const radial = incomingRadialBuffer.get(roundedAz);
-                    if (!liveRadarData) {
-                        liveRadarData = { radialsMap: new Map(), azimuths: [], lastUpdated: [], revealedUpdate: [], timestamps: [], elevations: {} };
-                    }
+                    if (!liveRadarData) liveRadarData = { radialsMap: new Map() };
                     liveRadarData.radialsMap.set(roundedAz, radial);
                     
-                    // Surgically draw this new radial to the offscreen buffer
                     liveCanvasLayer._drawRadialToOffscreen(radial);
-                    
                     incomingRadialBuffer.delete(roundedAz);
-                    mergedAny = true;
                 }
             });
 
-            // 2. Continuous Sweep Visuals
-            liveCanvasLayer._drawIncremental(lastAngle, currentAngle); // Clears the wedge ahead
-            liveCanvasLayer._draw(); // Blits the buffer with gradient mask
-        } else if (incomingRadialBuffer.size > 0) {
-            // Initialize rendering if data is waiting
-            const lastAngle = window._lastSweepAngle !== undefined ? window._lastSweepAngle : currentAngle;
-            const keys = Array.from(incomingRadialBuffer.keys());
-            keys.forEach(roundedAz => {
-                let isInside = false;
-                if (lastAngle <= currentAngle) {
-                    isInside = (roundedAz >= lastAngle && roundedAz <= currentAngle);
-                } else {
-                    isInside = (roundedAz >= lastAngle || roundedAz <= currentAngle);
-                }
-                if (isInside) {
-                    if (!liveRadarData) liveRadarData = { radialsMap: new Map(), azimuths: [], lastUpdated: [], revealedUpdate: [], timestamps: [], elevations: {} };
-                    liveRadarData.radialsMap.set(roundedAz, incomingRadialBuffer.get(roundedAz));
-                    incomingRadialBuffer.delete(roundedAz);
-                }
-            });
-            if (liveRadarData) renderLiveRadar();
+            liveCanvasLayer._drawIncremental(lastAngle, currentAngle);
+            liveCanvasLayer._draw();
+        } else if (liveRadarData || incomingRadialBuffer.size > 0) {
+            // Initial render call if data exists but layer is not yet added
+            renderLiveRadar();
         }
         
         window._lastSweepAngle = currentAngle;
