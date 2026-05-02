@@ -745,8 +745,8 @@ function initWebSocket() {
                     liveRadarData.lastUpdated = new Array(liveRadarData.azimuths.length).fill(Date.now());
                 }
                 if (!liveRadarData.revealedUpdate) {
-                    // Mark as 0 so the sweep can "reveal" it for the first time
-                    liveRadarData.revealedUpdate = new Array(liveRadarData.azimuths.length).fill(0);
+                    // Mark as already revealed so initial state is visible immediately
+                    liveRadarData.revealedUpdate = [...liveRadarData.lastUpdated];
                 }
                 if (!liveRadarData.timestamps) {
                     liveRadarData.timestamps = [...liveRadarData.lastUpdated];
@@ -776,16 +776,8 @@ function initWebSocket() {
             console.log('Received real-time radial update:', message.chunk);
             mergeRealTimeData(message.data);
         } else if (message.type === 'clear_data') {
-            console.log('Server requested data clear (New Volume)');
-            liveRadarData = null;
-            if (liveCanvasLayer) {
-                // Clear the offscreen buffer as well
-                if (liveCanvasLayer._offscreenCtx) {
-                    liveCanvasLayer._offscreenCtx.clearRect(0, 0, liveCanvasLayer._offscreenCanvas.width, liveCanvasLayer._offscreenCanvas.height);
-                }
-                liveCanvasLayer._needsFullRedraw = false; // We just cleared it, don't re-render full
-                liveCanvasLayer._draw();
-            }
+            console.log('Server requested data clear (New Volume) - ignoring to persist display');
+            // We ignore clear_data to keep the old volume visible until overwritten
         } else if (message.type === 'status') {
             console.log('WebSocket Status:', message.message);
         } else if (message.type === 'heartbeat') {
@@ -1604,6 +1596,8 @@ const RadarCanvasLayer = L.Layer.extend({
 
             const moment = momentArray[i];
             const radialTs = liveRadarData.lastUpdated ? liveRadarData.lastUpdated[i] : 0;
+            
+            // We use a small lag buffer to ensure we aren't painting "ahead" of what's likely available in S3
             const SWEEP_BUFFER_MS = 45000;
             const isDataEligible = radialTs <= (Date.now() - SWEEP_BUFFER_MS);
 

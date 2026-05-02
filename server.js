@@ -230,8 +230,8 @@ async function pollChunks(stationId) {
             // Detect Volume Transition (on the newest folder)
             if (volPrefix === latestVolPrefix && volumeId !== state.lastVolume) {
                 console.log(`[${stationId}] Transitioning to new volume: ${volumeId}`);
-                stationCache.delete(stationId);
-                broadcast(stationId, { type: 'clear_data' });
+                // stationCache.delete(stationId); // Keep old data to avoid blanking out the client
+                // broadcast(stationId, { type: 'clear_data' }); 
                 state.lastVolume = volumeId;
                 state.lastChunkKey = null; 
                 state.headerChunk = null;
