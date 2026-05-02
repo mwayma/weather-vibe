@@ -32,7 +32,6 @@ function sendStatus(stationId, message) {
 
 async function pollChunks(stationId) {
     try {
-        // 1. Find the latest volume directory
         const listVolUrl = `${BUCKET_URL}/?list-type=2&prefix=${stationId}/&delimiter=/`;
         const volRes = await fetch(listVolUrl);
         const volText = await volRes.text();
@@ -42,7 +41,6 @@ async function pollChunks(stationId) {
         if (!commonPrefixes) return;
         if (!Array.isArray(commonPrefixes)) commonPrefixes = [commonPrefixes];
 
-        // Numerical sort for volumes (e.g. KLZK/984/)
         commonPrefixes.sort((a, b) => {
             const volA = parseInt(a.Prefix.split('/')[1]);
             const volB = parseInt(b.Prefix.split('/')[1]);
@@ -52,7 +50,6 @@ async function pollChunks(stationId) {
         const latestVolPrefix = commonPrefixes[commonPrefixes.length - 1].Prefix;
         let state = stationState.get(stationId) || { lastVolume: null, lastChunkKey: null, headerChunk: null };
 
-        // 2. List chunks in that volume
         const listChunksUrl = `${BUCKET_URL}/?list-type=2&prefix=${latestVolPrefix}`;
         const chunkRes = await fetch(listChunksUrl);
         const chunkText = await chunkRes.text();
@@ -62,18 +59,16 @@ async function pollChunks(stationId) {
         if (!contents) return;
         if (!Array.isArray(contents)) contents = [contents];
 
-        // Sort by key (contains timestamp and chunk index)
         contents.sort((a, b) => a.Key.localeCompare(b.Key));
         
-        const latestChunk = contents[contents.length - 1];
+        // Find all chunks we haven't seen yet in this volume
+        const unseen = contents.filter(c => !state.lastChunkKey || c.Key.localeCompare(state.lastChunkKey) > 0);
 
-        // Handle new volume or new chunk
-        if (latestChunk.Key !== state.lastChunkKey) {
-            console.log(`New chunk detected for ${stationId}: ${latestChunk.Key}`);
+        if (unseen.length > 0) {
+            console.log(`Processing ${unseen.length} new chunks for ${stationId}`);
             
             // If new volume, we MUST get the header chunk (001-S)
             if (latestVolPrefix !== state.lastVolume) {
-                console.log(`New volume detected: ${latestVolPrefix}`);
                 sendStatus(stationId, `New volume detected: ${latestVolPrefix.split('/')[1]}`);
                 const headerKey = contents.find(c => c.Key.endsWith('-001-S'))?.Key;
                 if (headerKey) {
@@ -83,39 +78,36 @@ async function pollChunks(stationId) {
                 state.lastVolume = latestVolPrefix;
             }
 
-            state.lastChunkKey = latestChunk.Key;
-            stationState.set(stationId, state);
+            for (const chunk of unseen) {
+                const dataRes = await fetch(`${BUCKET_URL}/${chunk.Key}`);
+                const chunkBuffer = await dataRes.arrayBuffer();
+                
+                try {
+                    let combinedBuffer;
+                    if (state.headerChunk && !chunk.Key.endsWith('-001-S')) {
+                        combinedBuffer = Buffer.concat([
+                            Buffer.from(state.headerChunk),
+                            Buffer.from(chunkBuffer)
+                        ]);
+                    } else {
+                        combinedBuffer = Buffer.from(chunkBuffer);
+                    }
 
-            // Fetch and parse the latest chunk
-            const dataRes = await fetch(`${BUCKET_URL}/${latestChunk.Key}`);
-            const chunkBuffer = await dataRes.arrayBuffer();
-            
-            try {
-                // Combine header + chunk to ensure library can parse correctly
-                let combinedBuffer;
-                if (state.headerChunk && !latestChunk.Key.endsWith('-001-S')) {
-                    combinedBuffer = Buffer.concat([
-                        Buffer.from(state.headerChunk),
-                        Buffer.from(chunkBuffer)
-                    ]);
-                } else {
-                    combinedBuffer = Buffer.from(chunkBuffer);
+                    const parsed = new Level2Radar(combinedBuffer);
+                    const extracted = extractRadialData(parsed);
+                    if (extracted && extracted.azimuths.length > 0) {
+                        broadcast(stationId, { 
+                            type: 'radial_update', 
+                            data: extracted, 
+                            chunk: chunk.Key.split('/').pop() 
+                        });
+                    }
+                } catch (e) {
+                    // console.warn(`Chunk parse skip (${chunk.Key.split('/').pop()}): ${e.message}`);
                 }
-
-                const parsed = new Level2Radar(combinedBuffer);
-                const extracted = extractRadialData(parsed);
-                if (extracted && extracted.azimuths.length > 0) {
-                    console.log(`Broadcasting ${extracted.azimuths.length} radials for ${stationId}`);
-                    broadcast(stationId, { 
-                        type: 'radial_update', 
-                        data: extracted, 
-                        chunk: latestChunk.Key.split('/').pop() 
-                    });
-                }
-            } catch (e) {
-                // Some chunks might still be unparseable if they are too small or meta-only
-                console.warn(`Chunk parse skip (${latestChunk.Key.split('/').pop()}): ${e.message}`);
             }
+            state.lastChunkKey = unseen[unseen.length - 1].Key;
+            stationState.set(stationId, state);
         }
     } catch (e) {
         console.error(`Error polling chunks for ${stationId}:`, e.message);
@@ -125,13 +117,9 @@ async function pollChunks(stationId) {
 function extractRadialData(parsed) {
     const elevations = [1, 2, 3, 4, 5];
     const extracted = {
-        azimuths: [],
+        azimuths: parsed.getAzimuth(),
         elevations: {}
     };
-
-    try {
-        extracted.azimuths = parsed.getAzimuth();
-    } catch (e) { return null; }
 
     const methods = {
         reflectivity: 'getHighresReflectivity',
@@ -145,8 +133,7 @@ function extractRadialData(parsed) {
         try {
             parsed.setElevation(e);
             for (const [key, method] of Object.entries(methods)) {
-                const moments = parsed[key === 'reflectivity' ? 'getHighresReflectivity' : 
-                                       (key === 'velocity' ? 'getHighresVelocity' : 'getHighresCorrelationCoefficient')]();
+                const moments = parsed[method]();
                 if (moments && moments.some(m => m && m.moment_data)) {
                     hasAnyData = true;
                     extracted.elevations[e][key] = moments.map(m => m ? {
@@ -199,12 +186,22 @@ wss.on('connection', (ws) => {
                 subscriptions.get(stationId).add(ws);
 
                 if (!activePollers.has(stationId)) {
-                    const poller = setInterval(() => pollChunks(stationId), 3000); 
+                    const poller = setInterval(() => pollChunks(stationId), 2000); // More aggressive polling (2s)
                     activePollers.set(stationId, poller);
                     pollChunks(stationId);
                 }
                 
                 ws.send(JSON.stringify({ type: 'status', message: `Subscribed to real-time chunks for ${stationId}` }));
+            } else if (parsed.action === 'unsubscribe') {
+                if (currentStation) {
+                    subscriptions.get(currentStation)?.delete(ws);
+                    if (subscriptions.get(currentStation)?.size === 0) {
+                        clearInterval(activePollers.get(currentStation));
+                        activePollers.delete(currentStation);
+                        stationState.delete(currentStation);
+                    }
+                    currentStation = null;
+                }
             }
         } catch (e) {
             console.error('Error handling message:', e);
@@ -223,7 +220,6 @@ wss.on('connection', (ws) => {
     });
 });
 
-// Heartbeat to keep connections alive and provide feedback
 setInterval(() => {
     wss.clients.forEach(client => {
         if (client.readyState === WebSocket.OPEN) {

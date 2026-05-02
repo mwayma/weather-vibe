@@ -1595,19 +1595,49 @@ const RadarCanvasLayer = L.Layer.extend({
         const edgeLayer = map.latLngToLayerPoint(edge);
         const pixelsPerKm = centerLayer.distanceTo(edgeLayer) / Math.sqrt(2);
 
-        // Populate offscreen if needed (on initial load or map move)
         if (this._needsFullRedraw) {
             this._renderFull(center, pixelsPerKm);
         }
 
         ctx.clearRect(0, 0, this._container.width, this._container.height);
 
-        // Base radar scan at 100% opacity for full persistence until overwritten
-        ctx.globalAlpha = 1.0;
-        ctx.drawImage(this._offscreenCanvas, 0, 0);
-
-        // Draw the highlight sweep (approx 30 degrees ahead)
+        // 1. Create a fade mask that rotates with the sweep
         const currentAz = window.currentScanAzimuth || 0;
+        
+        // Use a temporary canvas for masking to achieve the "fade behind sweep" effect
+        if (!this._maskCanvas) {
+            this._maskCanvas = document.createElement('canvas');
+            this._maskCtx = this._maskCanvas.getContext('2d');
+        }
+        this._maskCanvas.width = this._container.width;
+        this._maskCanvas.height = this._container.height;
+
+        const mCtx = this._maskCtx;
+        mCtx.save();
+        mCtx.translate(center.x, center.y);
+        mCtx.rotate(-(90 - currentAz) * Math.PI / 180);
+
+        // Create a conic gradient that fades from 1.0 to 0.0 over 360 degrees
+        const grad = mCtx.createConicGradient(0, 0, 0);
+        grad.addColorStop(0, 'rgba(0,0,0,1)'); // New data at sweep
+        grad.addColorStop(0.95, 'rgba(0,0,0,0.1)'); // Fading trail
+        grad.addColorStop(1, 'rgba(0,0,0,0)'); // Gone after 1 rev
+        
+        mCtx.fillStyle = grad;
+        mCtx.beginPath();
+        mCtx.arc(0, 0, 2000, 0, Math.PI * 2);
+        mCtx.fill();
+        mCtx.restore();
+
+        // 2. Draw radar data onto main canvas using the mask
+        ctx.save();
+        ctx.drawImage(this._offscreenCanvas, 0, 0);
+        ctx.globalCompositeOperation = 'destination-in';
+        ctx.drawImage(this._maskCanvas, 0, 0);
+        ctx.restore();
+
+        // 3. Draw the highlight sweep (bright active beam)
+        // ... highlight drawing follows ...
         
         let momentKey = 'reflectivity';
         if (currentLiveMode === 'velocity') { momentKey = 'velocity'; }
