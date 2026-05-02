@@ -1415,6 +1415,7 @@ const RadarCanvasLayer = L.Layer.extend({
         this._needsFullRedraw = true;
 
         map.on('viewreset', this._reset, this); 
+        map.on('move', this._onMove, this); // Listen to every move for continuous sync
         map.on('moveend', this._reset, this);
         this._reset();
     },
@@ -1423,15 +1424,26 @@ const RadarCanvasLayer = L.Layer.extend({
             this._container.parentNode.removeChild(this._container);
         }
         map.off('viewreset', this._reset, this); 
+        map.off('move', this._onMove, this);
         map.off('moveend', this._reset, this);
         this._offscreenCanvas = null;
         this._offscreenCtx = null;
     },
+    _onMove: function() {
+        // Continuous repositioning of the canvas container to prevent "floating"
+        const topLeft = map.getBounds().getNorthWest();
+        const pos = map.latLngToLayerPoint(topLeft);
+        L.DomUtil.setPosition(this._container, pos);
+        this._topLeft = pos;
+        this._draw(); // Redraw on every move to keep alignment perfect
+    },
     _getPixelsPerKm: function(stationLat, stationLon) {
+        // High-precision local scale calculation
         const centerLayer = map.latLngToLayerPoint([stationLat, stationLon]);
-        const refPoint = L.latLng(stationLat + 0.899, stationLon);
+        // 1km North is approx 0.00899 degrees
+        const refPoint = L.latLng(stationLat + 0.00899, stationLon);
         const refLayer = map.latLngToLayerPoint(refPoint);
-        return centerLayer.distanceTo(refLayer) / 100;
+        return centerLayer.distanceTo(refLayer); // 1km in pixels
     },
     _reset: function() {
         const size = map.getSize();
@@ -1472,15 +1484,17 @@ const RadarCanvasLayer = L.Layer.extend({
 
         const azArray = liveRadarData.azimuths;
         const angularRes = 360 / azArray.length;
-        const arcWidthRad = (angularRes * Math.PI / 180) * 1.5; // Increased overlap for persistence
+        const arcWidthRad = (angularRes * Math.PI / 180) * 2.2; // Significant overlap for smoothness
         const zoom = map.getZoom();
-        const gateStep = 1; // Force maximum resolution for live tracking
+        const gateStep = 1; 
         const scale = COLOR_SCALES[momentKey];
 
         ctx.save();
         ctx.scale(dpr, dpr);
         ctx.translate(center.x, center.y);
         ctx.globalAlpha = 1.0;
+        ctx.lineJoin = 'round';
+        ctx.lineCap = 'round';
 
         if (!liveRadarData.revealedUpdate) {
             liveRadarData.revealedUpdate = new Array(azArray.length).fill(1);
@@ -1515,7 +1529,7 @@ const RadarCanvasLayer = L.Layer.extend({
                         const r2 = (firstGateActual + j * gateSizeKm) * pixelsPerKm;
                         ctx.fillStyle = currentColor;
                         ctx.strokeStyle = currentColor;
-                        ctx.lineWidth = 0.5; // Subtle bleed for anti-aliasing
+                        ctx.lineWidth = 1.2; 
                         ctx.beginPath();
                         ctx.arc(0, 0, r1, -arcWidthRad/2, arcWidthRad/2);
                         ctx.arc(0, 0, r2, arcWidthRad/2, -arcWidthRad/2, true);
@@ -1557,26 +1571,24 @@ const RadarCanvasLayer = L.Layer.extend({
 
         const azArray = liveRadarData.azimuths;
         const angularRes = 360 / azArray.length;
-        const arcWidthRad = (angularRes * Math.PI / 180) * 1.5; // Slightly more overlap for persistence
+        const arcWidthRad = (angularRes * Math.PI / 180) * 2.2; 
         const zoom = map.getZoom();
-        const gateStep = 1; // Max detail
+        const gateStep = 1; 
         const scale = COLOR_SCALES[momentKey];
 
         ctx.save();
         ctx.scale(dpr, dpr);
         ctx.translate(center.x, center.y);
         ctx.globalAlpha = 1.0; 
+        ctx.lineJoin = 'round';
+        ctx.lineCap = 'round';
 
         // 1. CLEAR A WEDGE AHEAD of the current sweep line (the 'dark' zone)
-        // We clear 5 degrees ahead of the current position to erase old data before new data arrives
         ctx.globalCompositeOperation = 'destination-out';
         ctx.beginPath();
         ctx.moveTo(0, 0);
-        
-        // Conversion: CanvasAngle = (Azimuth - 90) * PI / 180
         const clearStartRad = (endAz - 90) * Math.PI / 180;
-        const clearEndRad = (endAz - 85) * Math.PI / 180; // Clear 5 degrees ahead
-        
+        const clearEndRad = (endAz - 80) * Math.PI / 180; // Clear 10 degrees ahead
         ctx.arc(0, 0, 460 * pixelsPerKm, clearStartRad, clearEndRad);
         ctx.lineTo(0, 0);
         ctx.fill();
@@ -1600,7 +1612,6 @@ const RadarCanvasLayer = L.Layer.extend({
             ctx.rotate(-azimuth);
 
             const moment = momentArray[i];
-            // PAINT data if it exists for this radial
             if (moment && moment.moment_data) {
                 const firstGateKm = moment.first_gate / 1000;
                 const firstGateActual = firstGateKm < 1 ? moment.first_gate : firstGateKm;
@@ -1620,7 +1631,7 @@ const RadarCanvasLayer = L.Layer.extend({
                             const r2 = (firstGateActual + j * gateSizeKm) * pixelsPerKm;
                             ctx.fillStyle = currentColor;
                             ctx.strokeStyle = currentColor;
-                            ctx.lineWidth = 0.5;
+                            ctx.lineWidth = 1.2;
                             ctx.beginPath();
                             ctx.arc(0, 0, r1, -arcWidthRad/2, arcWidthRad/2);
                             ctx.arc(0, 0, r2, arcWidthRad/2, -arcWidthRad/2, true);
@@ -1636,7 +1647,7 @@ const RadarCanvasLayer = L.Layer.extend({
                 const roundedAz = Math.round(radialAz * 10) / 10;
                 if (liveRadarData.radialsMap && liveRadarData.radialsMap.has(roundedAz)) {
                     const radial = liveRadarData.radialsMap.get(roundedAz);
-                    radial.revealedUpdate = 1; // Mark as revealed
+                    radial.revealedUpdate = 1;
                 }
                 liveRadarData.revealedUpdate[i] = 1;
             }
