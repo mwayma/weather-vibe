@@ -22,42 +22,63 @@ app.use(express.static(path.join(__dirname, '/')));
 
 const subscriptions = new Map();
 const activePollers = new Map();
-const lastProcessedChunk = new Map(); // stationId -> last chunk key
+const stationState = new Map(); // stationId -> { lastVolume, lastChunkKey }
 
 const parser = new XMLParser();
 
 async function pollChunks(stationId) {
     try {
-        const url = `${BUCKET_URL}/?list-type=2&prefix=${stationId}/1/`;
-        const res = await fetch(url);
-        const text = await res.text();
-        const jsonObj = parser.parse(text);
+        // 1. Find the latest volume directory
+        const listVolUrl = `${BUCKET_URL}/?list-type=2&prefix=${stationId}/&delimiter=/`;
+        const volRes = await fetch(listVolUrl);
+        const volText = await volRes.text();
+        const volJson = parser.parse(volText);
         
-        let contents = jsonObj.ListBucketResult.Contents;
+        let commonPrefixes = volJson.ListBucketResult.CommonPrefixes;
+        if (!commonPrefixes) return;
+        if (!Array.isArray(commonPrefixes)) commonPrefixes = [commonPrefixes];
+
+        // Prefixes are like "KLZK/394/", sort them to find the latest
+        commonPrefixes.sort((a, b) => a.Prefix.localeCompare(b.Prefix));
+        const latestVolPrefix = commonPrefixes[commonPrefixes.length - 1].Prefix;
+        
+        // 2. List chunks in that volume
+        const listChunksUrl = `${BUCKET_URL}/?list-type=2&prefix=${latestVolPrefix}`;
+        const chunkRes = await fetch(listChunksUrl);
+        const chunkText = await chunkRes.text();
+        const chunkJson = parser.parse(chunkText);
+        
+        let contents = chunkJson.ListBucketResult.Contents;
         if (!contents) return;
         if (!Array.isArray(contents)) contents = [contents];
 
-        // Sort by key (which contains datetime and chunk number)
+        // Sort by key to find the latest chunk
         contents.sort((a, b) => a.Key.localeCompare(b.Key));
+        const latestChunk = contents[contents.length - 1];
         
-        const latest = contents[contents.length - 1];
-        const lastSeen = lastProcessedChunk.get(stationId);
+        let state = stationState.get(stationId) || { lastVolume: null, lastChunkKey: null };
 
-        if (latest.Key !== lastSeen) {
-            console.log(`New chunk detected for ${stationId}: ${latest.Key}`);
-            lastProcessedChunk.set(stationId, latest.Key);
-            
-            const chunkRes = await fetch(`${BUCKET_URL}/${latest.Key}`);
-            const buffer = await chunkRes.arrayBuffer();
+        if (latestChunk.Key !== state.lastChunkKey) {
+            console.log(`New chunk detected for ${stationId}: ${latestChunk.Key}`);
+            state.lastChunkKey = latestChunk.Key;
+            state.lastVolume = latestVolPrefix;
+            stationState.set(stationId, state);
+
+            // Fetch and parse the chunk
+            const dataRes = await fetch(`${BUCKET_URL}/${latestChunk.Key}`);
+            const buffer = await dataRes.arrayBuffer();
             
             try {
+                // NOTE: nexrad-level-2-data might struggle with partial chunks if they lack headers.
+                // However, many of these chunks are parseable as they contain the raw record structure.
                 const parsed = new Level2Radar(Buffer.from(buffer));
                 const extracted = extractRadialData(parsed);
                 if (extracted) {
-                    broadcast(stationId, { type: 'radial_update', data: extracted, chunk: latest.Key });
+                    broadcast(stationId, { type: 'radial_update', data: extracted, chunk: latestChunk.Key });
                 }
             } catch (e) {
-                console.error(`Error parsing chunk ${latest.Key}:`, e.message);
+                // Silently skip chunks that don't have enough data to form a full radar object yet
+                // (e.g. metadata-only chunks or small intermediate slices)
             }
         }
     } catch (e) {
@@ -68,9 +89,13 @@ async function pollChunks(stationId) {
 function extractRadialData(parsed) {
     const elevations = [1, 2, 3, 4, 5];
     const extracted = {
-        azimuths: parsed.getAzimuth(),
+        azimuths: [],
         elevations: {}
     };
+
+    try {
+        extracted.azimuths = parsed.getAzimuth();
+    } catch (e) { return null; }
 
     const methods = {
         reflectivity: 'getHighresReflectivity',
@@ -128,7 +153,7 @@ wss.on('connection', (ws) => {
                     if (subscriptions.get(currentStation)?.size === 0) {
                         clearInterval(activePollers.get(currentStation));
                         activePollers.delete(currentStation);
-                        lastProcessedChunk.delete(currentStation);
+                        stationState.delete(currentStation);
                     }
                 }
 
@@ -137,18 +162,17 @@ wss.on('connection', (ws) => {
                 subscriptions.get(stationId).add(ws);
 
                 if (!activePollers.has(stationId)) {
-                    const poller = setInterval(() => pollChunks(stationId), 5000); // Check every 5s
+                    const poller = setInterval(() => pollChunks(stationId), 3000); // Poll every 3s for sub-minute updates
                     activePollers.set(stationId, poller);
                     pollChunks(stationId);
                 }
             } else if (parsed.action === 'unsubscribe') {
-                console.log('Client unsubscribing');
                 if (currentStation) {
                     subscriptions.get(currentStation)?.delete(ws);
                     if (subscriptions.get(currentStation)?.size === 0) {
                         clearInterval(activePollers.get(currentStation));
                         activePollers.delete(currentStation);
-                        lastProcessedChunk.delete(currentStation);
+                        stationState.delete(currentStation);
                     }
                     currentStation = null;
                 }
@@ -158,16 +182,16 @@ wss.on('connection', (ws) => {
         }
     });
 
-    ws.on('close', () => {
+    ws.onclose = () => {
         if (currentStation) {
             subscriptions.get(currentStation)?.delete(ws);
             if (subscriptions.get(currentStation)?.size === 0) {
                 clearInterval(activePollers.get(currentStation));
                 activePollers.delete(currentStation);
-                lastProcessedChunk.delete(currentStation);
+                stationState.delete(currentStation);
             }
         }
-    });
+    };
 });
 
 server.listen(PORT, () => {

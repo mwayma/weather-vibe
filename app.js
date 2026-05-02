@@ -750,14 +750,23 @@ function initWebSocket() {
 
 function mergeRealTimeData(newData) {
     if (!liveRadarData) {
+        console.log('Initializing liveRadarData with real-time update');
         liveRadarData = newData;
         renderLiveRadar();
         return;
     }
 
+    console.log(`Merging ${newData.azimuths.length} new radials into existing data`);
+    let addedCount = 0;
+    let updatedCount = 0;
+
     newData.azimuths.forEach((az, i) => {
-        const existingIdx = liveRadarData.azimuths.indexOf(az);
+        // Round to 1 decimal place to handle floating point jitter
+        const roundedAz = Math.round(az * 10) / 10;
+        const existingIdx = liveRadarData.azimuths.findIndex(a => Math.round(a * 10) / 10 === roundedAz);
+        
         if (existingIdx !== -1) {
+            // Update existing radials for all elevations/products
             for (const [e, elevations] of Object.entries(newData.elevations)) {
                 for (const [product, moments] of Object.entries(elevations)) {
                     if (liveRadarData.elevations[e] && liveRadarData.elevations[e][product]) {
@@ -765,7 +774,9 @@ function mergeRealTimeData(newData) {
                     }
                 }
             }
+            updatedCount++;
         } else {
+            // New azimuth, append it
             liveRadarData.azimuths.push(az);
             for (const [e, elevations] of Object.entries(newData.elevations)) {
                 for (const [product, moments] of Object.entries(elevations)) {
@@ -774,8 +785,11 @@ function mergeRealTimeData(newData) {
                     }
                 }
             }
+            addedCount++;
         }
     });
+
+    console.log(`Radar data updated: ${addedCount} added, ${updatedCount} updated radials`);
 
     if (liveCanvasLayer) {
         liveCanvasLayer._needsFullRedraw = true;

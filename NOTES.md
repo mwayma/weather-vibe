@@ -8,4 +8,4 @@
 - [x] Verify functionality via `weather.waymack.org`.
 - [x] Automate ArgoCD manifest update with new image tag in CI/CD pipeline.
 - [x] Implement near real-time backend (On-Demand model) as per `BACKEND_DESIGN.md`.
-- [ ] Enhance mobile responsiveness and UI/UX.
+- [x] Enhance mobile responsiveness and UI/UX.
