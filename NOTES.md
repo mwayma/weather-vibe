@@ -5,4 +5,4 @@
 - [x] Create GitHub Action workflow for building and pushing the Docker image.
 - [x] Deploy the application to the Kubernetes cluster using ArgoCD autopilot manifests.
 - [x] Use the hostname `weather.waymack.org` for the application.
-- [ ] Verify functionality via `weather.waymack.org`.
+- [x] Verify functionality via `weather.waymack.org`.
