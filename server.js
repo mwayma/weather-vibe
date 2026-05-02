@@ -23,11 +23,46 @@ app.use(express.static(path.join(__dirname, '/')));
 const subscriptions = new Map();
 const activePollers = new Map();
 const stationState = new Map(); // stationId -> { lastVolume, lastChunkKey, headerChunk }
+const stationCache = new Map(); // stationId -> liveRadarData object
 
 const parser = new XMLParser();
 
 function sendStatus(stationId, message) {
     broadcast(stationId, { type: 'status', message: `[Server] ${message}` });
+}
+
+function mergeRealTimeData(stationId, newData) {
+    if (!stationCache.has(stationId)) {
+        // Deep copy the initial state to prevent mutating the original reference if needed
+        stationCache.set(stationId, JSON.parse(JSON.stringify(newData)));
+        return;
+    }
+
+    const liveRadarData = stationCache.get(stationId);
+    
+    newData.azimuths.forEach((az, i) => {
+        const roundedAz = Math.round(az * 10) / 10;
+        const existingIdx = liveRadarData.azimuths.findIndex(a => Math.round(a * 10) / 10 === roundedAz);
+        
+        if (existingIdx !== -1) {
+            for (const [e, elevations] of Object.entries(newData.elevations)) {
+                for (const [product, moments] of Object.entries(elevations)) {
+                    if (liveRadarData.elevations[e] && liveRadarData.elevations[e][product]) {
+                        liveRadarData.elevations[e][product][existingIdx] = moments[i];
+                    }
+                }
+            }
+        } else {
+            liveRadarData.azimuths.push(az);
+            for (const [e, elevations] of Object.entries(newData.elevations)) {
+                for (const [product, moments] of Object.entries(elevations)) {
+                    if (liveRadarData.elevations[e] && liveRadarData.elevations[e][product]) {
+                        liveRadarData.elevations[e][product].push(moments[i]);
+                    }
+                }
+            }
+        }
+    });
 }
 
 async function pollChunks(stationId) {
@@ -76,6 +111,7 @@ async function pollChunks(stationId) {
                     state.headerChunk = await hRes.arrayBuffer();
                 }
                 state.lastVolume = latestVolPrefix;
+                stationCache.delete(stationId); // Clear cache on new volume
             }
 
             for (const chunk of unseen) {
@@ -96,6 +132,7 @@ async function pollChunks(stationId) {
                     const parsed = new Level2Radar(combinedBuffer);
                     const extracted = extractRadialData(parsed);
                     if (extracted && extracted.azimuths.length > 0) {
+                        mergeRealTimeData(stationId, extracted);
                         broadcast(stationId, { 
                             type: 'radial_update', 
                             data: extracted, 
@@ -189,6 +226,8 @@ wss.on('connection', (ws) => {
                     const poller = setInterval(() => pollChunks(stationId), 2000); // More aggressive polling (2s)
                     activePollers.set(stationId, poller);
                     pollChunks(stationId);
+                } else if (stationCache.has(stationId)) {
+                    ws.send(JSON.stringify({ type: 'initial_state', data: stationCache.get(stationId) }));
                 }
                 
                 ws.send(JSON.stringify({ type: 'status', message: `Subscribed to real-time chunks for ${stationId}` }));

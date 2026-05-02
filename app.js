@@ -736,7 +736,11 @@ function initWebSocket() {
 
     socket.onmessage = (event) => {
         const message = JSON.parse(event.data);
-        if (message.type === 'radial_update') {
+        if (message.type === 'initial_state') {
+            console.log('Received initial state from server');
+            liveRadarData = message.data;
+            renderLiveRadar();
+        } else if (message.type === 'radial_update') {
             console.log('Received real-time radial update:', message.chunk);
             mergeRealTimeData(message.data);
         } else if (message.type === 'status') {
@@ -1271,7 +1275,8 @@ function startLiveTracking() {
         color: '#ffffff', weight: 2, opacity: 0.8
     }).addTo(liveTrackingLayer);
 
-    fetchLatestLevel2Data(selectedRadarId);
+    // Wait for initial_state from WebSocket
+    document.getElementById('timestamp').innerText = `Connecting to Live Stream: ${selectedRadarId}...`;
     
     // We remove the 5-minute polling interval here because the WebSocket
     // provides much more frequent (sub-minute) updates.
@@ -1311,96 +1316,7 @@ function startLiveTracking() {
     liveScanInterval = requestAnimationFrame(animateSweep);
 }
 
-async function fetchLatestLevel2Data(radarId) {
-    const now = new Date();
-    const prefix = `${now.getUTCFullYear()}/${String(now.getUTCMonth() + 1).padStart(2, '0')}/${String(now.getUTCDate()).padStart(2, '0')}/${radarId}/`;
-    
-    // Switch to unidata bucket which has broader CORS support
-    const s3Url = `https://unidata-nexrad-level2.s3.amazonaws.com/?list-type=2&prefix=${prefix}`;
-    
-    document.getElementById('timestamp').innerText = `Fetching Level 2: ${radarId}...`;
-    try {
-        const res = await fetch(s3Url);
-        if (!res.ok) throw new Error('S3 Access Denied (CORS or 404)');
-        
-        const xml = new DOMParser().parseFromString(await res.text(), 'text/xml');
-        let contents = Array.from(xml.getElementsByTagName('Contents'))
-                            .filter(c => !c.getElementsByTagName('Key')[0].textContent.includes('_MDM'));
-        
-        if (contents.length === 0) {
-            console.log('No data for today, checking yesterday...');
-            const yesterday = new Date(now.getTime() - 86400000);
-            const yPrefix = `${yesterday.getUTCFullYear()}/${String(yesterday.getUTCMonth() + 1).padStart(2, '0')}/${String(yesterday.getUTCDate()).padStart(2, '0')}/${radarId}/`;
-            const yRes = await fetch(`https://unidata-nexrad-level2.s3.amazonaws.com/?list-type=2&prefix=${yPrefix}`);
-            const yXml = new DOMParser().parseFromString(await yRes.text(), 'text/xml');
-            contents = Array.from(yXml.getElementsByTagName('Contents'))
-                                .filter(c => !c.getElementsByTagName('Key')[0].textContent.includes('_MDM'));
-        }
 
-        if (contents.length === 0) throw new Error('No data found for station');
-        
-        let parsed = false;
-        // Try the latest 3 files (in case the very latest is still being written to S3 and is truncated)
-        for (let i = contents.length - 1; i >= Math.max(0, contents.length - 3); i--) {
-            // Stop trying if the user has panned away or selected a different radar
-            if (selectedRadarId !== radarId) break;
-
-            const key = contents[i].getElementsByTagName('Key')[0].textContent;
-            const fileUrl = `https://unidata-nexrad-level2.s3.amazonaws.com/${key}`;
-            
-            try {
-                console.log(`Attempting to load radar file: ${key}`);
-                const success = await loadAndParseLevel2(fileUrl);
-                if (success) {
-                    parsed = true;
-                    break;
-                }
-            } catch (err) {
-                console.warn(`Failed to parse ${key}, trying older file...`, err.message);
-                // Continue to next iteration (older file)
-            }
-        }
-        
-        if (!parsed) {
-            document.getElementById('timestamp').innerText = 'Data Unavailable (Corrupt)';
-        }
-    } catch (err) {
-        console.error('Fetch error:', err);
-        document.getElementById('timestamp').innerText = 'Data Unavailable (CORS/S3 Error)';
-    }
-}
-
-const radarWorker = new Worker('radar-worker.js');
-const pendingWorkerRequests = new Map();
-
-radarWorker.onmessage = function(e) {
-    const { result, error, url } = e.data;
-    
-    const promise = pendingWorkerRequests.get(url);
-    if (promise) {
-        if (error) promise.reject(new Error(error));
-        else promise.resolve(result);
-        pendingWorkerRequests.delete(url);
-    }
-
-    if (!error) {
-        liveRadarData = result;
-        document.getElementById('timestamp').innerText = `Live: ${url.split('/').pop()}`;
-        renderLiveRadar();
-    }
-};
-
-async function loadAndParseLevel2(url) {
-    document.getElementById('timestamp').innerText = `Downloading...`;
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const arrayBuffer = await res.arrayBuffer();
-    
-    return new Promise((resolve, reject) => {
-        pendingWorkerRequests.set(url, { resolve, reject });
-        radarWorker.postMessage({ data: arrayBuffer, url: url }, [arrayBuffer]);
-    });
-}
 
 const RadarCanvasLayer = L.Layer.extend({
     onAdd: function(map) {
@@ -1481,16 +1397,24 @@ const RadarCanvasLayer = L.Layer.extend({
             const gateSizeKm = moment.gate_size;
             const data = moment.moment_data;
 
-            for (let j = 0; j < data.length; j += gateStep) {
-                const val = data[j];
-                if (val === null || val === undefined) continue;
-                const color = scale(val);
-                if (color) {
-                    const r1 = (firstGateActual + j * gateSizeKm) * pixelsPerKm;
-                    const r2 = r1 + (gateSizeKm * gateStep) * pixelsPerKm;
-                    ctx.fillStyle = color;
-                    const width = arcWidthRad * r1;
-                    ctx.fillRect(r1, -width/2, r2 - r1 + 0.5, Math.max(1, width));
+            let startJ = null;
+            let currentColor = null;
+
+            for (let j = 0; j <= data.length; j += gateStep) {
+                const val = j < data.length ? data[j] : null;
+                const color = val !== null && val !== undefined ? scale(val) : null;
+                
+                if (color !== currentColor) {
+                    if (currentColor !== null && startJ !== null) {
+                        const r1 = (firstGateActual + startJ * gateSizeKm) * pixelsPerKm;
+                        const r2 = (firstGateActual + j * gateSizeKm) * pixelsPerKm;
+                        ctx.fillStyle = currentColor;
+                        const width = arcWidthRad * r2;
+                        // Use a slightly wider fill to prevent gaps
+                        ctx.fillRect(r1, -width/2 - 0.5, r2 - r1 + 0.5, width + 1);
+                    }
+                    currentColor = color;
+                    startJ = j;
                 }
             }
             ctx.restore();
@@ -1568,16 +1492,24 @@ const RadarCanvasLayer = L.Layer.extend({
             const gateSizeKm = moment.gate_size;
             const data = moment.moment_data;
 
-            for (let j = 0; j < data.length; j += gateStep) {
-                const val = data[j];
-                if (val === null || val === undefined) continue;
-                const color = scale(val);
-                if (color) {
-                    const r1 = (firstGateActual + j * gateSizeKm) * pixelsPerKm;
-                    const r2 = r1 + (gateSizeKm * gateStep) * pixelsPerKm;
-                    ctx.fillStyle = color;
-                    const width = arcWidthRad * r1;
-                    ctx.fillRect(r1, -width/2, r2 - r1 + 0.5, Math.max(1, width));
+            let startJ = null;
+            let currentColor = null;
+
+            for (let j = 0; j <= data.length; j += gateStep) {
+                const val = j < data.length ? data[j] : null;
+                const color = val !== null && val !== undefined ? scale(val) : null;
+                
+                if (color !== currentColor) {
+                    if (currentColor !== null && startJ !== null) {
+                        const r1 = (firstGateActual + startJ * gateSizeKm) * pixelsPerKm;
+                        const r2 = (firstGateActual + j * gateSizeKm) * pixelsPerKm;
+                        ctx.fillStyle = currentColor;
+                        const width = arcWidthRad * r2;
+                        // Use a slightly wider fill to prevent gaps
+                        ctx.fillRect(r1, -width/2 - 0.5, r2 - r1 + 0.5, width + 1);
+                    }
+                    currentColor = color;
+                    startJ = j;
                 }
             }
             ctx.restore();
@@ -1653,16 +1585,24 @@ const RadarCanvasLayer = L.Layer.extend({
             const gateSizeKm = moment.gate_size;
             const data = moment.moment_data;
 
-            for (let j = 0; j < data.length; j += gateStep) {
-                const val = data[j];
-                if (val === null || val === undefined) continue;
-                const color = scale(val);
-                if (color) {
-                    const r1 = (firstGateActual + j * gateSizeKm) * pixelsPerKm;
-                    const r2 = r1 + (gateSizeKm * gateStep) * pixelsPerKm;
-                    ctx.fillStyle = color;
-                    const width = arcWidthRad * r1;
-                    ctx.fillRect(r1, -width/2, r2 - r1 + 0.5, Math.max(1, width));
+            let startJ = null;
+            let currentColor = null;
+
+            for (let j = 0; j <= data.length; j += gateStep) {
+                const val = j < data.length ? data[j] : null;
+                const color = val !== null && val !== undefined ? scale(val) : null;
+                
+                if (color !== currentColor) {
+                    if (currentColor !== null && startJ !== null) {
+                        const r1 = (firstGateActual + startJ * gateSizeKm) * pixelsPerKm;
+                        const r2 = (firstGateActual + j * gateSizeKm) * pixelsPerKm;
+                        ctx.fillStyle = currentColor;
+                        const width = arcWidthRad * r2;
+                        // Use a slightly wider fill to prevent gaps
+                        ctx.fillRect(r1, -width/2 - 0.5, r2 - r1 + 0.5, width + 1);
+                    }
+                    currentColor = color;
+                    startJ = j;
                 }
             }
             ctx.restore();
