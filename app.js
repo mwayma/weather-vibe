@@ -739,6 +739,14 @@ function initWebSocket() {
         if (message.type === 'initial_state') {
             console.log('Received initial state from server');
             liveRadarData = message.data;
+            if (liveRadarData) {
+                if (!liveRadarData.lastUpdated) {
+                    liveRadarData.lastUpdated = new Array(liveRadarData.azimuths.length).fill(Date.now());
+                }
+                if (!liveRadarData.revealedUpdate) {
+                    liveRadarData.revealedUpdate = new Array(liveRadarData.azimuths.length).fill(0);
+                }
+            }
             renderLiveRadar();
         } else if (message.type === 'radial_update') {
             console.log('Received real-time radial update:', message.chunk);

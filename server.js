@@ -131,13 +131,14 @@ async function pollChunks(stationId) {
         const unseen = contents.filter(c => !state.lastChunkKey || c.Key.localeCompare(state.lastChunkKey) > 0);
 
         if (unseen.length > 0) {
-            console.log(`Processing ${unseen.length} new chunks for ${stationId}`);
+            console.log(`[${stationId}] Processing ${unseen.length} new chunks`);
             
             // If new volume, we MUST get the header chunk (001-S)
             if (latestVolPrefix !== state.lastVolume) {
                 sendStatus(stationId, `New volume detected: ${latestVolPrefix.split('/')[1]}`);
                 const headerKey = contents.find(c => c.Key.endsWith('-001-S'))?.Key;
                 if (headerKey) {
+                    console.log(`[${stationId}] Fetching header chunk: ${headerKey}`);
                     const hRes = await fetch(`${BUCKET_URL}/${headerKey}`);
                     state.headerChunk = await hRes.arrayBuffer();
                 }
@@ -146,6 +147,8 @@ async function pollChunks(stationId) {
             }
 
             for (const chunk of unseen) {
+                const chunkId = chunk.Key.split('/').pop();
+                // console.log(`[${stationId}] Fetching chunk: ${chunkId}`);
                 const dataRes = await fetch(`${BUCKET_URL}/${chunk.Key}`);
                 const chunkBuffer = await dataRes.arrayBuffer();
                 
@@ -163,15 +166,18 @@ async function pollChunks(stationId) {
                     const parsed = new Level2Radar(combinedBuffer);
                     const extracted = extractRadialData(parsed);
                     if (extracted && extracted.azimuths.length > 0) {
+                        console.log(`[${stationId}] Parsed chunk ${chunkId}: ${extracted.azimuths.length} radials`);
                         mergeRealTimeData(stationId, extracted);
                         broadcast(stationId, { 
                             type: 'radial_update', 
                             data: extracted, 
-                            chunk: chunk.Key.split('/').pop() 
+                            chunk: chunkId 
                         });
+                    } else {
+                        // console.log(`[${stationId}] Chunk ${chunkId} contained no relevant data`);
                     }
                 } catch (e) {
-                    // console.warn(`Chunk parse skip (${chunk.Key.split('/').pop()}): ${e.message}`);
+                    console.warn(`[${stationId}] Chunk parse error (${chunkId}): ${e.message}`);
                 }
             }
             state.lastChunkKey = unseen[unseen.length - 1].Key;
@@ -184,11 +190,9 @@ async function pollChunks(stationId) {
 
 function extractRadialData(parsed) {
     const elevations = [1, 2, 3, 4, 5];
-    const extracted = {
-        azimuths: parsed.getAzimuth(),
-        timestamps: parsed.getTimestamp(), // Add this line
-        elevations: {}
-    };
+    let azimuths = null;
+    let timestamps = null;
+    const extractedElevations = {};
 
     const methods = {
         reflectivity: 'getHighresReflectivity',
@@ -198,24 +202,47 @@ function extractRadialData(parsed) {
 
     let hasAnyData = false;
     for (const e of elevations) {
-        extracted.elevations[e] = {};
         try {
             parsed.setElevation(e);
+            
+            // Capture azimuths and timestamps from the first valid elevation
+            if (!azimuths) {
+                azimuths = parsed.getAzimuth();
+                const headers = parsed.getHeader();
+                if (Array.isArray(headers)) {
+                    timestamps = headers.map(h => (h.julian_date - 1) * 86400000 + h.mseconds);
+                }
+            }
+
+            const elevationProducts = {};
+            let elevationHasData = false;
             for (const [key, method] of Object.entries(methods)) {
                 const moments = parsed[method]();
                 if (moments && moments.some(m => m && m.moment_data)) {
                     hasAnyData = true;
-                    extracted.elevations[e][key] = moments.map(m => m ? {
+                    elevationHasData = true;
+                    elevationProducts[key] = moments.map(m => m ? {
                         moment_data: m.moment_data,
                         first_gate: m.first_gate,
                         gate_size: m.gate_size
                     } : null);
                 }
             }
-        } catch (err) {}
+            if (elevationHasData) {
+                extractedElevations[e] = elevationProducts;
+            }
+        } catch (err) {
+            // console.error(`Error extracting elevation ${e}:`, err.message);
+        }
     }
 
-    return hasAnyData ? extracted : null;
+    if (!hasAnyData) return null;
+
+    return {
+        azimuths: azimuths || [],
+        timestamps: timestamps || [],
+        elevations: extractedElevations
+    };
 }
 
 function broadcast(stationId, data) {
