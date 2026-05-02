@@ -1373,15 +1373,16 @@ function startLiveTracking() {
     let lastProcessedAz = angle;
     
     function animateSweep(time) {
-        const dt = time - lastTime;
-        lastTime = time;
+        // Sync sweep to 1 RPM (6 degrees per second)
+        // We use a buffer to ensure we aren't "outpacing" the S3 upload lag
+        const SWEEP_BUFFER_MS = 45000; // 45s lag buffer
+        const replayTime = Date.now() - SWEEP_BUFFER_MS;
+        const secondsInMinute = (replayTime / 1000) % 60;
+        const currentAngle = secondsInMinute * 6; 
         
-        // 40 seconds per rev = 360 / 40000 = 0.009 deg/ms
-        // Reduced from 20s to prevent 'sporadic' lines and allow more time for data chunks to arrive.
-        angle = (angle + 0.009 * dt) % 360; 
-        window.currentScanAzimuth = angle;
+        window.currentScanAzimuth = currentAngle;
         
-        const rad = (90 - angle) * Math.PI / 180; 
+        const rad = (90 - currentAngle) * Math.PI / 180; 
         const dist = 3.5; 
         const endLat = station.lat + dist * Math.sin(rad);
         const endLon = station.lon + dist * Math.cos(rad);
@@ -1392,12 +1393,13 @@ function startLiveTracking() {
         }
         
         if (liveCanvasLayer && liveCanvasLayer._topLeft) {
-            // Incremental update: draw radials between lastProcessedAz and current angle
-            liveCanvasLayer._drawIncremental(lastProcessedAz, angle);
+            // Use the last angle to compute the delta arc for painting
+            const lastAngle = window._lastSweepAngle !== undefined ? window._lastSweepAngle : currentAngle;
+            liveCanvasLayer._drawIncremental(lastAngle, currentAngle);
             liveCanvasLayer._draw();
         }
         
-        lastProcessedAz = angle;
+        window._lastSweepAngle = currentAngle;
         liveScanInterval = requestAnimationFrame(animateSweep);
     }
     
@@ -1586,7 +1588,11 @@ const RadarCanvasLayer = L.Layer.extend({
 
             // 2. PAINT new data if it exists for this radial
             const moment = momentArray[i];
-            if (moment && moment.moment_data) {
+            const radialTs = liveRadarData.lastUpdated ? liveRadarData.lastUpdated[i] : 0;
+            const SWEEP_BUFFER_MS = 45000;
+            const isDataEligible = radialTs <= (Date.now() - SWEEP_BUFFER_MS);
+
+            if (moment && moment.moment_data && isDataEligible) {
                 const firstGateKm = moment.first_gate / 1000;
                 const firstGateActual = firstGateKm < 1 ? moment.first_gate : firstGateKm;
                 const gateSizeKm = moment.gate_size;
@@ -1611,8 +1617,14 @@ const RadarCanvasLayer = L.Layer.extend({
                         startJ = j;
                     }
                 }
-                // Mark as revealed
-                liveRadarData.revealedUpdate[i] = liveRadarData.lastUpdated[i];
+                
+                // CRITICAL: Persist revealed state to the radialsMap
+                const roundedAz = Math.round(radialAz * 10) / 10;
+                if (liveRadarData.radialsMap && liveRadarData.radialsMap.has(roundedAz)) {
+                    const radial = liveRadarData.radialsMap.get(roundedAz);
+                    radial.revealedUpdate = radialTs;
+                }
+                liveRadarData.revealedUpdate[i] = radialTs;
             }
             ctx.restore();
         }
