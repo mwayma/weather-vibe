@@ -99,14 +99,34 @@ function getConsolidatedData(stationId) {
     return result;
 }
 
+async function fetchWithTimeout(url, options = {}, timeout = 15000) {
+    const controller = new AbortController();
+    const id = setTimeout(() => controller.abort(), timeout);
+    try {
+        const response = await fetch(url, { ...options, signal: controller.signal });
+        clearTimeout(id);
+        return response;
+    } catch (e) {
+        clearTimeout(id);
+        throw e;
+    }
+}
+
 async function pollChunks(stationId) {
     if (stationId.length === 3) stationId = 'K' + stationId;
-    if (pollingLocks.has(stationId)) return;
+    
+    // Add a timestamp-based guard to prevent stale locks
+    const now = Date.now();
+    const lockKey = `lock_${stationId}`;
+    const lastPoll = stationState.get(lockKey) || 0;
+    if (pollingLocks.has(stationId) && (now - lastPoll) < 60000) return;
+    
     pollingLocks.add(stationId);
+    stationState.set(lockKey, now);
     
     try {
         const listVolUrl = `${BUCKET_URL}/?list-type=2&prefix=${stationId}/&delimiter=/`;
-        const volRes = await fetch(listVolUrl);
+        const volRes = await fetchWithTimeout(listVolUrl);
         const volJson = parser.parse(await volRes.text());
         
         let commonPrefixes = volJson.ListBucketResult.CommonPrefixes;
@@ -126,7 +146,7 @@ async function pollChunks(stationId) {
         let state = stationState.get(stationId) || { lastVolume: null, lastChunkKey: null, headerChunk: null };
 
         const listChunksUrl = `${BUCKET_URL}/?list-type=2&prefix=${latestVolPrefix}`;
-        const chunkRes = await fetch(listChunksUrl);
+        const chunkRes = await fetchWithTimeout(listChunksUrl);
         const chunkJson = parser.parse(await chunkRes.text());
         
         let contents = chunkJson.ListBucketResult.Contents;
@@ -139,7 +159,7 @@ async function pollChunks(stationId) {
         const volumeId = latestVolPrefix + (timestampMatch ? timestampMatch[1] : '');
 
         if (volumeId !== state.lastVolume) {
-            console.log(`[${stationId}] New volume: ${volumeId}`);
+            console.log(`[${stationId}] New volume detected: ${volumeId}`);
             stationCache.delete(stationId);
             broadcast(stationId, { type: 'clear_data' });
             state.lastVolume = volumeId;
@@ -151,22 +171,23 @@ async function pollChunks(stationId) {
         const unseen = contents.filter(c => !state.lastChunkKey || c.Key.localeCompare(state.lastChunkKey) > 0);
 
         if (unseen.length > 0) {
+            console.log(`[${stationId}] Polling: Found ${unseen.length} new chunks (Latest: ${unseen[unseen.length-1].Key.split('/').pop()})`);
+            
             if (!state.headerChunk) {
                 const headerKey = contents.find(c => c.Key.includes('-001-S'))?.Key;
                 if (headerKey) {
-                    const hRes = await fetch(`${BUCKET_URL}/${headerKey}`);
+                    const hRes = await fetchWithTimeout(`${BUCKET_URL}/${headerKey}`);
                     state.headerChunk = await hRes.arrayBuffer();
                 }
             }
 
-            // Parallel fetch and parse with concurrency limit
             const CONCURRENCY = 5;
             for (let i = 0; i < unseen.length; i += CONCURRENCY) {
                 const batch = unseen.slice(i, i + CONCURRENCY);
                 await Promise.all(batch.map(async (chunk) => {
                     try {
                         const chunkId = chunk.Key.split('/').pop();
-                        const dataRes = await fetch(`${BUCKET_URL}/${chunk.Key}`);
+                        const dataRes = await fetchWithTimeout(`${BUCKET_URL}/${chunk.Key}`);
                         const chunkBuffer = await dataRes.arrayBuffer();
                         
                         let combinedBuffer;
@@ -177,10 +198,9 @@ async function pollChunks(stationId) {
                         }
 
                         const parsed = new Level2Radar(combinedBuffer);
-                        const extracted = extractRadialData(parsed);
+                        const extracted = extractRadialData(parsed, stationId, chunkId);
                         if (extracted && extracted.azimuths.length > 0) {
                             mergeRealTimeData(stationId, extracted);
-                            // Send the extracted radial directly to client
                             broadcast(stationId, { 
                                 type: 'radial_update', 
                                 data: extracted, 
@@ -188,7 +208,7 @@ async function pollChunks(stationId) {
                             });
                         }
                     } catch (e) {
-                        console.warn(`[${stationId}] Chunk error (${chunk.Key}): ${e.message}`);
+                        console.warn(`[${stationId}] Chunk ${chunk.Key} error: ${e.message}`);
                     }
                 }));
             }
@@ -196,13 +216,13 @@ async function pollChunks(stationId) {
             stationState.set(stationId, state);
         }
     } catch (e) {
-        console.error(`Error polling ${stationId}:`, e.message);
+        console.error(`[${stationId}] Poll error:`, e.message);
     } finally {
         pollingLocks.delete(stationId);
     }
 }
 
-function extractRadialData(parsed) {
+function extractRadialData(parsed, stationId, chunkId) {
     const elevations = [1, 2, 3, 4, 5];
     let azimuths = null;
     let timestamps = null;
@@ -246,7 +266,10 @@ function extractRadialData(parsed) {
                 extractedElevations[e] = elevationProducts;
             }
         } catch (err) {
-            // console.error(`Error extracting elevation ${e}:`, err.message);
+            // Only log if it's not a simple 'no data for elevation' error
+            if (!err.message.includes('No data for elevation')) {
+                // console.warn(`[${stationId}] ${chunkId} Elev ${e} error: ${err.message}`);
+            }
         }
     }
 
