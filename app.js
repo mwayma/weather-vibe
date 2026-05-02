@@ -1273,12 +1273,14 @@ function startLiveTracking() {
 
     let angle = window.currentScanAzimuth || 0;
     let lastTime = performance.now();
+    let lastProcessedAz = angle;
     
     function animateSweep(time) {
         const dt = time - lastTime;
         lastTime = time;
         
-        angle = (angle + 0.018 * dt) % 360; 
+        // 60 seconds per rev = 360 / 60000 = 0.006 deg/ms
+        angle = (angle + 0.006 * dt) % 360; 
         window.currentScanAzimuth = angle;
         
         const rad = (90 - angle) * Math.PI / 180; 
@@ -1289,10 +1291,14 @@ function startLiveTracking() {
         if (azimuthLine) {
             azimuthLine.setLatLngs([[station.lat, station.lon], [endLat, endLon]]);
         }
+        
         if (liveCanvasLayer && liveCanvasLayer._topLeft) {
+            // Incremental update: draw radials between lastProcessedAz and current angle
+            liveCanvasLayer._drawIncremental(lastProcessedAz, angle);
             liveCanvasLayer._draw();
         }
         
+        lastProcessedAz = angle;
         liveScanInterval = requestAnimationFrame(animateSweep);
     }
     
@@ -1423,14 +1429,18 @@ const RadarCanvasLayer = L.Layer.extend({
         this._needsFullRedraw = true;
         this._draw();
     },
-    _renderToOffscreen: function(center, pixelsPerKm) {
+    _drawIncremental: function(startAz, endAz) {
         if (!this._offscreenCanvas || !this._offscreenCtx) return;
-        const ctx = this._offscreenCtx;
-        this._offscreenCanvas.width = this._container.width;
-        this._offscreenCanvas.height = this._container.height;
-        ctx.clearRect(0, 0, this._offscreenCanvas.width, this._offscreenCanvas.height);
+        const station = NEXRAD_STATIONS.find(s => s.id === selectedRadarId);
+        if (!station || !liveRadarData || !liveRadarData.elevations) return;
 
-        if (!liveRadarData || !liveRadarData.elevations) return;
+        const centerLayer = map.latLngToLayerPoint([station.lat, station.lon]);
+        const center = { x: centerLayer.x - this._topLeft.x, y: centerLayer.y - this._topLeft.y };
+        const edge = L.latLng(station.lat, station.lon).toBounds(2000).getNorthEast();
+        const edgeLayer = map.latLngToLayerPoint(edge);
+        const pixelsPerKm = centerLayer.distanceTo(edgeLayer) / Math.sqrt(2);
+
+        const ctx = this._offscreenCtx;
 
         let momentKey = 'reflectivity';
         if (currentLiveMode === 'velocity') { momentKey = 'velocity'; }
@@ -1452,16 +1462,37 @@ const RadarCanvasLayer = L.Layer.extend({
 
         ctx.save();
         ctx.translate(center.x, center.y);
-        ctx.globalAlpha = 0.65;
+        ctx.globalAlpha = 1.0; // Draw full opacity to offscreen
 
         for (let i = 0; i < azArray.length; i++) {
             const radialAz = azArray[i];
+
+            // Check if this radial falls within the current sweep window
+            let isInside = false;
+            if (startAz <= endAz) {
+                isInside = (radialAz >= startAz && radialAz <= endAz);
+            } else {
+                // Handle 360/0 wrap around
+                isInside = (radialAz >= startAz || radialAz <= endAz);
+            }
+
+            if (!isInside) continue;
+
             const moment = momentArray[i];
             if (!moment || !moment.moment_data) continue;
 
             const azimuth = (90 - radialAz) * Math.PI / 180;
             ctx.save();
             ctx.rotate(-azimuth);
+
+            // Clear the "slice" before drawing new data to avoid accumulation issues
+            // We use a small arc clear
+            ctx.globalCompositeOperation = 'destination-out';
+            ctx.beginPath();
+            ctx.moveTo(0, 0);
+            ctx.arc(0, 0, 500, -0.05, 0.05); // Small slice
+            ctx.fill();
+            ctx.globalCompositeOperation = 'source-over';
 
             const firstGateKm = moment.first_gate / 1000;
             const firstGateActual = firstGateKm < 1 ? moment.first_gate : firstGateKm;
@@ -1483,13 +1514,24 @@ const RadarCanvasLayer = L.Layer.extend({
             ctx.restore();
         }
         ctx.restore();
-        this._needsFullRedraw = false;
     },
     _draw: function() {
         if (!this._topLeft || !this._container || !this._offscreenCanvas) return;
         const ctx = this._container.getContext('2d');
+
+        // Base radar is now updated incrementally in _drawIncremental
+        // We just clear main and paint offscreen
+        ctx.clearRect(0, 0, this._container.width, this._container.height);
+
+        // Use global alpha here to control the "background" intensity
+        ctx.globalAlpha = 0.65;
+        ctx.drawImage(this._offscreenCanvas, 0, 0);
+        ctx.globalAlpha = 1.0;
+
+        // Draw the highlight sweep (approx 30 degrees)
+        const currentAz = window.currentScanAzimuth || 0;
         const station = NEXRAD_STATIONS.find(s => s.id === selectedRadarId);
-        if (!station || !liveRadarData) return;
+        if (!station || !liveRadarData || !liveRadarData.elevations) return;
 
         const centerLayer = map.latLngToLayerPoint([station.lat, station.lon]);
         const center = { x: centerLayer.x - this._topLeft.x, y: centerLayer.y - this._topLeft.y };
@@ -1497,14 +1539,6 @@ const RadarCanvasLayer = L.Layer.extend({
         const edgeLayer = map.latLngToLayerPoint(edge);
         const pixelsPerKm = centerLayer.distanceTo(edgeLayer) / Math.sqrt(2);
 
-        if (this._needsFullRedraw) {
-            this._renderToOffscreen(center, pixelsPerKm);
-        }
-
-        ctx.clearRect(0, 0, this._container.width, this._container.height);
-        ctx.drawImage(this._offscreenCanvas, 0, 0);
-
-        const currentAz = window.currentScanAzimuth || 0;
         let momentKey = 'reflectivity';
         if (currentLiveMode === 'velocity') { momentKey = 'velocity'; }
         else if (currentLiveMode === 'debris') { momentKey = 'debris'; }
