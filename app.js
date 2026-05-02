@@ -1273,8 +1273,9 @@ function startLiveTracking() {
 
     fetchLatestLevel2Data(selectedRadarId);
     
+    // We remove the 5-minute polling interval here because the WebSocket
+    // provides much more frequent (sub-minute) updates.
     if (liveDataRefreshInterval) clearInterval(liveDataRefreshInterval);
-    liveDataRefreshInterval = setInterval(() => fetchLatestLevel2Data(selectedRadarId), 300000);
 
     let angle = window.currentScanAzimuth || 0;
     let lastTime = performance.now();
@@ -1595,50 +1596,21 @@ const RadarCanvasLayer = L.Layer.extend({
         const edgeLayer = map.latLngToLayerPoint(edge);
         const pixelsPerKm = centerLayer.distanceTo(edgeLayer) / Math.sqrt(2);
 
+        // Initial full render if needed (e.g. on load or after pan/zoom)
         if (this._needsFullRedraw) {
             this._renderFull(center, pixelsPerKm);
         }
 
+        // 1. Clear the main display canvas
         ctx.clearRect(0, 0, this._container.width, this._container.height);
 
-        // 1. Create a fade mask that rotates with the sweep
-        const currentAz = window.currentScanAzimuth || 0;
-        
-        // Use a temporary canvas for masking to achieve the "fade behind sweep" effect
-        if (!this._maskCanvas) {
-            this._maskCanvas = document.createElement('canvas');
-            this._maskCtx = this._maskCanvas.getContext('2d');
-        }
-        this._maskCanvas.width = this._container.width;
-        this._maskCanvas.height = this._container.height;
-
-        const mCtx = this._maskCtx;
-        mCtx.save();
-        mCtx.translate(center.x, center.y);
-        mCtx.rotate(-(90 - currentAz) * Math.PI / 180);
-
-        // Create a conic gradient that fades from 1.0 to 0.0 over 360 degrees
-        const grad = mCtx.createConicGradient(0, 0, 0);
-        grad.addColorStop(0, 'rgba(0,0,0,1)'); // New data at sweep
-        grad.addColorStop(0.95, 'rgba(0,0,0,0.1)'); // Fading trail
-        grad.addColorStop(1, 'rgba(0,0,0,0)'); // Gone after 1 rev
-        
-        mCtx.fillStyle = grad;
-        mCtx.beginPath();
-        mCtx.arc(0, 0, 2000, 0, Math.PI * 2);
-        mCtx.fill();
-        mCtx.restore();
-
-        // 2. Draw radar data onto main canvas using the mask
-        ctx.save();
+        // 2. Simply draw the persistent offscreen buffer onto the map
+        ctx.globalAlpha = 1.0;
         ctx.drawImage(this._offscreenCanvas, 0, 0);
-        ctx.globalCompositeOperation = 'destination-in';
-        ctx.drawImage(this._maskCanvas, 0, 0);
-        ctx.restore();
 
-        // 3. Draw the highlight sweep (bright active beam)
-        // ... highlight drawing follows ...
-        
+        // 3. Draw the highlight sweep beam (approx 30 degrees ahead)
+        const currentAz = window.currentScanAzimuth || 0;
+
         let momentKey = 'reflectivity';
         if (currentLiveMode === 'velocity') { momentKey = 'velocity'; }
         else if (currentLiveMode === 'debris') { momentKey = 'debris'; }
@@ -1664,7 +1636,7 @@ const RadarCanvasLayer = L.Layer.extend({
         for (let i = 0; i < azArray.length; i++) {
             const radialAz = azArray[i];
             let diff = (currentAz - radialAz + 360) % 360;
-            if (diff > 30) continue;
+            if (diff > 30) continue; // Only draw the highlight beam slice
 
             const moment = momentArray[i];
             if (!moment || !moment.moment_data) continue;
@@ -1672,6 +1644,8 @@ const RadarCanvasLayer = L.Layer.extend({
             const azimuth = (90 - radialAz) * Math.PI / 180;
             ctx.save();
             ctx.rotate(-azimuth);
+
+            // Subtle highlight on top of the base scan
             ctx.globalAlpha = 0.35 * (1 - diff / 30);
 
             const firstGateKm = moment.first_gate / 1000;
