@@ -115,7 +115,6 @@ async function fetchWithTimeout(url, options = {}, timeout = 15000) {
 async function pollChunks(stationId) {
     if (stationId.length === 3) stationId = 'K' + stationId;
     
-    // Add a timestamp-based guard to prevent stale locks
     const now = Date.now();
     const lockKey = `lock_${stationId}`;
     const lastPoll = stationState.get(lockKey) || 0;
@@ -145,9 +144,15 @@ async function pollChunks(stationId) {
         const latestVolPrefix = commonPrefixes[commonPrefixes.length - 1].Prefix;
         const previousVolPrefix = commonPrefixes.length > 1 ? commonPrefixes[commonPrefixes.length - 2].Prefix : null;
         
-        // We poll both the latest and the previous volume to catch transitions and tail-end data
         const volumesToPoll = previousVolPrefix ? [previousVolPrefix, latestVolPrefix] : [latestVolPrefix];
-        let state = stationState.get(stationId) || { lastVolume: null, lastChunkKey: null, headerChunk: null };
+        let state = stationState.get(stationId) || { 
+            lastVolume: null, 
+            lastChunkKey: null, 
+            headerChunk: null,
+            processedChunks: new Set() 
+        };
+
+        if (!state.processedChunks) state.processedChunks = new Set();
 
         for (const volPrefix of volumesToPoll) {
             const listChunksUrl = `${BUCKET_URL}/?list-type=2&prefix=${volPrefix}`;
@@ -163,26 +168,27 @@ async function pollChunks(stationId) {
             const timestampMatch = firstChunkKey.match(/(\d{8}-\d{6})/);
             const volumeId = volPrefix + (timestampMatch ? timestampMatch[1] : '');
 
-            // Volume transition detection (only trigger on the newest folder)
+            // Detect Volume Transition (on the newest folder)
             if (volPrefix === latestVolPrefix && volumeId !== state.lastVolume) {
-                console.log(`[${stationId}] New volume detected: ${volumeId}`);
+                console.log(`[${stationId}] Transitioning to new volume: ${volumeId}`);
                 stationCache.delete(stationId);
                 broadcast(stationId, { type: 'clear_data' });
                 state.lastVolume = volumeId;
                 state.lastChunkKey = null; 
                 state.headerChunk = null;
+                state.processedChunks.clear(); // Clear seen chunks for the new volume
                 stationState.set(stationId, state);
             }
 
-            // Only process chunks we haven't seen for this specific volume session
-            const unseen = contents.filter(c => !state.lastChunkKey || c.Key.localeCompare(state.lastChunkKey) > 0);
+            // Filter for truly new chunks using the Set to prevent redundant broadcasts
+            const unseen = contents.filter(c => !state.processedChunks.has(c.Key));
 
             if (unseen.length > 0) {
                 const latestKey = unseen[unseen.length - 1].Key;
-                console.log(`[${stationId}] Volume ${volPrefix}: Found ${unseen.length} new chunks (Latest: ${latestKey.split('/').pop()})`);
+                console.log(`[${stationId}] Vol ${volPrefix}: Processing ${unseen.length} new chunks`);
                 
                 if (latestKey.includes('-E')) {
-                    console.log(`[${stationId}] Volume ${volPrefix} reached end-of-volume chunk.`);
+                    console.log(`[${stationId}] Vol ${volPrefix} completed.`);
                 }
 
                 if (!state.headerChunk) {
@@ -219,19 +225,28 @@ async function pollChunks(stationId) {
                                     chunk: chunkId 
                                 });
                             }
+                            // Mark as processed only after successful broadcast
+                            state.processedChunks.add(chunk.Key);
                         } catch (e) {
                             console.warn(`[${stationId}] Chunk ${chunk.Key} error: ${e.message}`);
+                            // Still mark as processed to avoid infinite retry loops on corrupt chunks
+                            state.processedChunks.add(chunk.Key);
                         }
                     }));
                 }
                 
-                // Track progress in the latest volume to avoid reprocessing
                 if (volPrefix === latestVolPrefix) {
-                    state.lastChunkKey = unseen[unseen.length - 1].Key;
+                    state.lastChunkKey = latestKey;
                     stationState.set(stationId, state);
                 }
             }
         }
+    } catch (e) {
+        console.error(`[${stationId}] Poll error:`, e.message);
+    } finally {
+        pollingLocks.delete(stationId);
+    }
+}
     } catch (e) {
         console.error(`[${stationId}] Poll error:`, e.message);
     } finally {
