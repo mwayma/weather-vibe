@@ -755,7 +755,11 @@ function initWebSocket() {
             console.log('Server requested data clear (New Volume)');
             liveRadarData = null;
             if (liveCanvasLayer) {
-                liveCanvasLayer._needsFullRedraw = true;
+                // Clear the offscreen buffer as well
+                if (liveCanvasLayer._offscreenCtx) {
+                    liveCanvasLayer._offscreenCtx.clearRect(0, 0, liveCanvasLayer._offscreenCanvas.width, liveCanvasLayer._offscreenCanvas.height);
+                }
+                liveCanvasLayer._needsFullRedraw = false; // We just cleared it, don't re-render full
                 liveCanvasLayer._draw();
             }
         } else if (message.type === 'status') {
@@ -1703,8 +1707,10 @@ function renderLiveRadar() {
         liveCanvasLayer = new RadarCanvasLayer();
         liveCanvasLayer.addTo(liveTrackingLayer);
     } else {
-        console.log('Updating liveCanvasLayer');
-        liveCanvasLayer._needsFullRedraw = true;
+        // console.log('Updating liveCanvasLayer');
+        // We do NOT set _needsFullRedraw = true here.
+        // Setting it to true causes a full buffer clear which wipes the "painted" sweep data.
+        // The animateSweep loop will call _draw() at 60fps, which is sufficient.
         liveCanvasLayer._draw();
     }
 }
