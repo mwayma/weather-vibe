@@ -1400,6 +1400,7 @@ function startLiveTracking() {
             const lastAngle = window._lastSweepAngle !== undefined ? window._lastSweepAngle : currentAngle;
             
             const keys = Array.from(incomingRadialBuffer.keys());
+            let mergedAny = false;
             keys.forEach(roundedAz => {
                 let isInside = false;
                 if (lastAngle <= currentAngle) {
@@ -1415,13 +1416,22 @@ function startLiveTracking() {
                     
                     liveCanvasLayer._drawRadialToOffscreen(radial);
                     incomingRadialBuffer.delete(roundedAz);
+                    mergedAny = true;
                 }
             });
 
             liveCanvasLayer._drawIncremental(lastAngle, currentAngle);
             liveCanvasLayer._draw();
         } else if (liveRadarData || incomingRadialBuffer.size > 0) {
-            // Initial render call if data exists but layer is not yet added
+            if (incomingRadialBuffer.size > 0) {
+                // Initialize liveRadarData if we have buffered radials
+                if (!liveRadarData) liveRadarData = { radialsMap: new Map() };
+                // Merge first few radials to bootstrap
+                const firstKey = incomingRadialBuffer.keys().next().value;
+                if (firstKey !== undefined) {
+                    liveRadarData.radialsMap.set(firstKey, incomingRadialBuffer.get(firstKey));
+                }
+            }
             renderLiveRadar();
         }
         
@@ -1492,6 +1502,7 @@ const RadarCanvasLayer = L.Layer.extend({
     },
     _drawRadialToOffscreen: function(radial) {
         if (!this._offscreenCanvas || !this._offscreenCtx) return;
+        // console.log(`Drawing radial at azimuth ${radial.azimuth}`);
         const station = NEXRAD_STATIONS.find(s => s.id === selectedRadarId);
         if (!station) return;
 
@@ -1608,19 +1619,25 @@ const RadarCanvasLayer = L.Layer.extend({
 
         // Apply Conical Mask for Persistence Effect
         ctx.save();
-        const sweepRad = (currentAngle - 90) * Math.PI / 180;
-        const grad = ctx.createConicGradient(sweepRad, center.x, center.y);
-        
-        grad.addColorStop(0, 'rgba(0,0,0,0.9)');
-        grad.addColorStop(0.08, 'rgba(0,0,0,0.9)'); 
-        grad.addColorStop(0.5, 'rgba(0,0,0,0.4)');
-        grad.addColorStop(0.92, 'rgba(0,0,0,0.9)');
-        grad.addColorStop(1, 'rgba(0,0,0,0.9)');
+        try {
+            const sweepRad = (currentAngle - 90) * Math.PI / 180;
+            const grad = ctx.createConicGradient(sweepRad, center.x, center.y);
+            
+            grad.addColorStop(0, 'rgba(0,0,0,0.9)');
+            grad.addColorStop(0.08, 'rgba(0,0,0,0.9)'); 
+            grad.addColorStop(0.5, 'rgba(0,0,0,0.4)');
+            grad.addColorStop(0.92, 'rgba(0,0,0,0.9)');
+            grad.addColorStop(1, 'rgba(0,0,0,0.9)');
 
-        ctx.drawImage(this._offscreenCanvas, 0, 0);
-        ctx.globalCompositeOperation = 'destination-in';
-        ctx.fillStyle = grad;
-        ctx.fillRect(0, 0, this._container.width, this._container.height);
+            ctx.drawImage(this._offscreenCanvas, 0, 0);
+            ctx.globalCompositeOperation = 'destination-in';
+            ctx.fillStyle = grad;
+            ctx.fillRect(0, 0, this._container.width, this._container.height);
+        } catch (e) {
+            // Fallback: simple blit if conic gradient fails
+            ctx.globalAlpha = 0.8;
+            ctx.drawImage(this._offscreenCanvas, 0, 0);
+        }
         ctx.restore();
     }
 });

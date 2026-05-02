@@ -4,8 +4,9 @@ self.onmessage = function(e) {
     
     if (type === 'parse_batch') {
         try {
-            // If data is passed as a string (raw WS message), parse it here
+            const start = performance.now();
             const message = typeof data === 'string' ? JSON.parse(data) : data;
+            if (!message) return;
             
             if (message.type === 'radial_batch') {
                 const radials = message.radials.map(radial => {
@@ -16,14 +17,20 @@ self.onmessage = function(e) {
                     };
                 });
                 
+                const end = performance.now();
+                // console.log(`[Worker] Processed batch of ${radials.length} radials in ${(end - start).toFixed(2)}ms`);
+                
                 self.postMessage({
                     type: 'processed_batch',
                     radials: radials,
                     latestAzimuth: message.latestAzimuth,
                     stationId: message.stationId
                 });
+            } else if (message.type === 'initial_state') {
+                const end = performance.now();
+                console.log(`[Worker] Parsed initial_state in ${(end - start).toFixed(2)}ms`);
+                self.postMessage(message);
             } else {
-                // Forward other message types back to main thread
                 self.postMessage(message);
             }
         } catch (err) {
