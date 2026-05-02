@@ -745,7 +745,7 @@ function initWebSocket() {
                     liveRadarData.lastUpdated = new Array(liveRadarData.azimuths.length).fill(Date.now());
                 }
                 if (!liveRadarData.revealedUpdate) {
-                    // Mark as already revealed so initial state is visible immediately
+                    // Start with everything revealed to avoid "black screen" on load
                     liveRadarData.revealedUpdate = [...liveRadarData.lastUpdated];
                 }
                 if (!liveRadarData.timestamps) {
@@ -1282,7 +1282,6 @@ function updateRadarLayersBasedOnMode() {
     if (map.hasLayer(radarVelocity)) map.removeLayer(radarVelocity);
     if (map.hasLayer(radarTemperature)) map.removeLayer(radarTemperature);
     
-    // ONLY clear live data if we are switching AWAY from live-tracking mode
     if (currentRadarMode !== 'live-tracking') {
         liveRadarData = null;
         liveCanvasLayer = null;
@@ -1290,7 +1289,7 @@ function updateRadarLayersBasedOnMode() {
             socket.send(JSON.stringify({ action: 'unsubscribe' }));
         }
         liveTrackingLayer.clearLayers();
-        if (liveScanInterval) { cancelAnimationFrame(liveScanInterval); liveScanInterval = null; }
+        if (liveScanInterval) { clearInterval(liveScanInterval); liveScanInterval = null; }
         if (liveDataRefreshInterval) { clearInterval(liveDataRefreshInterval); liveDataRefreshInterval = null; }
     }
 
@@ -1312,38 +1311,28 @@ function updateRadarLayersBasedOnMode() {
 
 function startLiveTracking() {
     console.log('startLiveTracking called');
-    if (!NEXRAD_STATIONS || NEXRAD_STATIONS.length === 0) {
-        console.warn('NEXRAD_STATIONS is empty');
-        return;
-    }
+    if (!NEXRAD_STATIONS || NEXRAD_STATIONS.length === 0) return;
+    
     if (!selectedRadarId || selectedRadarId === 'composite') {
         const nearby = getNearbyRadars();
-        console.log('Nearby radars:', nearby.map(s => s.id));
         if (nearby.length > 0) {
             selectedRadarId = nearby[0].id;
             const select = document.getElementById('radar-select');
             if (select) select.value = selectedRadarId;
         } else {
-            console.warn('No nearby radars found');
             return;
         }
     }
 
-    // Ensure 4-letter ICAO
     let stationId = selectedRadarId;
     if (stationId.length === 3) stationId = 'K' + stationId;
 
-    // Subscribe via WebSocket
     if (socket && socket.readyState === WebSocket.OPEN) {
         socket.send(JSON.stringify({ action: 'subscribe', station: stationId }));
     }
 
     const station = NEXRAD_STATIONS.find(s => s.id === selectedRadarId);
-    if (!station) {
-        console.warn('Station not found:', selectedRadarId);
-        return;
-    }
-    console.log('Tracking station:', station.id, station.lat, station.lon);
+    if (!station) return;
 
     radarStationMarker = L.circleMarker([station.lat, station.lon], {
         radius: 10, fillColor: '#ffffff', color: '#000', weight: 2, opacity: 1, fillOpacity: 1
@@ -1353,21 +1342,14 @@ function startLiveTracking() {
         color: '#ffffff', weight: 2, opacity: 0.8
     }).addTo(liveTrackingLayer);
 
-    // Wait for initial_state from WebSocket
     document.getElementById('timestamp').innerText = `Connecting to Live Stream: ${stationId}...`;
     
-    // We remove the 5-minute polling interval here because the WebSocket
-    // provides much more frequent (sub-minute) updates.
+    if (liveScanInterval) clearInterval(liveScanInterval);
     if (liveDataRefreshInterval) clearInterval(liveDataRefreshInterval);
 
-    let angle = window.currentScanAzimuth || 0;
-    let lastTime = performance.now();
-    let lastProcessedAz = angle;
-    
-    function animateSweep(time) {
-        // Sync sweep to 1 RPM (6 degrees per second)
-        // We use a buffer to ensure we aren't "outpacing" the S3 upload lag
-        const SWEEP_BUFFER_MS = 45000; // 45s lag buffer
+    function animateSweep() {
+        // Reduced buffer to 15s for more real-time feel
+        const SWEEP_BUFFER_MS = 15000; 
         const replayTime = Date.now() - SWEEP_BUFFER_MS;
         const secondsInMinute = (replayTime / 1000) % 60;
         const currentAngle = secondsInMinute * 6; 
@@ -1385,17 +1367,16 @@ function startLiveTracking() {
         }
         
         if (liveCanvasLayer && liveCanvasLayer._topLeft) {
-            // Use the last angle to compute the delta arc for painting
             const lastAngle = window._lastSweepAngle !== undefined ? window._lastSweepAngle : currentAngle;
             liveCanvasLayer._drawIncremental(lastAngle, currentAngle);
             liveCanvasLayer._draw();
         }
         
         window._lastSweepAngle = currentAngle;
-        liveScanInterval = requestAnimationFrame(animateSweep);
     }
     
-    liveScanInterval = requestAnimationFrame(animateSweep);
+    // Use setInterval instead of requestAnimationFrame to avoid Linux focus issues
+    liveScanInterval = setInterval(animateSweep, 33); // ~30fps
 }
 
 
@@ -1658,6 +1639,9 @@ const RadarCanvasLayer = L.Layer.extend({
 
         ctx.clearRect(0, 0, this._container.width, this._container.height);
         ctx.drawImage(this._offscreenCanvas, 0, 0);
+
+        // Linux/Chrome hack: tiny opacity change forces a compositor flush
+        this._container.style.opacity = (this._container.style.opacity === '0.99') ? '1.0' : '0.99';
     }
 });
 
