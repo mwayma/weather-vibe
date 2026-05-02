@@ -1332,9 +1332,9 @@ function startLiveTracking() {
         const dt = time - lastTime;
         lastTime = time;
         
-        // 20 seconds per rev = 360 / 20000 = 0.018 deg/ms
-        // This speed is more characteristic of professional weather broadcasts during severe events.
-        angle = (angle + 0.018 * dt) % 360; 
+        // 40 seconds per rev = 360 / 40000 = 0.009 deg/ms
+        // Reduced from 20s to prevent 'sporadic' lines and allow more time for data chunks to arrive.
+        angle = (angle + 0.009 * dt) % 360; 
         window.currentScanAzimuth = angle;
         
         const rad = (90 - angle) * Math.PI / 180; 
@@ -1344,6 +1344,7 @@ function startLiveTracking() {
         
         if (azimuthLine) {
             azimuthLine.setLatLngs([[station.lat, station.lon], [endLat, endLon]]);
+            azimuthLine.setStyle({ color: '#ffffff', weight: 3, opacity: 1.0 });
         }
         
         if (liveCanvasLayer && liveCanvasLayer._topLeft) {
@@ -1534,9 +1535,14 @@ const RadarCanvasLayer = L.Layer.extend({
             ctx.fill();
             ctx.globalCompositeOperation = 'source-over';
 
-            // 2. ONLY draw if we have "new" data for this radial that hasn't been revealed yet.
-            // If the data is stale (from the previous revolution), we leave the slice empty.
-            if (liveRadarData.lastUpdated && liveRadarData.revealedUpdate && 
+            // 2. ONLY draw if we have "relevant" data for this radial.
+            // We use a persistence window: data is valid for up to 2 minutes (120000ms).
+            // This prevents the 'sporadic lines' effect by allowing the sweep to 
+            // 'carry over' data from the previous revolution if new data hasn't arrived yet.
+            const dataAge = Date.now() - (liveRadarData.lastUpdated ? liveRadarData.lastUpdated[i] : 0);
+            const isDataFresh = dataAge < 120000; // 2 minute persistence
+
+            if (isDataFresh && liveRadarData.lastUpdated && liveRadarData.revealedUpdate && 
                 liveRadarData.lastUpdated[i] > liveRadarData.revealedUpdate[i]) {
                 
                 const moment = momentArray[i];
