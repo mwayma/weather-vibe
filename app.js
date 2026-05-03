@@ -756,7 +756,7 @@ const LIVE_DATA_STALE_MS = 25000;
 const LIVE_DATA_RESUBSCRIBE_MS = 60000;
 const LIVE_SOCKET_STALE_MS = 45000;
 const LIVE_BUFFER_DELAY_MS = 15000;
-const LIVE_BUFFER_MAX_EXTRA_LAG_MS = 10000;
+const LIVE_BUFFER_MAX_EXTRA_LAG_MS = 600000; // 10 minutes history allowed in buffer
 const MAX_BUFFERED_RADIALS_PER_FRAME = 40;
 const MAX_BUFFERED_QUEUE_RADIALS = 5000;
 
@@ -948,7 +948,7 @@ function initWebSocket() {
     socket.onclose = () => {
         if (generation !== socketGeneration) return;
         console.warn('WebSocket disconnected, retrying...');
-        setTimeout(initWebSocket, 5000);
+        setTimeout(initWebSocket, 1000);
     };
 
     socket.onerror = (error) => {
