@@ -562,6 +562,19 @@ function formatIEMTime(date) {
     return `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())}T${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}:00Z`;
 }
 
+function setTimestampForMode(mode, text) {
+    if (currentRadarMode !== mode) return;
+    const timestampEl = document.getElementById('timestamp');
+    if (timestampEl) timestampEl.innerText = text;
+}
+
+function formatLag(ms) {
+    if (!Number.isFinite(ms) || ms < 0) return 'unknown lag';
+    if (ms < 1000) return `${Math.round(ms)} ms lag`;
+    if (ms < 60000) return `${(ms / 1000).toFixed(1)} sec lag`;
+    return `${Math.floor(ms / 60000)}m ${Math.round((ms % 60000) / 1000)}s lag`;
+}
+
 function checkRadarScan() {
     updateAlerts(); 
     
@@ -574,7 +587,7 @@ function checkRadarScan() {
     const latest = formatIEMTime(now);
     
     if (!isLooping) {
-        document.getElementById('timestamp').innerText = `Last Checked: ${new Date().toLocaleTimeString()}`;
+        setTimestampForMode('reflectivity', `Last Checked: ${new Date().toLocaleTimeString()}`);
     }
     
     if (latest !== lastScanTime) {
@@ -658,7 +671,7 @@ function toggleLoop() {
             // If we don't have loop layers yet (e.g. just started), load them
             if (loopLayers.length === 0) {
                 let loadedCount = 0;
-                document.getElementById('timestamp').innerText = `Loading loop frames (0/${loopTimestamps.length})...`;
+                setTimestampForMode('reflectivity', `Loading loop frames (0/${loopTimestamps.length})...`);
                 loopLayers = loopTimestamps.map(ts => {
                     const layer = L.tileLayer.wms('https://mesonet.agron.iastate.edu/cgi-bin/wms/nexrad/n0q-t.cgi', {
                         layers: 'nexrad-n0q-wmst',
@@ -673,7 +686,7 @@ function toggleLoop() {
                         layer.off('load', onLayerLoad);
                         loadedCount++;
                         if (isLooping && !loopInterval) {
-                            document.getElementById('timestamp').innerText = `Loading loop frames (${loadedCount}/${loopTimestamps.length})...`;
+                            setTimestampForMode('reflectivity', `Loading loop frames (${loadedCount}/${loopTimestamps.length})...`);
                             if (loadedCount === loopTimestamps.length) {
                                 loopInterval = setInterval(advanceLoop, 1000);
                                 advanceLoop();
@@ -697,7 +710,7 @@ function toggleLoop() {
         loopInterval = null;
         loopLayers.forEach(layer => layer.setOpacity(0)); // Keep them but hide them
         updateRadarLayersBasedOnMode();
-        if (lastScanTime) document.getElementById('timestamp').innerText = `Last Checked: ${new Date().toLocaleTimeString()}`;
+        if (lastScanTime) setTimestampForMode('reflectivity', `Last Checked: ${new Date().toLocaleTimeString()}`);
     }
 }
 
@@ -707,7 +720,7 @@ function advanceLoop() {
     loopLayers[currentLoopIndex].setOpacity(0.8);
     const ts = loopTimestamps[currentLoopIndex];
     const scanDate = new Date(ts);
-    document.getElementById('timestamp').innerText = `Radar Scan: ${scanDate.toLocaleTimeString()} (Looping)`;
+    setTimestampForMode('reflectivity', `Radar Scan: ${scanDate.toLocaleTimeString()} (Looping)`);
     currentLoopIndex = (currentLoopIndex + 1) % loopLayers.length;
 }
 
@@ -831,6 +844,7 @@ function initWebSocket() {
                 
                 applyLiveRadial(roundedAz, radial);
             });
+            updateLiveChunkTimestamp(message.radials);
             if (liveCanvasLayer) liveCanvasLayer._draw();
         } else if (message.type === 'radial_update') {
             // Verify stationId
@@ -843,6 +857,7 @@ function initWebSocket() {
                 lastAzimuthMetadataTime = performance.now();
             }
             mergeRealTimeData(message.data);
+            updateLiveDataTimestamp(message.data);
         } else if (message.type === 'clear_data') {
             console.log('Server requested data clear (New Volume) - ignoring to persist display');
             // We ignore clear_data to keep the old volume visible until overwritten
@@ -861,6 +876,32 @@ function initWebSocket() {
 
 function normalizeAzimuth(azimuth) {
     return ((Number(azimuth) % 360) + 360) % 360;
+}
+
+function updateLiveChunkTimestamp(radials) {
+    if (currentRadarMode !== 'live-tracking' || !Array.isArray(radials) || radials.length === 0) return;
+
+    const latestTimestamp = radials.reduce((latest, radial) => {
+        const timestamp = Number(radial.timestamp);
+        return Number.isFinite(timestamp) && timestamp > latest ? timestamp : latest;
+    }, 0);
+
+    if (!latestTimestamp) return;
+
+    const chunkDate = new Date(latestTimestamp);
+    const lagMs = Date.now() - latestTimestamp;
+    const azimuth = radials[radials.length - 1]?.azimuth;
+    const azText = Number.isFinite(Number(azimuth)) ? ` | Az ${normalizeAzimuth(azimuth).toFixed(1)}°` : '';
+    setTimestampForMode('live-tracking', `Live Chunk: ${chunkDate.toLocaleTimeString()} | ${formatLag(lagMs)}${azText}`);
+}
+
+function updateLiveDataTimestamp(data) {
+    if (!data || !Array.isArray(data.timestamps)) return;
+    const radials = data.timestamps.map((timestamp, i) => ({
+        timestamp,
+        azimuth: Array.isArray(data.azimuths) ? data.azimuths[i] : undefined
+    }));
+    updateLiveChunkTimestamp(radials);
 }
 
 function applyLiveRadial(roundedAz, radial) {
@@ -1445,7 +1486,7 @@ function startLiveTracking() {
         color: '#ffffff', weight: 2, opacity: 0.8
     }).addTo(liveTrackingLayer);
 
-    document.getElementById('timestamp').innerText = `Connecting to Live Stream: ${stationId}...`;
+    setTimestampForMode('live-tracking', `Connecting to Live Stream: ${stationId}...`);
     
     if (liveScanInterval) cancelAnimationFrame(liveScanInterval);
     if (liveDataRefreshInterval) clearInterval(liveDataRefreshInterval);
