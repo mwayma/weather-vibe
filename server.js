@@ -650,8 +650,8 @@ wss.on('connection', (ws) => {
                 if (!subscriptions.has(stationId)) subscriptions.set(stationId, new Set());
                 subscriptions.get(stationId).add(ws);
 
-                // 1. ALWAYS send initial state if we have it in the cache
-                if (stationCache.has(stationId)) {
+                // Initial state can be very large; clients can opt out for live-only streaming.
+                if (parsed.initial !== false && stationCache.has(stationId)) {
                     ws.send(JSON.stringify({ 
                         type: 'initial_state', 
                         stationId: stationId,

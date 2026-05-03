@@ -749,6 +749,7 @@ let bufferedRadialQueue = [];
 const LIVE_STATUS_INTERVAL_MS = 500;
 const LIVE_DATA_STALE_MS = 25000;
 const LIVE_BUFFER_DELAY_MS = 15000;
+const LIVE_BUFFER_MAX_EXTRA_LAG_MS = 10000;
 const MAX_BUFFERED_RADIALS_PER_FRAME = 40;
 const MAX_BUFFERED_QUEUE_RADIALS = 5000;
 
@@ -762,7 +763,7 @@ function getCurrentStationId() {
 function subscribeToLiveStation() {
     const stationId = getCurrentStationId();
     if (socket && socket.readyState === WebSocket.OPEN && currentRadarMode === 'live-tracking' && stationId && stationId !== 'composite') {
-        socket.send(JSON.stringify({ action: 'subscribe', station: stationId }));
+        socket.send(JSON.stringify({ action: 'subscribe', station: stationId, initial: false }));
         lastLiveDataMessageAt = Date.now();
     }
 }
@@ -998,11 +999,15 @@ function updateLiveDataTimestamp(data) {
 
 function enqueueBufferedRadials(radials) {
     if (!Array.isArray(radials) || radials.length === 0) return;
+    const minTimestamp = Date.now() - LIVE_BUFFER_DELAY_MS - LIVE_BUFFER_MAX_EXTRA_LAG_MS;
     radials.forEach(radial => {
         if (!Number.isFinite(Number(radial.timestamp))) radial.timestamp = Date.now();
     });
-    bufferedRadialQueue.push(...radials);
+    bufferedRadialQueue.push(...radials.filter(radial => radial.timestamp >= minTimestamp));
     bufferedRadialQueue.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+    while (bufferedRadialQueue.length > 0 && bufferedRadialQueue[0].timestamp < minTimestamp) {
+        bufferedRadialQueue.shift();
+    }
     if (bufferedRadialQueue.length > MAX_BUFFERED_QUEUE_RADIALS) {
         bufferedRadialQueue.splice(0, bufferedRadialQueue.length - MAX_BUFFERED_QUEUE_RADIALS);
     }
@@ -1045,11 +1050,8 @@ function clearLivePlaybackState() {
 
 function setLiveLatencyMode(mode) {
     liveLatencyMode = mode === 'low-latency' ? 'low-latency' : 'buffered';
-    clearLivePlaybackState();
-    if (liveRadarData && liveRadarData.radialsMap) {
-        liveRadarData.radialsMap.clear();
-    }
-    if (liveCanvasLayer) liveCanvasLayer._clearOffscreen();
+    bufferedRadialQueue = [];
+    incomingRadialBuffer.clear();
     if (azimuthLine) {
         azimuthLine.setStyle({ opacity: liveLatencyMode === 'buffered' ? 0.8 : 0 });
     }
