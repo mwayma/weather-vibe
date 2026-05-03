@@ -701,7 +701,10 @@ wss.on('connection', (ws) => {
                     pollChunks(stationId);
                 }
                 
-                ws.send(JSON.stringify({ type: 'status', message: `Subscribed to real-time chunks for ${stationId}` }));
+                ws.send(JSON.stringify({ 
+                    type: 'status', 
+                    message: `Subscribed to real-time feed for ${stationId}. (Status: Connected, Data Source: S3 Fallback - updates every ~3-5 mins)` 
+                }));
             } else if (parsed.action === 'unsubscribe') {
                 if (currentStation) {
                     subscriptions.get(currentStation)?.delete(ws);
