@@ -742,12 +742,19 @@ let lastAzimuthMetadataTime = 0;
 let liveCanvasDrawPending = false;
 let lastLiveStatusUpdate = 0;
 let lastLiveDataMessageAt = Date.now();
+let lastSocketMessageAt = Date.now();
+let lastLiveResubscribeAt = 0;
+let lastRenderedRadialTimestamp = 0;
+let lastRenderedRadialAzimuth = null;
+let lastLiveStatusLabel = 'Buffered Live';
 let liveReconnectInProgress = false;
 let socketGeneration = 0;
 let liveLatencyMode = 'buffered';
 let bufferedRadialQueue = [];
-const LIVE_STATUS_INTERVAL_MS = 500;
+const LIVE_STATUS_INTERVAL_MS = 1000;
 const LIVE_DATA_STALE_MS = 25000;
+const LIVE_DATA_RESUBSCRIBE_MS = 60000;
+const LIVE_SOCKET_STALE_MS = 45000;
 const LIVE_BUFFER_DELAY_MS = 15000;
 const LIVE_BUFFER_MAX_EXTRA_LAG_MS = 10000;
 const MAX_BUFFERED_RADIALS_PER_FRAME = 40;
@@ -764,7 +771,7 @@ function subscribeToLiveStation() {
     const stationId = getCurrentStationId();
     if (socket && socket.readyState === WebSocket.OPEN && currentRadarMode === 'live-tracking' && stationId && stationId !== 'composite') {
         socket.send(JSON.stringify({ action: 'subscribe', station: stationId, initial: false }));
-        lastLiveDataMessageAt = Date.now();
+        lastLiveResubscribeAt = Date.now();
     }
 }
 
@@ -795,11 +802,13 @@ function initWebSocket() {
     socket.onopen = () => {
         if (generation !== socketGeneration) return;
         console.log('WebSocket connected');
+        lastSocketMessageAt = Date.now();
         subscribeToLiveStation();
     };
 
     socket.onmessage = (event) => {
         if (generation !== socketGeneration) return;
+        lastSocketMessageAt = Date.now();
         const message = JSON.parse(event.data);
         
         // 4-letter normalization for verification
@@ -905,7 +914,8 @@ function initWebSocket() {
                 enqueueBufferedRadials(radials.map(item => item.radial));
             } else {
                 radials.forEach(({ radial, roundedAz }) => applyLiveRadial(roundedAz, radial));
-                updateLiveChunkTimestamp(radials.map(item => item.radial), 'Low Latency');
+                recordRenderedRadials(radials.map(item => item.radial), 'Low Latency');
+                renderLiveStatus(true);
                 requestLiveCanvasDraw();
             }
         } else if (message.type === 'radial_update') {
@@ -949,11 +959,23 @@ function initWebSocket() {
 
 setInterval(() => {
     if (currentRadarMode !== 'live-tracking') return;
-    if (!socket || socket.readyState !== WebSocket.OPEN) return;
-    if ((Date.now() - lastLiveDataMessageAt) > LIVE_DATA_STALE_MS) {
-        restartWebSocket('live radial data stale');
+    renderLiveStatus();
+
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+        return;
     }
-}, 5000);
+
+    const now = Date.now();
+    if ((now - lastSocketMessageAt) > LIVE_SOCKET_STALE_MS) {
+        restartWebSocket('socket messages stale');
+        return;
+    }
+
+    if ((now - lastLiveDataMessageAt) > LIVE_DATA_RESUBSCRIBE_MS && (now - lastLiveResubscribeAt) > LIVE_DATA_RESUBSCRIBE_MS) {
+        console.warn('Live radial data stale; refreshing station subscription');
+        subscribeToLiveStation();
+    }
+}, 1000);
 
 function normalizeAzimuth(azimuth) {
     return ((Number(azimuth) % 360) + 360) % 360;
@@ -968,23 +990,45 @@ function requestLiveCanvasDraw() {
     });
 }
 
-function updateLiveChunkTimestamp(radials, label = 'Live') {
-    if (currentRadarMode !== 'live-tracking' || !Array.isArray(radials) || radials.length === 0) return;
-    const now = Date.now();
-    if (now - lastLiveStatusUpdate < LIVE_STATUS_INTERVAL_MS) return;
+function recordRenderedRadials(radials, label = 'Live') {
+    if (!Array.isArray(radials) || radials.length === 0) return;
 
-    const latestTimestamp = radials.reduce((latest, radial) => {
+    const latest = radials.reduce((best, radial) => {
         const timestamp = Number(radial.timestamp);
-        return Number.isFinite(timestamp) && timestamp > latest ? timestamp : latest;
-    }, 0);
+        return Number.isFinite(timestamp) && timestamp > best.timestamp ? { timestamp, azimuth: radial.azimuth } : best;
+    }, { timestamp: 0, azimuth: null });
 
-    if (!latestTimestamp) return;
+    if (!latest.timestamp) return;
 
-    const chunkDate = new Date(latestTimestamp);
-    const lagMs = now - latestTimestamp;
-    const azimuth = radials[radials.length - 1]?.azimuth;
-    const azText = Number.isFinite(Number(azimuth)) ? ` | Az ${normalizeAzimuth(azimuth).toFixed(1)}°` : '';
-    setTimestampForMode('live-tracking', `${label}: ${chunkDate.toLocaleTimeString()} | ${formatLag(lagMs)}${azText}`);
+    lastRenderedRadialTimestamp = latest.timestamp;
+    lastRenderedRadialAzimuth = Number.isFinite(Number(latest.azimuth)) ? normalizeAzimuth(latest.azimuth) : lastRenderedRadialAzimuth;
+    lastLiveStatusLabel = label;
+}
+
+function renderLiveStatus(force = false) {
+    if (currentRadarMode !== 'live-tracking') return;
+    const now = Date.now();
+    if (!force && now - lastLiveStatusUpdate < LIVE_STATUS_INTERVAL_MS) return;
+
+    const socketState = socket ? socket.readyState : WebSocket.CLOSED;
+    const socketText = socketState === WebSocket.OPEN ? '' : ' | reconnecting';
+
+    if (!lastRenderedRadialTimestamp) {
+        const queueText = liveLatencyMode === 'buffered' && bufferedRadialQueue.length > 0
+            ? ` | ${bufferedRadialQueue.length} queued`
+            : '';
+        setTimestampForMode('live-tracking', `${lastLiveStatusLabel}: waiting for live chunks${queueText}${socketText}`);
+        lastLiveStatusUpdate = now;
+        return;
+    }
+
+    const chunkDate = new Date(lastRenderedRadialTimestamp);
+    const lagMs = now - lastRenderedRadialTimestamp;
+    const azText = Number.isFinite(Number(lastRenderedRadialAzimuth)) ? ` | Az ${lastRenderedRadialAzimuth.toFixed(1)}°` : '';
+    const staleText = (now - lastLiveDataMessageAt) > LIVE_DATA_STALE_MS
+        ? ` | no chunks ${formatLag(now - lastLiveDataMessageAt).replace(' lag', '')}`
+        : '';
+    setTimestampForMode('live-tracking', `${lastLiveStatusLabel}: ${chunkDate.toLocaleTimeString()} | ${formatLag(lagMs)}${azText}${staleText}${socketText}`);
     lastLiveStatusUpdate = now;
 }
 
@@ -994,7 +1038,8 @@ function updateLiveDataTimestamp(data) {
         timestamp,
         azimuth: Array.isArray(data.azimuths) ? data.azimuths[i] : undefined
     }));
-    updateLiveChunkTimestamp(radials);
+    recordRenderedRadials(radials);
+    renderLiveStatus(true);
 }
 
 function enqueueBufferedRadials(radials) {
@@ -1038,7 +1083,8 @@ function processBufferedRadials() {
         lastAzimuthMetadataTime = performance.now();
     }
 
-    updateLiveChunkTimestamp(ready, 'Buffered Live');
+    recordRenderedRadials(ready, 'Buffered Live');
+    renderLiveStatus(true);
     requestLiveCanvasDraw();
 }
 
@@ -1046,6 +1092,8 @@ function clearLivePlaybackState() {
     bufferedRadialQueue = [];
     incomingRadialBuffer.clear();
     liveCanvasDrawPending = false;
+    lastRenderedRadialTimestamp = 0;
+    lastRenderedRadialAzimuth = null;
 }
 
 function setLiveLatencyMode(mode) {
