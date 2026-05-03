@@ -744,8 +744,13 @@ let lastLiveStatusUpdate = 0;
 let lastLiveDataMessageAt = Date.now();
 let liveReconnectInProgress = false;
 let socketGeneration = 0;
+let liveLatencyMode = 'buffered';
+let bufferedRadialQueue = [];
 const LIVE_STATUS_INTERVAL_MS = 500;
 const LIVE_DATA_STALE_MS = 25000;
+const LIVE_BUFFER_DELAY_MS = 15000;
+const MAX_BUFFERED_RADIALS_PER_FRAME = 40;
+const MAX_BUFFERED_QUEUE_RADIALS = 5000;
 
 let socket = null;
 function getCurrentStationId() {
@@ -808,8 +813,7 @@ function initWebSocket() {
 
             console.log('Received initial state for', message.stationId);
             lastLiveDataMessageAt = Date.now();
-            incomingRadialBuffer.clear();
-            liveCanvasDrawPending = false;
+            clearLivePlaybackState();
             if (liveCanvasLayer) liveCanvasLayer._clearOffscreen();
             liveRadarData = message.data;
             if (liveRadarData) {
@@ -860,6 +864,13 @@ function initWebSocket() {
                 });
             }
             if (liveCanvasLayer) liveCanvasLayer._needsFullRedraw = true;
+            if (liveLatencyMode === 'buffered' && liveRadarData?.radialsMap) {
+                const initialRadials = Array.from(liveRadarData.radialsMap.values());
+                liveRadarData.radialsMap.clear();
+                enqueueBufferedRadials(initialRadials);
+                if (liveCanvasLayer) liveCanvasLayer._clearOffscreen();
+                processBufferedRadials();
+            }
             renderLiveRadar();
         } else if (message.type === 'radial_batch') {
             // Verify stationId
@@ -867,12 +878,12 @@ function initWebSocket() {
             lastLiveDataMessageAt = Date.now();
 
             // console.log(`Received batch of ${message.radials.length} radials`);
-            if (message.latestAzimuth !== undefined) {
+            if (message.latestAzimuth !== undefined && liveLatencyMode === 'low-latency') {
                 targetAzimuth = normalizeAzimuth(message.latestAzimuth);
                 lastAzimuthMetadataTime = performance.now();
             }
-            
-            message.radials.forEach(radial => {
+
+            const radials = message.radials.map(radial => {
                 const roundedAz = Math.round(radial.azimuth * 10) / 10;
                 
                 // Optimize memory: Convert moment_data to Uint8Array
@@ -885,11 +896,17 @@ function initWebSocket() {
                         }
                     }
                 }
-                
-                applyLiveRadial(roundedAz, radial);
+                radial.azimuth = normalizeAzimuth(radial.azimuth);
+                return { radial, roundedAz };
             });
-            updateLiveChunkTimestamp(message.radials);
-            requestLiveCanvasDraw();
+
+            if (liveLatencyMode === 'buffered') {
+                enqueueBufferedRadials(radials.map(item => item.radial));
+            } else {
+                radials.forEach(({ radial, roundedAz }) => applyLiveRadial(roundedAz, radial));
+                updateLiveChunkTimestamp(radials.map(item => item.radial), 'Low Latency');
+                requestLiveCanvasDraw();
+            }
         } else if (message.type === 'radial_update') {
             // Verify stationId
             if (message.stationId && message.stationId !== currentStationId) return;
@@ -906,7 +923,7 @@ function initWebSocket() {
             if (message.stationId && message.stationId !== currentStationId) return;
             console.log('Server requested data clear (New Volume)');
             liveRadarData = { radialsMap: new Map(), azimuths: [], lastUpdated: [], revealedUpdate: [], timestamps: [], elevations: {} };
-            incomingRadialBuffer.clear();
+            clearLivePlaybackState();
             window._lastSweepAngle = currentAngle;
             if (liveCanvasLayer) liveCanvasLayer._clearOffscreen();
             requestLiveCanvasDraw();
@@ -950,7 +967,7 @@ function requestLiveCanvasDraw() {
     });
 }
 
-function updateLiveChunkTimestamp(radials) {
+function updateLiveChunkTimestamp(radials, label = 'Live') {
     if (currentRadarMode !== 'live-tracking' || !Array.isArray(radials) || radials.length === 0) return;
     const now = Date.now();
     if (now - lastLiveStatusUpdate < LIVE_STATUS_INTERVAL_MS) return;
@@ -966,7 +983,7 @@ function updateLiveChunkTimestamp(radials) {
     const lagMs = now - latestTimestamp;
     const azimuth = radials[radials.length - 1]?.azimuth;
     const azText = Number.isFinite(Number(azimuth)) ? ` | Az ${normalizeAzimuth(azimuth).toFixed(1)}°` : '';
-    setTimestampForMode('live-tracking', `Live Chunk: ${chunkDate.toLocaleTimeString()} | ${formatLag(lagMs)}${azText}`);
+    setTimestampForMode('live-tracking', `${label}: ${chunkDate.toLocaleTimeString()} | ${formatLag(lagMs)}${azText}`);
     lastLiveStatusUpdate = now;
 }
 
@@ -977,6 +994,66 @@ function updateLiveDataTimestamp(data) {
         azimuth: Array.isArray(data.azimuths) ? data.azimuths[i] : undefined
     }));
     updateLiveChunkTimestamp(radials);
+}
+
+function enqueueBufferedRadials(radials) {
+    if (!Array.isArray(radials) || radials.length === 0) return;
+    radials.forEach(radial => {
+        if (!Number.isFinite(Number(radial.timestamp))) radial.timestamp = Date.now();
+    });
+    bufferedRadialQueue.push(...radials);
+    bufferedRadialQueue.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+    if (bufferedRadialQueue.length > MAX_BUFFERED_QUEUE_RADIALS) {
+        bufferedRadialQueue.splice(0, bufferedRadialQueue.length - MAX_BUFFERED_QUEUE_RADIALS);
+    }
+}
+
+function processBufferedRadials() {
+    if (liveLatencyMode !== 'buffered' || bufferedRadialQueue.length === 0) return;
+
+    const cutoff = Date.now() - LIVE_BUFFER_DELAY_MS;
+    const ready = [];
+
+    while (bufferedRadialQueue.length > 0 && ready.length < MAX_BUFFERED_RADIALS_PER_FRAME) {
+        const next = bufferedRadialQueue[0];
+        if (!Number.isFinite(Number(next.timestamp)) || next.timestamp > cutoff) break;
+        ready.push(bufferedRadialQueue.shift());
+    }
+
+    if (ready.length === 0) return;
+
+    ready.forEach(radial => {
+        const roundedAz = Math.round(radial.azimuth * 10) / 10;
+        applyLiveRadial(roundedAz, radial);
+    });
+
+    const latestAzimuth = ready[ready.length - 1]?.azimuth;
+    if (Number.isFinite(Number(latestAzimuth))) {
+        targetAzimuth = normalizeAzimuth(latestAzimuth);
+        lastAzimuthMetadataTime = performance.now();
+    }
+
+    updateLiveChunkTimestamp(ready, 'Buffered Live');
+    requestLiveCanvasDraw();
+}
+
+function clearLivePlaybackState() {
+    bufferedRadialQueue = [];
+    incomingRadialBuffer.clear();
+    liveCanvasDrawPending = false;
+}
+
+function setLiveLatencyMode(mode) {
+    liveLatencyMode = mode === 'low-latency' ? 'low-latency' : 'buffered';
+    clearLivePlaybackState();
+    if (liveRadarData && liveRadarData.radialsMap) {
+        liveRadarData.radialsMap.clear();
+    }
+    if (liveCanvasLayer) liveCanvasLayer._clearOffscreen();
+    if (azimuthLine) {
+        azimuthLine.setStyle({ opacity: liveLatencyMode === 'buffered' ? 0.8 : 0 });
+    }
+    requestLiveCanvasDraw();
 }
 
 function applyLiveRadial(roundedAz, radial) {
@@ -1135,6 +1212,8 @@ function setupRadarButtons() {
     const btnLiveReflectivity = document.getElementById('btn-live-reflectivity');
     const btnLiveVelocity = document.getElementById('btn-live-velocity');
     const btnLiveDebris = document.getElementById('btn-live-debris');
+    const btnLiveBuffered = document.getElementById('btn-live-buffered');
+    const btnLiveLowLatency = document.getElementById('btn-live-low-latency');
 
     const reflectivityLegend = document.getElementById('reflectivity-legend');
     const velocityLegend = document.getElementById('velocity-legend');
@@ -1223,6 +1302,24 @@ function setupRadarButtons() {
             btnLiveDebris.classList.add('active');
             updateLiveLegends();
             renderLiveRadar();
+        });
+    }
+
+    if (btnLiveBuffered) {
+        btnLiveBuffered.addEventListener('click', () => {
+            setLiveLatencyMode('buffered');
+            btnLiveBuffered.classList.add('active');
+            if (btnLiveLowLatency) btnLiveLowLatency.classList.remove('active');
+            setTimestampForMode('live-tracking', `Buffered Live: waiting for ${Math.round(LIVE_BUFFER_DELAY_MS / 1000)}s buffer...`);
+        });
+    }
+
+    if (btnLiveLowLatency) {
+        btnLiveLowLatency.addEventListener('click', () => {
+            setLiveLatencyMode('low-latency');
+            btnLiveLowLatency.classList.add('active');
+            if (btnLiveBuffered) btnLiveBuffered.classList.remove('active');
+            setTimestampForMode('live-tracking', 'Low Latency: waiting for live chunks...');
         });
     }
     
@@ -1532,7 +1629,7 @@ function startLiveTracking() {
 
     // CRITICAL: Clear existing data to prevent geo-contamination
     liveRadarData = null;
-    incomingRadialBuffer.clear();
+    clearLivePlaybackState();
     currentAngle = 0;
     targetAzimuth = 0;
     lastAzimuthMetadataTime = 0;
@@ -1555,10 +1652,13 @@ function startLiveTracking() {
     }).addTo(liveTrackingLayer);
 
     azimuthLine = L.polyline([[station.lat, station.lon], [station.lat, station.lon]], {
-        color: '#ffffff', weight: 2, opacity: 0.8
+        color: '#ffffff', weight: 2, opacity: liveLatencyMode === 'buffered' ? 0.8 : 0
     }).addTo(liveTrackingLayer);
 
-    setTimestampForMode('live-tracking', `Connecting to Live Stream: ${stationId}...`);
+    const liveModeLabel = liveLatencyMode === 'buffered'
+        ? `Buffered Live: building ${Math.round(LIVE_BUFFER_DELAY_MS / 1000)}s buffer for ${stationId}...`
+        : `Low Latency: connecting to ${stationId}...`;
+    setTimestampForMode('live-tracking', liveModeLabel);
     
     if (liveScanInterval) cancelAnimationFrame(liveScanInterval);
     if (liveDataRefreshInterval) clearInterval(liveDataRefreshInterval);
@@ -1590,6 +1690,8 @@ function startLiveTracking() {
         if (azimuthLine) {
             azimuthLine.setLatLngs([[station.lat, station.lon], [endLat, endLon]]);
         }
+
+        processBufferedRadials();
         
         if (liveCanvasLayer && liveCanvasLayer._topLeft) {
             // Paint newly received radials immediately; the sweep is visual state, not a data gate.
@@ -1794,10 +1896,9 @@ function renderLiveRadar() {
         liveCanvasLayer = new RadarCanvasLayer();
         liveCanvasLayer.addTo(liveTrackingLayer);
     } else {
-        // console.log('Updating liveCanvasLayer');
-        // We do NOT set _needsFullRedraw = true here.
-        // Setting it to true causes a full buffer clear which wipes the "painted" sweep data.
-        // The animateSweep loop will call _draw() at 60fps, which is sufficient.
+        if (liveCanvasLayer._needsFullRedraw) {
+            liveCanvasLayer._renderFull();
+        }
         liveCanvasLayer._draw();
     }
 }
