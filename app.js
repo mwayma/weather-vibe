@@ -741,9 +741,44 @@ let lastSweepTime = performance.now();
 let lastAzimuthMetadataTime = 0;
 let liveCanvasDrawPending = false;
 let lastLiveStatusUpdate = 0;
+let lastLiveDataMessageAt = Date.now();
+let liveReconnectInProgress = false;
 const LIVE_STATUS_INTERVAL_MS = 500;
+const LIVE_DATA_STALE_MS = 25000;
 
 let socket = null;
+function getCurrentStationId() {
+    let currentStationId = selectedRadarId;
+    if (currentStationId && currentStationId.length === 3) currentStationId = 'K' + currentStationId;
+    return currentStationId;
+}
+
+function subscribeToLiveStation() {
+    const stationId = getCurrentStationId();
+    if (socket && socket.readyState === WebSocket.OPEN && currentRadarMode === 'live-tracking' && stationId && stationId !== 'composite') {
+        socket.send(JSON.stringify({ action: 'subscribe', station: stationId }));
+        lastLiveDataMessageAt = Date.now();
+    }
+}
+
+function restartWebSocket(reason) {
+    if (liveReconnectInProgress) return;
+    liveReconnectInProgress = true;
+    console.warn(`Restarting WebSocket: ${reason}`);
+
+    const oldSocket = socket;
+    if (oldSocket) {
+        oldSocket.onclose = null;
+        oldSocket.onerror = null;
+        try { oldSocket.close(); } catch (e) {}
+    }
+
+    setTimeout(() => {
+        liveReconnectInProgress = false;
+        initWebSocket();
+    }, 250);
+}
+
 function initWebSocket() {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const host = window.location.host;
@@ -751,17 +786,14 @@ function initWebSocket() {
 
     socket.onopen = () => {
         console.log('WebSocket connected');
-        if (currentRadarMode === 'live-tracking' && selectedRadarId && selectedRadarId !== 'composite') {
-            socket.send(JSON.stringify({ action: 'subscribe', station: selectedRadarId }));
-        }
+        subscribeToLiveStation();
     };
 
     socket.onmessage = (event) => {
         const message = JSON.parse(event.data);
         
         // 4-letter normalization for verification
-        let currentStationId = selectedRadarId;
-        if (currentStationId && currentStationId.length === 3) currentStationId = 'K' + currentStationId;
+        const currentStationId = getCurrentStationId();
 
         if (message.type === 'initial_state') {
             // Verify stationId to prevent cross-session contamination
@@ -771,6 +803,7 @@ function initWebSocket() {
             }
 
             console.log('Received initial state for', message.stationId);
+            lastLiveDataMessageAt = Date.now();
             liveRadarData = message.data;
             if (liveRadarData) {
                 // Optimize memory: Convert moment_data to Uint8Array
@@ -823,6 +856,7 @@ function initWebSocket() {
         } else if (message.type === 'radial_batch') {
             // Verify stationId
             if (message.stationId && message.stationId !== currentStationId) return;
+            lastLiveDataMessageAt = Date.now();
 
             // console.log(`Received batch of ${message.radials.length} radials`);
             if (message.latestAzimuth !== undefined) {
@@ -852,6 +886,7 @@ function initWebSocket() {
         } else if (message.type === 'radial_update') {
             // Verify stationId
             if (message.stationId && message.stationId !== currentStationId) return;
+            lastLiveDataMessageAt = Date.now();
 
             console.log('Received real-time update:', message.chunk);
             if (message.latestAzimuth !== undefined) {
@@ -875,7 +910,19 @@ function initWebSocket() {
         console.warn('WebSocket disconnected, retrying...');
         setTimeout(initWebSocket, 5000);
     };
+
+    socket.onerror = (error) => {
+        console.warn('WebSocket error:', error);
+    };
 }
+
+setInterval(() => {
+    if (currentRadarMode !== 'live-tracking') return;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
+    if ((Date.now() - lastLiveDataMessageAt) > LIVE_DATA_STALE_MS) {
+        restartWebSocket('live radial data stale');
+    }
+}, 5000);
 
 function normalizeAzimuth(azimuth) {
     return ((Number(azimuth) % 360) + 360) % 360;
@@ -1468,9 +1515,7 @@ function startLiveTracking() {
     let stationId = selectedRadarId;
     if (stationId.length === 3) stationId = 'K' + stationId;
 
-    if (socket && socket.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({ action: 'subscribe', station: stationId }));
-    }
+    subscribeToLiveStation();
 
     // CRITICAL: Clear existing data to prevent geo-contamination
     liveRadarData = null;

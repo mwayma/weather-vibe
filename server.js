@@ -30,6 +30,8 @@ const parser = new XMLParser();
 const VOLUME_DISCOVERY_INTERVAL_MS = 30000;
 const RADIAL_BATCH_SIZE = 20;
 const RADIAL_BATCH_SPACING_MS = 35;
+const MAX_CLIENT_BUFFERED_BYTES = 2 * 1024 * 1024;
+const MAX_CLIENT_BUFFERED_BYTES_BEFORE_CLOSE = 10 * 1024 * 1024;
 
 function normalizeStationId(stationId) {
     if (!stationId) return stationId;
@@ -608,6 +610,16 @@ function broadcast(stationId, data) {
         const message = JSON.stringify(data);
         clients.forEach(client => {
             if (client.readyState === WebSocket.OPEN) {
+                if (data.type === 'radial_batch') {
+                    if (client.bufferedAmount > MAX_CLIENT_BUFFERED_BYTES_BEFORE_CLOSE) {
+                        console.warn(`[${stationId}] Closing slow client with ${client.bufferedAmount} buffered bytes`);
+                        client.terminate();
+                        return;
+                    }
+                    if (client.bufferedAmount > MAX_CLIENT_BUFFERED_BYTES) {
+                        return;
+                    }
+                }
                 client.send(message);
             }
         });
