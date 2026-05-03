@@ -465,6 +465,7 @@ async function pollChunks(stationId) {
                 state.lastVolume = volumeId;
                 state.lastChunkKey = null; 
                 state.headerChunk = null;
+                broadcast(stationId, { type: 'clear_data', stationId, volumeId });
                 stationState.set(stationId, state);
             }
 

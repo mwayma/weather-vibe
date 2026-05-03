@@ -897,8 +897,13 @@ function initWebSocket() {
             mergeRealTimeData(message.data);
             updateLiveDataTimestamp(message.data);
         } else if (message.type === 'clear_data') {
-            console.log('Server requested data clear (New Volume) - ignoring to persist display');
-            // We ignore clear_data to keep the old volume visible until overwritten
+            if (message.stationId && message.stationId !== currentStationId) return;
+            console.log('Server requested data clear (New Volume)');
+            liveRadarData = { radialsMap: new Map(), azimuths: [], lastUpdated: [], revealedUpdate: [], timestamps: [], elevations: {} };
+            incomingRadialBuffer.clear();
+            window._lastSweepAngle = currentAngle;
+            if (liveCanvasLayer) liveCanvasLayer._clearOffscreen();
+            requestLiveCanvasDraw();
         } else if (message.type === 'status') {
             console.log('WebSocket Status:', message.message);
         } else if (message.type === 'heartbeat') {
@@ -1694,54 +1699,68 @@ const RadarCanvasLayer = L.Layer.extend({
         const arcWidthRad = ( (360 / 720) * Math.PI / 180) * 2.2;
         const gateStep = 1;
         const azimuth = normalizeAzimuth(radial.azimuth);
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.globalCompositeOperation = 'source-over';
         ctx.save();
         ctx.translate(center.x, center.y);
         ctx.rotate((azimuth - 90) * Math.PI / 180);
 
-        let moment = null;
-        for (let e = 1; e <= 5; e++) {
-            if (radial.elevations[e] && radial.elevations[e][momentKey]) {
-                moment = radial.elevations[e][momentKey];
-                if (moment && moment.moment_data) break;
-            }
-        }
-
-        if (moment && moment.moment_data) {
-            const firstGateKm = moment.first_gate / 1000;
-            const firstGateActual = firstGateKm < 1 ? moment.first_gate : firstGateKm;
-            const gateSizeKm = moment.gate_size;
-            const data = moment.moment_data;
-
-            let startJ = null;
-            let currentColor = null;
-
-            for (let j = 0; j <= data.length; j += gateStep) {
-                const val = j < data.length ? data[j] : null;
-                const color = val !== null && val !== undefined ? scale(val) : null;
-                
-                if (color !== currentColor) {
-                    if (currentColor !== null && startJ !== null) {
-                        const r1 = (firstGateActual + startJ * gateSizeKm) * pixelsPerKm;
-                        const r2 = (firstGateActual + j * gateSizeKm) * pixelsPerKm;
-                        ctx.fillStyle = currentColor;
-                        ctx.beginPath();
-                        ctx.arc(0, 0, r1, -arcWidthRad/2, arcWidthRad/2);
-                        ctx.arc(0, 0, r2, arcWidthRad/2, -arcWidthRad/2, true);
-                        ctx.closePath();
-                        ctx.fill();
-                        // REMOVED ctx.stroke() - massive performance win
-                    }
-                    currentColor = color;
-                    startJ = j;
+        try {
+            let moment = null;
+            for (let e = 1; e <= 5; e++) {
+                if (radial.elevations[e] && radial.elevations[e][momentKey]) {
+                    moment = radial.elevations[e][momentKey];
+                    if (moment && moment.moment_data) break;
                 }
             }
+
+            if (moment && moment.moment_data) {
+                const firstGateKm = moment.first_gate / 1000;
+                const firstGateActual = firstGateKm < 1 ? moment.first_gate : firstGateKm;
+                const gateSizeKm = moment.gate_size;
+                const data = moment.moment_data;
+
+                let startJ = null;
+                let currentColor = null;
+
+                for (let j = 0; j <= data.length; j += gateStep) {
+                    const val = j < data.length ? data[j] : null;
+                    const color = val !== null && val !== undefined ? scale(val) : null;
+                    
+                    if (color !== currentColor) {
+                        if (currentColor !== null && startJ !== null) {
+                            const r1 = (firstGateActual + startJ * gateSizeKm) * pixelsPerKm;
+                            const r2 = (firstGateActual + j * gateSizeKm) * pixelsPerKm;
+                            ctx.fillStyle = currentColor;
+                            ctx.beginPath();
+                            ctx.arc(0, 0, r1, -arcWidthRad/2, arcWidthRad/2);
+                            ctx.arc(0, 0, r2, arcWidthRad/2, -arcWidthRad/2, true);
+                            ctx.closePath();
+                            ctx.fill();
+                            // REMOVED ctx.stroke() - massive performance win
+                        }
+                        currentColor = color;
+                        startJ = j;
+                    }
+                }
+            }
+        } finally {
+            ctx.restore();
+            ctx.setTransform(1, 0, 0, 1, 0, 0);
+            ctx.globalCompositeOperation = 'source-over';
         }
-        ctx.restore();
+    },
+    _clearOffscreen: function() {
+        if (!this._offscreenCanvas || !this._offscreenCtx) return;
+        const ctx = this._offscreenCtx;
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.globalCompositeOperation = 'source-over';
+        ctx.clearRect(0, 0, this._offscreenCanvas.width, this._offscreenCanvas.height);
+        this._needsFullRedraw = false;
     },
     _renderFull: function() {
         if (!this._offscreenCanvas || !this._offscreenCtx) return;
-        const ctx = this._offscreenCtx;
-        ctx.clearRect(0, 0, this._offscreenCanvas.width, this._offscreenCanvas.height);
+        this._clearOffscreen();
         if (!liveRadarData || !liveRadarData.radialsMap) return;
         for (const radial of liveRadarData.radialsMap.values()) {
             this._drawRadialToOffscreen(radial);
@@ -1756,6 +1775,7 @@ const RadarCanvasLayer = L.Layer.extend({
         const ctx = this._offscreenCtx;
 
         // CLEAR A WEDGE AHEAD of the sweep to avoid ghosting
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
         ctx.save();
         ctx.globalCompositeOperation = 'destination-out';
         ctx.beginPath();
@@ -1766,6 +1786,8 @@ const RadarCanvasLayer = L.Layer.extend({
         ctx.lineTo(center.x, center.y);
         ctx.fill();
         ctx.restore();
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.globalCompositeOperation = 'source-over';
 
         // DRAW FRESH RADIALS IN THE SWEEP PATH
         if (!liveRadarData || !liveRadarData.radialsMap) return;
@@ -1788,38 +1810,17 @@ const RadarCanvasLayer = L.Layer.extend({
         }
     },
     _draw: function() {
-        if (!this._topLeft || !this._container || !this._offscreenCanvas || !this._cachedCenter) return;
+        if (!this._topLeft || !this._container || !this._offscreenCanvas) return;
         const ctx = this._container.getContext('2d');
-        const center = this._cachedCenter;
 
         if (this._needsFullRedraw) {
             this._renderFull();
         }
 
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.globalCompositeOperation = 'source-over';
         ctx.clearRect(0, 0, this._container.width, this._container.height);
-
-        // Apply Conical Mask for Persistence Effect
-        ctx.save();
-        if (typeof ctx.createConicGradient !== 'function') {
-            ctx.drawImage(this._offscreenCanvas, 0, 0);
-            ctx.restore();
-            return;
-        }
-
-        const sweepRad = (currentAngle - 90) * Math.PI / 180;
-        const grad = ctx.createConicGradient(sweepRad, center.x, center.y);
-        
-        grad.addColorStop(0, 'rgba(0,0,0,0.9)');
-        grad.addColorStop(0.08, 'rgba(0,0,0,0.9)'); 
-        grad.addColorStop(0.5, 'rgba(0,0,0,0.4)');
-        grad.addColorStop(0.92, 'rgba(0,0,0,0.9)');
-        grad.addColorStop(1, 'rgba(0,0,0,0.9)');
-
         ctx.drawImage(this._offscreenCanvas, 0, 0);
-        ctx.globalCompositeOperation = 'destination-in';
-        ctx.fillStyle = grad;
-        ctx.fillRect(0, 0, this._container.width, this._container.height);
-        ctx.restore();
     }
 });
 
