@@ -743,6 +743,7 @@ let liveCanvasDrawPending = false;
 let lastLiveStatusUpdate = 0;
 let lastLiveDataMessageAt = Date.now();
 let liveReconnectInProgress = false;
+let socketGeneration = 0;
 const LIVE_STATUS_INTERVAL_MS = 500;
 const LIVE_DATA_STALE_MS = 25000;
 
@@ -782,14 +783,17 @@ function restartWebSocket(reason) {
 function initWebSocket() {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const host = window.location.host;
+    const generation = ++socketGeneration;
     socket = new WebSocket(`${protocol}//${host}`);
 
     socket.onopen = () => {
+        if (generation !== socketGeneration) return;
         console.log('WebSocket connected');
         subscribeToLiveStation();
     };
 
     socket.onmessage = (event) => {
+        if (generation !== socketGeneration) return;
         const message = JSON.parse(event.data);
         
         // 4-letter normalization for verification
@@ -804,6 +808,9 @@ function initWebSocket() {
 
             console.log('Received initial state for', message.stationId);
             lastLiveDataMessageAt = Date.now();
+            incomingRadialBuffer.clear();
+            liveCanvasDrawPending = false;
+            if (liveCanvasLayer) liveCanvasLayer._clearOffscreen();
             liveRadarData = message.data;
             if (liveRadarData) {
                 // Optimize memory: Convert moment_data to Uint8Array
@@ -852,6 +859,7 @@ function initWebSocket() {
                     });
                 });
             }
+            if (liveCanvasLayer) liveCanvasLayer._needsFullRedraw = true;
             renderLiveRadar();
         } else if (message.type === 'radial_batch') {
             // Verify stationId
@@ -861,7 +869,6 @@ function initWebSocket() {
             // console.log(`Received batch of ${message.radials.length} radials`);
             if (message.latestAzimuth !== undefined) {
                 targetAzimuth = normalizeAzimuth(message.latestAzimuth);
-                currentAngle = targetAzimuth;
                 lastAzimuthMetadataTime = performance.now();
             }
             
@@ -891,7 +898,6 @@ function initWebSocket() {
             console.log('Received real-time update:', message.chunk);
             if (message.latestAzimuth !== undefined) {
                 targetAzimuth = normalizeAzimuth(message.latestAzimuth);
-                currentAngle = targetAzimuth;
                 lastAzimuthMetadataTime = performance.now();
             }
             mergeRealTimeData(message.data);
@@ -912,11 +918,13 @@ function initWebSocket() {
     };
 
     socket.onclose = () => {
+        if (generation !== socketGeneration) return;
         console.warn('WebSocket disconnected, retrying...');
         setTimeout(initWebSocket, 5000);
     };
 
     socket.onerror = (error) => {
+        if (generation !== socketGeneration) return;
         console.warn('WebSocket error:', error);
     };
 }
@@ -1536,10 +1544,7 @@ function startLiveTracking() {
     if (azimuthLine) { liveTrackingLayer.removeLayer(azimuthLine); azimuthLine = null; }
 
     if (liveCanvasLayer) {
-        liveCanvasLayer._needsFullRedraw = true;
-        if (liveCanvasLayer._offscreenCtx) {
-            liveCanvasLayer._offscreenCtx.clearRect(0, 0, liveCanvasLayer._offscreenCanvas.width, liveCanvasLayer._offscreenCanvas.height);
-        }
+        liveCanvasLayer._clearOffscreen();
     }
 
     const station = NEXRAD_STATIONS.find(s => s.id === selectedRadarId);
@@ -1587,16 +1592,12 @@ function startLiveTracking() {
         }
         
         if (liveCanvasLayer && liveCanvasLayer._topLeft) {
-            const lastAngle = window._lastSweepAngle !== undefined ? window._lastSweepAngle : currentAngle;
-            
             // Paint newly received radials immediately; the sweep is visual state, not a data gate.
             for (const [roundedAz, radial] of incomingRadialBuffer) {
                 applyLiveRadial(roundedAz, radial);
                 incomingRadialBuffer.delete(roundedAz);
             }
-
-            liveCanvasLayer._drawIncremental(lastAngle, currentAngle); 
-            liveCanvasLayer._draw(); 
+            requestLiveCanvasDraw();
         } else if (incomingRadialBuffer.size > 0) {
             // Initialize rendering if data is waiting
             for (const [roundedAz, radial] of incomingRadialBuffer) {
@@ -1766,48 +1767,6 @@ const RadarCanvasLayer = L.Layer.extend({
             this._drawRadialToOffscreen(radial);
         }
         this._needsFullRedraw = false;
-    },
-    _drawIncremental: function(startAz, endAz) {
-        if (!this._offscreenCanvas || !this._offscreenCtx || !this._cachedCenter) return;
-        
-        const center = this._cachedCenter;
-        const pixelsPerKm = this._cachedPixelsPerKm;
-        const ctx = this._offscreenCtx;
-
-        // CLEAR A WEDGE AHEAD of the sweep to avoid ghosting
-        ctx.setTransform(1, 0, 0, 1, 0, 0);
-        ctx.save();
-        ctx.globalCompositeOperation = 'destination-out';
-        ctx.beginPath();
-        ctx.moveTo(center.x, center.y);
-        const clearStartRad = (endAz - 90) * Math.PI / 180;
-        const clearEndRad = (endAz - 88) * Math.PI / 180; 
-        ctx.arc(center.x, center.y, 460 * pixelsPerKm, clearStartRad, clearEndRad);
-        ctx.lineTo(center.x, center.y);
-        ctx.fill();
-        ctx.restore();
-        ctx.setTransform(1, 0, 0, 1, 0, 0);
-        ctx.globalCompositeOperation = 'source-over';
-
-        // DRAW FRESH RADIALS IN THE SWEEP PATH
-        if (!liveRadarData || !liveRadarData.radialsMap) return;
-        
-        const now = Date.now();
-        for (const [roundedAz, radial] of liveRadarData.radialsMap) {
-            let isInside = false;
-            if (startAz <= endAz) {
-                isInside = (roundedAz >= startAz && roundedAz <= endAz);
-            } else {
-                isInside = (roundedAz >= startAz || roundedAz <= endAz);
-            }
-
-            if (isInside) {
-                const isDataFresh = (now - radial.timestamp) < 300000; // 5 minutes
-                if (isDataFresh) {
-                    this._drawRadialToOffscreen(radial);
-                }
-            }
-        }
     },
     _draw: function() {
         if (!this._topLeft || !this._container || !this._offscreenCanvas) return;
