@@ -725,6 +725,7 @@ let targetAzimuth = 0;
 let currentAngle = 0;
 let sweepSpeed = 0.009; // Degrees per millisecond
 let lastSweepTime = performance.now();
+let lastAzimuthMetadataTime = 0;
 
 let socket = null;
 function initWebSocket() {
@@ -809,10 +810,11 @@ function initWebSocket() {
 
             // console.log(`Received batch of ${message.radials.length} radials`);
             if (message.latestAzimuth !== undefined) {
-                targetAzimuth = message.latestAzimuth;
+                targetAzimuth = normalizeAzimuth(message.latestAzimuth);
+                currentAngle = targetAzimuth;
+                lastAzimuthMetadataTime = performance.now();
             }
             
-            // Buffer the radials instead of merging them immediately
             message.radials.forEach(radial => {
                 const roundedAz = Math.round(radial.azimuth * 10) / 10;
                 
@@ -827,15 +829,18 @@ function initWebSocket() {
                     }
                 }
                 
-                incomingRadialBuffer.set(roundedAz, radial);
+                applyLiveRadial(roundedAz, radial);
             });
+            if (liveCanvasLayer) liveCanvasLayer._draw();
         } else if (message.type === 'radial_update') {
             // Verify stationId
             if (message.stationId && message.stationId !== currentStationId) return;
 
             console.log('Received real-time update:', message.chunk);
             if (message.latestAzimuth !== undefined) {
-                targetAzimuth = message.latestAzimuth;
+                targetAzimuth = normalizeAzimuth(message.latestAzimuth);
+                currentAngle = targetAzimuth;
+                lastAzimuthMetadataTime = performance.now();
             }
             mergeRealTimeData(message.data);
         } else if (message.type === 'clear_data') {
@@ -852,6 +857,27 @@ function initWebSocket() {
         console.warn('WebSocket disconnected, retrying...');
         setTimeout(initWebSocket, 5000);
     };
+}
+
+function normalizeAzimuth(azimuth) {
+    return ((Number(azimuth) % 360) + 360) % 360;
+}
+
+function applyLiveRadial(roundedAz, radial) {
+    if (!liveRadarData) {
+        liveRadarData = { radialsMap: new Map(), azimuths: [], lastUpdated: [], revealedUpdate: [], timestamps: [], elevations: {} };
+    }
+    if (!liveRadarData.radialsMap) liveRadarData.radialsMap = new Map();
+
+    radial.azimuth = normalizeAzimuth(radial.azimuth);
+    radial.revealedUpdate = 1;
+    liveRadarData.radialsMap.set(roundedAz, radial);
+
+    if (!liveCanvasLayer) {
+        renderLiveRadar();
+    } else {
+        liveCanvasLayer._drawRadialToOffscreen(radial);
+    }
 }
 
 function mergeRealTimeData(newData) {
@@ -1394,6 +1420,7 @@ function startLiveTracking() {
     incomingRadialBuffer.clear();
     currentAngle = 0;
     targetAzimuth = 0;
+    lastAzimuthMetadataTime = 0;
     lastSweepTime = performance.now();
 
     // Fix memory leak: Remove old layers from liveTrackingLayer
@@ -1428,18 +1455,17 @@ function startLiveTracking() {
         const dt = now - lastSweepTime;
         lastSweepTime = now;
 
-        const diff = (targetAzimuth - currentAngle + 360) % 360;
-        
-        // Pursuit Logic
-        let sweepSpeed = 0.009; // Base speed
-        if (diff > 5) {
-            sweepSpeed = 0.012; // Catch up
-        } else if (diff < 2) {
-            sweepSpeed = 0.007; // Slow down to match
+        const ageSinceMetadata = now - lastAzimuthMetadataTime;
+        if (lastAzimuthMetadataTime && ageSinceMetadata < 2500) {
+            const diff = ((targetAzimuth - currentAngle + 540) % 360) - 180;
+            if (Math.abs(diff) > 0.2) {
+                currentAngle = normalizeAzimuth(currentAngle + diff * Math.min(1, dt / 120));
+            } else {
+                currentAngle = targetAzimuth;
+            }
+        } else {
+            currentAngle = normalizeAzimuth(currentAngle + sweepSpeed * dt);
         }
-
-        currentAngle += sweepSpeed * dt;
-        currentAngle %= 360;
         
         window.currentScanAzimuth = currentAngle;
         
@@ -1455,47 +1481,19 @@ function startLiveTracking() {
         if (liveCanvasLayer && liveCanvasLayer._topLeft) {
             const lastAngle = window._lastSweepAngle !== undefined ? window._lastSweepAngle : currentAngle;
             
-            // 1. Surgical Merge & Draw
-            // OPTIMIZATION: Use for...of on the Map directly to avoid Array.from() garbage
+            // Paint newly received radials immediately; the sweep is visual state, not a data gate.
             for (const [roundedAz, radial] of incomingRadialBuffer) {
-                let isInside = false;
-                if (lastAngle <= currentAngle) {
-                    isInside = (roundedAz >= lastAngle && roundedAz <= currentAngle);
-                } else {
-                    isInside = (roundedAz >= lastAngle || roundedAz <= currentAngle);
-                }
-
-                if (isInside) {
-                    if (!liveRadarData) {
-                        liveRadarData = { radialsMap: new Map(), azimuths: [], lastUpdated: [], revealedUpdate: [], timestamps: [], elevations: {} };
-                    }
-                    liveRadarData.radialsMap.set(roundedAz, radial);
-                    
-                    // Surgically draw this new radial to the offscreen buffer
-                    liveCanvasLayer._drawRadialToOffscreen(radial);
-                    
-                    incomingRadialBuffer.delete(roundedAz);
-                }
+                applyLiveRadial(roundedAz, radial);
+                incomingRadialBuffer.delete(roundedAz);
             }
 
-            // 2. Continuous Sweep Visuals
             liveCanvasLayer._drawIncremental(lastAngle, currentAngle); 
             liveCanvasLayer._draw(); 
         } else if (incomingRadialBuffer.size > 0) {
             // Initialize rendering if data is waiting
-            const lastAngle = window._lastSweepAngle !== undefined ? window._lastSweepAngle : currentAngle;
             for (const [roundedAz, radial] of incomingRadialBuffer) {
-                let isInside = false;
-                if (lastAngle <= currentAngle) {
-                    isInside = (roundedAz >= lastAngle && roundedAz <= currentAngle);
-                } else {
-                    isInside = (roundedAz >= lastAngle || roundedAz <= currentAngle);
-                }
-                if (isInside) {
-                    if (!liveRadarData) liveRadarData = { radialsMap: new Map(), azimuths: [], lastUpdated: [], revealedUpdate: [], timestamps: [], elevations: {} };
-                    liveRadarData.radialsMap.set(roundedAz, radial);
-                    incomingRadialBuffer.delete(roundedAz);
-                }
+                applyLiveRadial(roundedAz, radial);
+                incomingRadialBuffer.delete(roundedAz);
             }
             if (liveRadarData) renderLiveRadar();
         }
@@ -1535,8 +1533,7 @@ const RadarCanvasLayer = L.Layer.extend({
         this._offscreenCtx = null;
     },
     _onMove: function() {
-        const topLeft = map.getBounds().getNorthWest();
-        const pos = map.latLngToLayerPoint(topLeft);
+        const pos = map.containerPointToLayerPoint([0, 0]);
         L.DomUtil.setPosition(this._container, pos);
         this._topLeft = pos;
         this._updateCachedCoords();
@@ -1572,7 +1569,7 @@ const RadarCanvasLayer = L.Layer.extend({
         this._offscreenCanvas.width = size.x * dpr;
         this._offscreenCanvas.height = size.y * dpr;
 
-        const pos = map.latLngToLayerPoint(map.getBounds().getNorthWest());
+        const pos = map.containerPointToLayerPoint([0, 0]);
         L.DomUtil.setPosition(this._container, pos);
         this._topLeft = pos;
         this._updateCachedCoords();
@@ -1593,10 +1590,10 @@ const RadarCanvasLayer = L.Layer.extend({
         const scale = COLOR_SCALES[momentKey];
         const arcWidthRad = ( (360 / 720) * Math.PI / 180) * 2.2;
         const gateStep = 1;
-        const azimuth = (90 - radial.azimuth) * Math.PI / 180;
+        const azimuth = normalizeAzimuth(radial.azimuth);
         ctx.save();
         ctx.translate(center.x, center.y);
-        ctx.rotate(-azimuth);
+        ctx.rotate((azimuth - 90) * Math.PI / 180);
 
         let moment = null;
         for (let e = 1; e <= 5; e++) {
@@ -1700,6 +1697,12 @@ const RadarCanvasLayer = L.Layer.extend({
 
         // Apply Conical Mask for Persistence Effect
         ctx.save();
+        if (typeof ctx.createConicGradient !== 'function') {
+            ctx.drawImage(this._offscreenCanvas, 0, 0);
+            ctx.restore();
+            return;
+        }
+
         const sweepRad = (currentAngle - 90) * Math.PI / 180;
         const grad = ctx.createConicGradient(sweepRad, center.x, center.y);
         
