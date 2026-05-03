@@ -739,6 +739,9 @@ let currentAngle = 0;
 let sweepSpeed = 0.009; // Degrees per millisecond
 let lastSweepTime = performance.now();
 let lastAzimuthMetadataTime = 0;
+let liveCanvasDrawPending = false;
+let lastLiveStatusUpdate = 0;
+const LIVE_STATUS_INTERVAL_MS = 500;
 
 let socket = null;
 function initWebSocket() {
@@ -845,7 +848,7 @@ function initWebSocket() {
                 applyLiveRadial(roundedAz, radial);
             });
             updateLiveChunkTimestamp(message.radials);
-            if (liveCanvasLayer) liveCanvasLayer._draw();
+            requestLiveCanvasDraw();
         } else if (message.type === 'radial_update') {
             // Verify stationId
             if (message.stationId && message.stationId !== currentStationId) return;
@@ -878,8 +881,19 @@ function normalizeAzimuth(azimuth) {
     return ((Number(azimuth) % 360) + 360) % 360;
 }
 
+function requestLiveCanvasDraw() {
+    if (!liveCanvasLayer || liveCanvasDrawPending) return;
+    liveCanvasDrawPending = true;
+    requestAnimationFrame(() => {
+        liveCanvasDrawPending = false;
+        if (liveCanvasLayer) liveCanvasLayer._draw();
+    });
+}
+
 function updateLiveChunkTimestamp(radials) {
     if (currentRadarMode !== 'live-tracking' || !Array.isArray(radials) || radials.length === 0) return;
+    const now = Date.now();
+    if (now - lastLiveStatusUpdate < LIVE_STATUS_INTERVAL_MS) return;
 
     const latestTimestamp = radials.reduce((latest, radial) => {
         const timestamp = Number(radial.timestamp);
@@ -889,10 +903,11 @@ function updateLiveChunkTimestamp(radials) {
     if (!latestTimestamp) return;
 
     const chunkDate = new Date(latestTimestamp);
-    const lagMs = Date.now() - latestTimestamp;
+    const lagMs = now - latestTimestamp;
     const azimuth = radials[radials.length - 1]?.azimuth;
     const azText = Number.isFinite(Number(azimuth)) ? ` | Az ${normalizeAzimuth(azimuth).toFixed(1)}°` : '';
     setTimestampForMode('live-tracking', `Live Chunk: ${chunkDate.toLocaleTimeString()} | ${formatLag(lagMs)}${azText}`);
+    lastLiveStatusUpdate = now;
 }
 
 function updateLiveDataTimestamp(data) {
@@ -918,6 +933,7 @@ function applyLiveRadial(roundedAz, radial) {
         renderLiveRadar();
     } else {
         liveCanvasLayer._drawRadialToOffscreen(radial);
+        requestLiveCanvasDraw();
     }
 }
 
@@ -1462,6 +1478,7 @@ function startLiveTracking() {
     currentAngle = 0;
     targetAzimuth = 0;
     lastAzimuthMetadataTime = 0;
+    lastLiveStatusUpdate = 0;
     lastSweepTime = performance.now();
 
     // Fix memory leak: Remove old layers from liveTrackingLayer
