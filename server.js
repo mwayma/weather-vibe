@@ -3,31 +3,28 @@ const express = require('express');
 const http = require('http');
 const WebSocket = require('ws');
 const path = require('path');
+const fs = require('fs');
+const chokidar = require('chokidar');
 const compression = require('compression');
 const cors = require('cors');
 const { Level2Radar } = require('nexrad-level-2-data');
-const { XMLParser } = require('fast-xml-parser');
-const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
 
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
 const PORT = process.env.PORT || 80;
-const BUCKET_URL = 'https://unidata-nexrad-level2-chunks.s3.amazonaws.com';
+const NEXRAD_DATA_DIR = process.env.NEXRAD_DATA_DIR || '/data/nexrad/level2';
 
 app.use(cors());
 app.use(compression());
 app.use(express.static(path.join(__dirname, '/')));
 
 const subscriptions = new Map();
-const activePollers = new Map();
-const pollingLocks = new Set(); // stationId set for locking
+const activeWatchers = new Map();
 const stationState = new Map(); // stationId -> { lastVolume, lastChunkKey, headerChunk }
 const stationCache = new Map(); // stationId -> liveRadarData object
 
-const parser = new XMLParser();
-const VOLUME_DISCOVERY_INTERVAL_MS = 30000;
 const RADIAL_BATCH_SIZE = 20;
 const RADIAL_BATCH_SPACING_MS = 35;
 const MAX_CLIENT_BUFFERED_BYTES = 10 * 1024 * 1024;
@@ -138,159 +135,6 @@ function getConsolidatedData(stationId) {
     return result;
 }
 
-async function fetchWithTimeout(url, options = {}, timeout = 15000) {
-    const controller = new AbortController();
-    const id = setTimeout(() => controller.abort(), timeout);
-    try {
-        const response = await fetch(url, { ...options, signal: controller.signal });
-        clearTimeout(id);
-        return response;
-    } catch (e) {
-        clearTimeout(id);
-        throw e;
-    }
-}
-
-async function findTrulyLatestVolume(stationId, commonPrefixes) {
-    if (commonPrefixes.length === 0) return null;
-
-    // Sort numerically: 1, 2, 3... 999
-    const sorted = [...commonPrefixes].sort((a, b) => {
-        const numA = parseInt(a.Prefix.split('/')[1]);
-        const numB = parseInt(b.Prefix.split('/')[1]);
-        return numA - numB;
-    });
-
-    const highestNumPrefix = sorted[sorted.length - 1].Prefix;
-    const lowestNumPrefix = sorted[0].Prefix;
-
-    // Peek at the first chunk of both to compare timestamps
-    async function getVolTimestamp(prefix) {
-        try {
-            const listUrl = `${BUCKET_URL}/?list-type=2&prefix=${prefix}&max-keys=5`;
-            const res = await fetchWithTimeout(listUrl);
-            const json = parser.parse(await res.text());
-            const contents = json.ListBucketResult.Contents;
-            if (!contents) return 0;
-            const chunkList = Array.isArray(contents) ? contents : [contents];
-            return Math.max(...chunkList.map(chunk => getKeyTimestamp(chunk.Key)));
-        } catch (e) {
-            return 0;
-        }
-    }
-
-    const highTs = await getVolTimestamp(highestNumPrefix);
-    const lowTs = await getVolTimestamp(lowestNumPrefix);
-
-    // If the lowest numerical folder is newer than the highest, we've wrapped around
-    if (lowTs > highTs) {
-        // Find the HIGHEST volume in the NEW sequence (usually only a few folders)
-        let latest = lowestNumPrefix;
-        let latestTs = lowTs;
-        for (let i = 1; i < Math.min(sorted.length, 50); i++) {
-            const currentTs = await getVolTimestamp(sorted[i].Prefix);
-            if (currentTs >= latestTs) {
-                latest = sorted[i].Prefix;
-                latestTs = currentTs;
-            } else {
-                break;
-            }
-        }
-        return latest;
-    }
-
-    return highestNumPrefix;
-}
-
-async function getVolumeTimestamp(prefix) {
-    try {
-        const listUrl = `${BUCKET_URL}/?list-type=2&prefix=${prefix}&max-keys=3`;
-        const res = await fetchWithTimeout(listUrl);
-        const json = parser.parse(await res.text());
-        const contents = json.ListBucketResult.Contents;
-        if (!contents) return 0;
-        const chunkList = Array.isArray(contents) ? contents : [contents];
-        return Math.max(...chunkList.map(chunk => getKeyTimestamp(chunk.Key)));
-    } catch (e) {
-        return 0;
-    }
-}
-
-async function discoverLatestVolumeByKeys(stationId) {
-    let continuationToken = null;
-    let best = null;
-    let pages = 0;
-
-    do {
-        const token = continuationToken ? `&continuation-token=${encodeURIComponent(continuationToken)}` : '';
-        const listUrl = `${BUCKET_URL}/?list-type=2&prefix=${stationId}/${token}`;
-        const res = await fetchWithTimeout(listUrl);
-        const json = parser.parse(await res.text());
-        const result = json.ListBucketResult;
-        let contents = result.Contents;
-
-        if (contents) {
-            if (!Array.isArray(contents)) contents = [contents];
-            for (const item of contents) {
-                const timestamp = getKeyTimestamp(item.Key);
-                if (!timestamp) continue;
-                const match = item.Key.match(/^([A-Z0-9]{4}\/\d+\/)/);
-                if (!match) continue;
-                if (!best || timestamp > best.timestamp) {
-                    best = { prefix: match[1], timestamp };
-                }
-            }
-        }
-
-        continuationToken = result.IsTruncated ? result.NextContinuationToken : null;
-        pages++;
-    } while (continuationToken && pages < 50);
-
-    return best;
-}
-
-async function chooseLatestVolume(stationId, commonPrefixes, state, now) {
-    const prefixesByNumber = [...commonPrefixes].sort((a, b) => {
-        const numA = parseInt(a.Prefix.split('/')[1]);
-        const numB = parseInt(b.Prefix.split('/')[1]);
-        return numA - numB;
-    });
-
-    if (!state.latestVolPrefix || !state.lastVolumeDiscovery || (now - state.lastVolumeDiscovery) > VOLUME_DISCOVERY_INTERVAL_MS) {
-        const discovered = await discoverLatestVolumeByKeys(stationId);
-        if (discovered) {
-            state.latestVolPrefix = discovered.prefix;
-            state.latestVolTimestamp = discovered.timestamp;
-            state.lastVolumeDiscovery = now;
-        }
-    }
-
-    if (!state.latestVolPrefix) {
-        state.latestVolPrefix = await findTrulyLatestVolume(stationId, commonPrefixes);
-        state.latestVolTimestamp = state.latestVolPrefix ? await getVolumeTimestamp(state.latestVolPrefix) : 0;
-        state.lastVolumeDiscovery = now;
-    }
-
-    const candidates = new Set();
-    if (state.latestVolPrefix) candidates.add(state.latestVolPrefix);
-
-    const latestIdx = prefixesByNumber.findIndex(p => p.Prefix === state.latestVolPrefix);
-    if (latestIdx >= 0) {
-        candidates.add(prefixesByNumber[(latestIdx + 1) % prefixesByNumber.length].Prefix);
-        candidates.add(prefixesByNumber[(latestIdx - 1 + prefixesByNumber.length) % prefixesByNumber.length].Prefix);
-    }
-
-    for (const prefix of candidates) {
-        const timestamp = await getVolumeTimestamp(prefix);
-        if (timestamp && (!state.latestVolTimestamp || timestamp > state.latestVolTimestamp)) {
-            state.latestVolPrefix = prefix;
-            state.latestVolTimestamp = timestamp;
-        }
-    }
-
-    return state.latestVolPrefix;
-}
-
 function broadcastRadialBatches(stationId, radials) {
     for (let i = 0; i < radials.length; i += RADIAL_BATCH_SIZE) {
         const batch = radials.slice(i, i + RADIAL_BATCH_SIZE);
@@ -303,40 +147,92 @@ function broadcastRadialBatches(stationId, radials) {
     }
 }
 
-function sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
+async function processLocalFile(stationId, filePath) {
+    stationId = normalizeStationId(stationId);
+    const fileName = path.basename(filePath);
+    
+    let state = stationState.get(stationId) || { 
+        lastVolume: null, 
+        lastChunkKey: null, 
+        headerChunk: null,
+        processedChunks: new Set()
+    };
+
+    if (state.processedChunks.has(fileName)) return;
+
+    try {
+        const chunkBuffer = fs.readFileSync(filePath);
+        
+        // Volume detection based on filename pattern: KDAX_20260503_120000_V06_S
+        const volumeMatch = fileName.match(/([A-Z0-9]{4}_\d{8}_\d{6})/);
+        const volumeId = volumeMatch ? volumeMatch[1] : 'unknown';
+
+        if (volumeId !== state.lastVolume) {
+            console.log(`[${stationId}] New volume detected: ${volumeId}`);
+            state.lastVolume = volumeId;
+            state.headerChunk = null;
+            broadcast(stationId, { type: 'clear_data', stationId, volumeId });
+        }
+
+        if (isStartChunk(fileName)) {
+            state.headerChunk = chunkBuffer;
+        }
+
+        let combinedBuffer;
+        if (state.headerChunk && !isStartChunk(fileName)) {
+            combinedBuffer = Buffer.concat([Buffer.from(state.headerChunk), Buffer.from(chunkBuffer)]);
+        } else {
+            combinedBuffer = Buffer.from(chunkBuffer);
+        }
+
+        const parsed = new Level2Radar(combinedBuffer);
+        const extracted = extractRadialData(parsed, stationId, fileName);
+        const radials = extractedToRadials(extracted);
+        
+        state.processedChunks.add(fileName);
+        if (state.processedChunks.size > 1000) {
+            const first = state.processedChunks.values().next().value;
+            state.processedChunks.delete(first);
+        }
+
+        if (radials.length > 0) {
+            radials.sort((a, b) => a.timestamp - b.timestamp);
+            mergeRadialsIntoCache(stationId, radials);
+            broadcastRadialBatches(stationId, radials);
+        }
+        
+        stationState.set(stationId, state);
+    } catch (e) {
+        // Silently fail for partial writes
+    }
 }
 
-function createRadialMicrobatcher(stationId) {
-    let pending = [];
+function watchStation(stationId) {
+    stationId = normalizeStationId(stationId);
+    if (activeWatchers.has(stationId)) return;
 
-    async function sendBatch(batch) {
-        broadcastRadialBatches(stationId, batch);
+    const stationDir = path.join(NEXRAD_DATA_DIR, stationId);
+    if (!fs.existsSync(stationDir)) {
+        fs.mkdirSync(stationDir, { recursive: true });
     }
+    
+    console.log(`Starting watcher for ${stationId} at ${stationDir}`);
 
-    async function sendReadyBatches() {
-        while (pending.length >= RADIAL_BATCH_SIZE) {
-            const batch = pending.splice(0, RADIAL_BATCH_SIZE);
-            await sendBatch(batch);
-            if (pending.length > 0) await sleep(RADIAL_BATCH_SPACING_MS);
-        }
-    }
+    const watcher = chokidar.watch(stationDir, {
+        persistent: true,
+        ignoreInitial: false,
+        depth: 2
+    });
 
-    async function enqueue(radials) {
-        if (!radials || radials.length === 0) return;
-        pending.push(...radials);
-        await sendReadyBatches();
-    }
+    watcher.on('add', (filePath) => {
+        processLocalFile(stationId, filePath);
+    });
 
-    async function flush() {
-        await sendReadyBatches();
-        if (pending.length === 0) return;
-        const batch = pending;
-        pending = [];
-        await sendBatch(batch);
-    }
+    activeWatchers.set(stationId, watcher);
+}
 
-    return { enqueue, flush };
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 function extractedToRadials(extracted) {
@@ -392,146 +288,6 @@ function mergeRadialsIntoCache(stationId, radials) {
     });
 }
 
-function trimProcessedChunks(state) {
-    while (state.processedChunks.size > 1000) {
-        const firstKey = state.processedChunks.values().next().value;
-        state.processedChunks.delete(firstKey);
-    }
-}
-
-async function pollChunks(stationId) {
-    stationId = normalizeStationId(stationId);
-    
-    const now = Date.now();
-    const lockKey = `lock_${stationId}`;
-    const lastPoll = stationState.get(lockKey) || 0;
-    if (pollingLocks.has(stationId) && (now - lastPoll) < 60000) return;
-    
-    pollingLocks.add(stationId);
-    stationState.set(lockKey, now);
-    
-    try {
-        const listVolUrl = `${BUCKET_URL}/?list-type=2&prefix=${stationId}/&delimiter=/`;
-        const volRes = await fetchWithTimeout(listVolUrl);
-        const volJson = parser.parse(await volRes.text());
-        
-        let commonPrefixes = volJson.ListBucketResult.CommonPrefixes;
-        if (!commonPrefixes) return;
-        if (!Array.isArray(commonPrefixes)) commonPrefixes = [commonPrefixes];
-
-        commonPrefixes = commonPrefixes.filter(p => /^[A-Z0-9]{4}\/\d+\/$/.test(p.Prefix));
-        if (commonPrefixes.length === 0) return;
-
-        let state = stationState.get(stationId) || { 
-            lastVolume: null, 
-            lastChunkKey: null, 
-            headerChunk: null,
-            processedChunks: new Set(),
-            latestVolPrefix: null,
-            latestVolTimestamp: 0,
-            lastVolumeDiscovery: 0
-        };
-
-        if (!state.processedChunks) state.processedChunks = new Set();
-
-        const latestVolPrefix = await chooseLatestVolume(stationId, commonPrefixes, state, now);
-        if (!latestVolPrefix) return;
-        stationState.set(stationId, state);
-
-        const volumesToPoll = [latestVolPrefix];
-
-        const radialBatcher = createRadialMicrobatcher(stationId);
-
-        for (const volPrefix of volumesToPoll) {
-            const listChunksUrl = `${BUCKET_URL}/?list-type=2&prefix=${volPrefix}`;
-            const chunkRes = await fetchWithTimeout(listChunksUrl);
-            const chunkJson = parser.parse(await chunkRes.text());
-            
-            let contents = chunkJson.ListBucketResult.Contents;
-            if (!contents) continue;
-            if (!Array.isArray(contents)) contents = [contents];
-            contents.sort((a, b) => {
-                const timeDiff = getKeyTimestamp(a.Key) - getKeyTimestamp(b.Key);
-                if (timeDiff !== 0) return timeDiff;
-                return getChunkOrder(a.Key) - getChunkOrder(b.Key);
-            });
-            
-            const firstChunkKey = contents[0].Key;
-            const volumeId = `${volPrefix}${getKeyTimestamp(firstChunkKey) || firstChunkKey}`;
-
-            // Detect Volume Transition (on the newest folder)
-            if (volPrefix === latestVolPrefix && volumeId !== state.lastVolume) {
-                console.log(`[${stationId}] Transitioning to new volume: ${volumeId}`);
-                state.lastVolume = volumeId;
-                state.lastChunkKey = null; 
-                state.headerChunk = null;
-                broadcast(stationId, { type: 'clear_data', stationId, volumeId });
-                stationState.set(stationId, state);
-            }
-
-            // Filter for truly new chunks using the Set to prevent redundant broadcasts
-            const unseen = contents.filter(c => !state.processedChunks.has(c.Key));
-
-            if (unseen.length > 0) {
-                const latestKey = unseen[unseen.length - 1].Key;
-                const firstId = unseen[0].Key.split('/').pop();
-                const lastId = latestKey.split('/').pop();
-                console.log(`[${stationId}] Vol ${volPrefix}: Processing ${unseen.length} new chunks (${firstId} to ${lastId})`);
-                
-                if (!state.headerChunk) {
-                    const headerKey = contents.find(c => isStartChunk(c.Key))?.Key;
-                    if (headerKey) {
-                        const hRes = await fetchWithTimeout(`${BUCKET_URL}/${headerKey}`);
-                        state.headerChunk = await hRes.arrayBuffer();
-                    }
-                }
-
-                for (const chunk of unseen) {
-                    try {
-                        const chunkId = chunk.Key.split('/').pop();
-                        const dataRes = await fetchWithTimeout(`${BUCKET_URL}/${chunk.Key}`);
-                        const chunkBuffer = await dataRes.arrayBuffer();
-                        
-                        let combinedBuffer;
-                        if (state.headerChunk && !isStartChunk(chunk.Key)) {
-                            combinedBuffer = Buffer.concat([Buffer.from(state.headerChunk), Buffer.from(chunkBuffer)]);
-                        } else {
-                            combinedBuffer = Buffer.from(chunkBuffer);
-                        }
-
-                        const parsed = new Level2Radar(combinedBuffer);
-                        const extracted = extractRadialData(parsed, stationId, chunkId);
-                        const radials = extractedToRadials(extracted);
-                        
-                        state.processedChunks.add(chunk.Key);
-                        trimProcessedChunks(state);
-
-                        if (radials.length > 0) {
-                            radials.sort((a, b) => a.timestamp - b.timestamp);
-                            mergeRadialsIntoCache(stationId, radials);
-                            await radialBatcher.enqueue(radials);
-                        }
-                    } catch (e) {
-                        console.warn(`[${stationId}] Chunk ${chunk.Key} error: ${e.message}`);
-                        state.processedChunks.add(chunk.Key);
-                        trimProcessedChunks(state);
-                    }
-                }
-
-                if (volPrefix === latestVolPrefix) {
-                    state.lastChunkKey = latestKey;
-                    stationState.set(stationId, state);
-                }
-            }
-        }
-
-        await radialBatcher.flush();
-    } catch (e) {
-        console.error(`[${stationId}] Poll error:`, e.message);
-    } finally {
-        pollingLocks.delete(stationId);
-    }
-}
 
 function extractRadialData(parsed, stationId, chunkId) {
     const elevations = [1, 2, 3, 4, 5];
@@ -641,8 +397,11 @@ wss.on('connection', (ws) => {
                 if (currentStation) {
                     subscriptions.get(currentStation)?.delete(ws);
                     if (subscriptions.get(currentStation)?.size === 0) {
-                        clearInterval(activePollers.get(currentStation));
-                        activePollers.delete(currentStation);
+                        const watcher = activeWatchers.get(currentStation);
+                        if (watcher) {
+                            watcher.close();
+                            activeWatchers.delete(currentStation);
+                        }
                     }
                 }
 
@@ -650,7 +409,7 @@ wss.on('connection', (ws) => {
                 if (!subscriptions.has(stationId)) subscriptions.set(stationId, new Set());
                 subscriptions.get(stationId).add(ws);
 
-                // Initial state can be very large; clients can opt out for live-only streaming.
+                // Initial state
                 if (parsed.initial !== false && stationCache.has(stationId)) {
                     ws.send(JSON.stringify({ 
                         type: 'initial_state', 
@@ -659,20 +418,19 @@ wss.on('connection', (ws) => {
                     }));
                 }
 
-                // 2. Start or trigger the poller
-                if (!activePollers.has(stationId)) {
-                    const poller = setInterval(() => pollChunks(stationId), 1000); 
-                    activePollers.set(stationId, poller);
-                    pollChunks(stationId);
-                }
+                // Start or trigger the watcher
+                watchStation(stationId);
                 
                 ws.send(JSON.stringify({ type: 'status', message: `Subscribed to real-time chunks for ${stationId}` }));
             } else if (parsed.action === 'unsubscribe') {
                 if (currentStation) {
                     subscriptions.get(currentStation)?.delete(ws);
                     if (subscriptions.get(currentStation)?.size === 0) {
-                        clearInterval(activePollers.get(currentStation));
-                        activePollers.delete(currentStation);
+                        const watcher = activeWatchers.get(currentStation);
+                        if (watcher) {
+                            watcher.close();
+                            activeWatchers.delete(currentStation);
+                        }
                     }
                 }
             }
@@ -685,8 +443,11 @@ wss.on('connection', (ws) => {
         if (currentStation) {
             subscriptions.get(currentStation)?.delete(ws);
             if (subscriptions.get(currentStation)?.size === 0) {
-                clearInterval(activePollers.get(currentStation));
-                activePollers.delete(currentStation);
+                const watcher = activeWatchers.get(currentStation);
+                if (watcher) {
+                    watcher.close();
+                    activeWatchers.delete(currentStation);
+                }
             }
         }
     });
