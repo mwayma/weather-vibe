@@ -30,12 +30,31 @@
                                 </div>
                                 <button id="btn-live-tracking" style="width: 100%; margin-bottom: 5px;">Live Tracking</button>
                                 <div id="live-tracking-options" style="padding-left: 10px; margin-bottom: 10px; display: none;">
-                                    <button id="btn-live-reflectivity" class="active" style="width: 100%; font-size: 0.9em; padding: 5px; margin-bottom: 3px;">Reflectivity</button>
-                                    <button id="btn-live-velocity" style="width: 100%; font-size: 0.9em; padding: 5px; margin-bottom: 3px;">Velocity</button>
-                                    <button id="btn-live-debris" style="width: 100%; font-size: 0.9em; padding: 5px; margin-bottom: 6px;">Debris (CC)</button>
+                                    <button id="btn-live-reflectivity" class="active" style="width: 100%; font-size: 0.9em; padding: 5px; margin-bottom: 3px;">Reflectivity (Z)</button>
+                                    <button id="btn-live-velocity" style="width: 100%; font-size: 0.9em; padding: 5px; margin-bottom: 3px;">Velocity (V)</button>
+                                    <button id="btn-live-debris" style="width: 100%; font-size: 0.9em; padding: 5px; margin-bottom: 3px;">Debris (CC)</button>
+                                    <button id="btn-live-zdr" style="width: 100%; font-size: 0.9em; padding: 5px; margin-bottom: 3px;">Diff Refl (ZDR)</button>
+                                    <button id="btn-live-width" style="width: 100%; font-size: 0.9em; padding: 5px; margin-bottom: 6px;">Width (W)</button>
+
+                                    <div style="margin-bottom: 6px; color: #fff; font-size: 0.85em;">
+                                        <label for="live-elevation-select">Scan Elevation:</label>
+                                        <select id="live-elevation-select" style="width: 100%; margin-top: 2px; padding: 3px; font-size: 0.9em; background: #333; color: #fff; border: 1px solid #555;">
+                                            <option value="auto">Auto (Lowest available)</option>
+                                            <option value="1">Tilt 1 (0.5° approx)</option>
+                                            <option value="2">Tilt 2</option>
+                                            <option value="3">Tilt 3</option>
+                                            <option value="4">Tilt 4</option>
+                                            <option value="5">Tilt 5</option>
+                                            <option value="6">Tilt 6</option>
+                                            <option value="8">Tilt 8</option>
+                                            <option value="10">Tilt 10</option>
+                                        </select>
+                                    </div>
+
                                     <button id="btn-live-buffered" class="active" style="width: 100%; font-size: 0.85em; padding: 5px; margin-bottom: 3px;">Buffered Live</button>
                                     <button id="btn-live-low-latency" style="width: 100%; font-size: 0.85em; padding: 5px;">Low Latency</button>
                                 </div>
+
                                 <button id="btn-velocity" style="width: 100%; margin-bottom: 5px;">Base Velocity (Wind)</button>
                                 <button id="btn-temperature" style="width: 100%; margin-bottom: 5px;">Temperature</button>
                                 <div id="temp-options" style="padding-left: 10px; margin-bottom: 10px; display: none; color: #eee; font-size: 0.9em;">
@@ -125,6 +144,24 @@
                     <span>Rain (High CC)</span>
                 </div>
                 <div class="v-note">Look for blue/magenta in heavy rain areas</div>
+            </div>
+
+            <div id="live-zdr-legend" style="display:none; margin-top: 10px;">
+                <div class="legend-title">DIFF REFLECTIVITY (ZDR)</div>
+                <div class="spectrum-bar zdr-spectrum"></div>
+                <div style="display: flex; justify-content: space-between; font-size: 10px; color: #aaa;">
+                    <span>Rain</span>
+                    <span>Hail/Large Rain</span>
+                </div>
+            </div>
+
+            <div id="live-width-legend" style="display:none; margin-top: 10px;">
+                <div class="legend-title">SPECTRUM WIDTH (W)</div>
+                <div class="spectrum-bar width-spectrum"></div>
+                <div style="display: flex; justify-content: space-between; font-size: 10px; color: #aaa;">
+                    <span>Calm</span>
+                    <span>Turbulence</span>
+                </div>
             </div>
         </div>
     </div>

@@ -1245,14 +1245,35 @@ const COLOR_SCALES = {
     },
     debris: (val) => {
         if (val === null || val < 0.7) return null;
-        if (val < 0.8) return '#ff00ff'; 
+        if (val < 0.8) return '#ff00ff';
         if (val < 0.9) return '#0000ff';
         if (val < 0.95) return '#00ffff';
         if (val < 0.98) return '#00ff00';
         return '#ffff00';
+    },
+    zdr: (val) => {
+        if (val === null) return null;
+        if (val < -1) return '#777777';
+        if (val < 0) return '#0000f6';
+        if (val < 1) return '#00ff00';
+        if (val < 2) return '#ffff00';
+        if (val < 3) return '#ff9000';
+        if (val < 4) return '#ff0000';
+        return '#ff00ff';
+    },
+    width: (val) => {
+        if (val === null || val < 1) return null;
+        if (val < 2) return '#777777';
+        if (val < 4) return '#0000a8';
+        if (val < 6) return '#00ecec';
+        if (val < 8) return '#01a0f6';
+        if (val < 10) return '#00ff00';
+        if (val < 12) return '#ffff00';
+        return '#ff0000';
     }
-};
+    };
 
+    let selectedLiveElevation = 'auto'; // 'auto' or 1-22
 function setupRadarButtons() {
     console.log('Initializing radar buttons...');
     const reflectivityBtn = document.getElementById('btn-reflectivity');
@@ -1325,38 +1346,45 @@ function setupRadarButtons() {
         });
     }
 
-    if (btnLiveReflectivity) {
-        btnLiveReflectivity.addEventListener('click', () => {
-            currentLiveMode = 'reflectivity';
-            btnLiveReflectivity.classList.add('active');
-            if (btnLiveVelocity) btnLiveVelocity.classList.remove('active');
-            if (btnLiveDebris) btnLiveDebris.classList.remove('active');
-            updateLiveLegends();
-            renderLiveRadar();
+    const btnLiveDebris = document.getElementById('btn-live-debris');
+    const btnLiveZdr = document.getElementById('btn-live-zdr');
+    const btnLiveWidth = document.getElementById('btn-live-width');
+    const elevSelect = document.getElementById('live-elevation-select');
+
+    if (elevSelect) {
+        elevSelect.addEventListener('change', (e) => {
+            selectedLiveElevation = e.target.value;
+            console.log('Elevation selection changed to:', selectedLiveElevation);
+            if (liveCanvasLayer) {
+                liveCanvasLayer._needsFullRedraw = true;
+                requestLiveCanvasDraw();
+            }
         });
     }
 
-    if (btnLiveVelocity) {
-        btnLiveVelocity.addEventListener('click', () => {
-            currentLiveMode = 'velocity';
-            if (btnLiveReflectivity) btnLiveReflectivity.classList.remove('active');
-            btnLiveVelocity.classList.add('active');
-            if (btnLiveDebris) btnLiveDebris.classList.remove('active');
-            updateLiveLegends();
-            renderLiveRadar();
+    const setLiveView = (mode) => {
+        currentLiveMode = mode;
+        [btnLiveReflectivity, btnLiveVelocity, btnLiveDebris, btnLiveZdr, btnLiveWidth].forEach(btn => {
+            if (btn) btn.classList.toggle('active', btn.id === `btn-live-${mode}`);
         });
-    }
 
-    if (btnLiveDebris) {
-        btnLiveDebris.addEventListener('click', () => {
-            currentLiveMode = 'debris';
-            if (btnLiveReflectivity) btnLiveReflectivity.classList.remove('active');
-            if (btnLiveVelocity) btnLiveVelocity.classList.remove('active');
-            btnLiveDebris.classList.add('active');
-            updateLiveLegends();
-            renderLiveRadar();
+        // Toggle legends
+        ['reflectivity', 'velocity', 'debris', 'zdr', 'width'].forEach(l => {
+            const el = document.getElementById(`live-${l}-legend`);
+            if (el) el.style.display = l === mode ? 'block' : 'none';
         });
-    }
+
+        if (liveCanvasLayer) {
+            liveCanvasLayer._needsFullRedraw = true;
+            requestLiveCanvasDraw();
+        }
+    };
+
+    if (btnLiveReflectivity) btnLiveReflectivity.onclick = () => setLiveView('reflectivity');
+    if (btnLiveVelocity) btnLiveVelocity.onclick = () => setLiveView('velocity');
+    if (btnLiveDebris) btnLiveDebris.onclick = () => setLiveView('debris');
+    if (btnLiveZdr) btnLiveZdr.onclick = () => setLiveView('zdr');
+    if (btnLiveWidth) btnLiveWidth.onclick = () => setLiveView('width');
 
     if (btnLiveBuffered) {
         btnLiveBuffered.addEventListener('click', () => {
@@ -1876,12 +1904,23 @@ const RadarCanvasLayer = L.Layer.extend({
         try {
             let moment = null;
             let elev = null;
-            for (let e = 1; e <= 22; e++) {
+
+            if (selectedLiveElevation === 'auto') {
+                for (let e = 1; e <= 22; e++) {
+                    if (radial.elevations[e] && radial.elevations[e][momentKey]) {
+                        moment = radial.elevations[e][momentKey];
+                        if (moment && moment.moment_data) {
+                            elev = e;
+                            break;
+                        }
+                    }
+                }
+            } else {
+                const e = parseInt(selectedLiveElevation);
                 if (radial.elevations[e] && radial.elevations[e][momentKey]) {
                     moment = radial.elevations[e][momentKey];
                     if (moment && moment.moment_data) {
                         elev = e;
-                        break;
                     }
                 }
             }

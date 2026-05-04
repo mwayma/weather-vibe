@@ -408,5 +408,14 @@ body, html {
 }
 
 .debris-spectrum {
-    background: linear-gradient(to right, #ff00ff, #0000ff, #00ffff, #00ff00, #ffff00);
+    background: linear-gradient(to right, #000, #ff00ff, #0000ff, #00ffff, #00ff00, #ffff00);
 }
+
+.zdr-spectrum {
+    background: linear-gradient(to right, #777, #0000f6, #00ff00, #ffff00, #ff0000, #ff00ff);
+}
+
+.width-spectrum {
+    background: linear-gradient(to right, #777, #0000a8, #00ecec, #01a0f6, #00ff00, #ffff00, #ff0000);
+}
+

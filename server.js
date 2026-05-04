@@ -560,7 +560,9 @@ function extractRadialData(parsed, stationId, chunkId) {
     const methodGroups = {
         reflectivity: ['getHighresReflectivity', 'getReflectivity'],
         velocity: ['getHighresVelocity', 'getVelocity'],
-        debris: ['getHighresCorrelationCoefficient', 'getCorrelationCoefficient']
+        debris: ['getHighresCorrelationCoefficient', 'getCorrelationCoefficient'],
+        zdr: ['getHighresDifferentialReflectivity', 'getDifferentialReflectivity'],
+        width: ['getHighresSpectrumWidth', 'getSpectrumWidth']
     };
 
     let hasAnyData = false;
