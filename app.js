@@ -1110,19 +1110,60 @@ function setLiveLatencyMode(mode) {
 }
 
 function applyLiveRadial(roundedAz, radial) {
-    if (!liveRadarData) {
-        liveRadarData = { radialsMap: new Map(), azimuths: [], lastUpdated: [], revealedUpdate: [], timestamps: [], elevations: {} };
+    if (!liveRadarData || !liveRadarData.radialsMap) {
+        liveRadarData = { 
+            radialsMap: new Map(), 
+            stationId: selectedRadarId,
+            azimuths: [],
+            lastUpdated: [],
+            revealedUpdate: [],
+            timestamps: [],
+            elevations: {}
+        };
     }
-    if (!liveRadarData.radialsMap) liveRadarData.radialsMap = new Map();
+    
+    const stationId = getCurrentStationId();
+    const station = findStation(stationId);
+    if (station) {
+        radial.stationLat = station.lat;
+        radial.stationLon = station.lon;
+    }
 
     radial.azimuth = normalizeAzimuth(radial.azimuth);
     radial.revealedUpdate = 1;
-    liveRadarData.radialsMap.set(roundedAz, radial);
+    
+    // Key by both station and azimuth to allow overlapping data but overwrite for the same station
+    const mapKey = `${stationId}_${roundedAz}`;
+    
+    if (!liveRadarData.radialsMap.has(mapKey)) {
+        liveRadarData.radialsMap.set(mapKey, {
+            azimuth: radial.azimuth,
+            timestamp: radial.timestamp,
+            elevations: {},
+            stationLat: station ? station.lat : null,
+            stationLon: station ? station.lon : null
+        });
+    }
+
+    const existingRadial = liveRadarData.radialsMap.get(mapKey);
+    existingRadial.timestamp = radial.timestamp;
+    existingRadial.revealedUpdate = 1;
+
+    // Merge new elevations into the existing radial
+    if (radial.elevations) {
+        for (const [e, products] of Object.entries(radial.elevations)) {
+            if (!existingRadial.elevations[e]) existingRadial.elevations[e] = {};
+            for (const [product, moment] of Object.entries(products)) {
+                existingRadial.elevations[e][product] = moment;
+            }
+        }
+    }
 
     if (!liveCanvasLayer) {
         renderLiveRadar();
     } else {
-        liveCanvasLayer._drawRadialToOffscreen(radial);
+        // Incremental draw is smoother and prevents full-screen flickers
+        liveCanvasLayer._drawRadialToOffscreen(existingRadial);
         requestLiveCanvasDraw();
     }
 }
