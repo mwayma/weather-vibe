@@ -28,8 +28,8 @@ const stationCache = new Map(); // stationId -> liveRadarData object
 
 const parser = new XMLParser();
 const VOLUME_DISCOVERY_INTERVAL_MS = 30000;
-const RADIAL_BATCH_SIZE = 20;
-const RADIAL_BATCH_SPACING_MS = 35;
+const RADIAL_BATCH_SIZE = 10;
+const RADIAL_BATCH_SPACING_MS = 0;
 const MAX_CLIENT_BUFFERED_BYTES = 10 * 1024 * 1024;
 const MAX_CLIENT_BUFFERED_BYTES_BEFORE_CLOSE = 50 * 1024 * 1024;
 
