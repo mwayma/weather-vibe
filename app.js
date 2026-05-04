@@ -1894,6 +1894,10 @@ const RadarCanvasLayer = L.Layer.extend({
         }
 
         if (!center || isNaN(center.x) || isNaN(center.y) || !pixelsPerKm || isNaN(pixelsPerKm)) {
+            if (!window._hasLoggedDrawError) {
+                console.warn('Cannot draw radial: invalid coords or scale', { center, pixelsPerKm });
+                window._hasLoggedDrawError = true;
+            }
             return;
         }
 
@@ -1928,9 +1932,27 @@ const RadarCanvasLayer = L.Layer.extend({
             if (elev) lastRenderedRadialElevation = elev;
 
             if (moment && moment.moment_data) {
+                // DEBUG
+                if (!window._hasLoggedRadial) {
+                    console.log('Drawing first radial:', {
+                        azimuth: radial.azimuth,
+                        elev: elev,
+                        gate_size: moment.gate_size,
+                        first_gate: moment.first_gate,
+                        data_len: moment.moment_data.length,
+                        sample_val: moment.moment_data[100],
+                        center: center,
+                        pixelsPerKm: pixelsPerKm
+                    });
+                    window._hasLoggedRadial = true;
+                }
+
                 // If first_gate is > 1000, it's likely in meters. Convert to km.
                 const firstGateActual = (moment.first_gate > 1000) ? moment.first_gate / 1000 : moment.first_gate;
-                const gateSizeKm = moment.gate_size / 1000;
+                
+                // If gate_size is >= 1, it's likely in meters. Convert to km.
+                const gateSizeKm = (moment.gate_size >= 1) ? moment.gate_size / 1000 : moment.gate_size;
+                
                 const data = moment.moment_data;
 
                 let startJ = null;
