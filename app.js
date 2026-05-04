@@ -823,25 +823,16 @@ function initWebSocket() {
 
             console.log('Received initial state for', message.stationId);
             lastLiveDataMessageAt = Date.now();
-            clearLivePlaybackState();
-            if (liveCanvasLayer) liveCanvasLayer._clearOffscreen();
+            
+            // Only clear if this is a genuinely new station or we have no data
+            const isNewStation = !liveRadarData || liveRadarData.stationId !== message.stationId;
+            if (isNewStation) {
+                clearLivePlaybackState();
+                if (liveCanvasLayer) liveCanvasLayer._clearOffscreen();
+            }
+            
             liveRadarData = message.data;
             if (liveRadarData) {
-                // Optimize memory: Convert moment_data to Uint8Array
-                if (liveRadarData.elevations) {
-                    for (const products of Object.values(liveRadarData.elevations)) {
-                        for (const momentsArray of Object.values(products)) {
-                            if (Array.isArray(momentsArray)) {
-                                momentsArray.forEach(m => {
-                                    if (m && m.moment_data && Array.isArray(m.moment_data)) {
-                                        m.moment_data = new Uint8Array(m.moment_data);
-                                    }
-                                });
-                            }
-                        }
-                    }
-                }
-
                 // Initialize metadata arrays if missing
                 if (!liveRadarData.lastUpdated) {
                     liveRadarData.lastUpdated = new Array(liveRadarData.azimuths.length).fill(Date.now());
@@ -897,7 +888,7 @@ function initWebSocket() {
                 const roundedAz = Math.round(radial.azimuth * 10) / 10;
                 
                 // Optimize memory: Convert moment_data to Uint8Array
-                if (radial.elevations) {
+                /* if (radial.elevations) {
                     for (const products of Object.values(radial.elevations)) {
                         for (const m of Object.values(products)) {
                             if (m && m.moment_data && Array.isArray(m.moment_data)) {
@@ -905,7 +896,7 @@ function initWebSocket() {
                             }
                         }
                     }
-                }
+                } */
                 radial.azimuth = normalizeAzimuth(radial.azimuth);
                 return { radial, roundedAz };
             });
@@ -1870,7 +1861,7 @@ const RadarCanvasLayer = L.Layer.extend({
             if (moment && moment.moment_data) {
                 const firstGateKm = moment.first_gate / 1000;
                 const firstGateActual = firstGateKm < 1 ? moment.first_gate : firstGateKm;
-                const gateSizeKm = moment.gate_size;
+                const gateSizeKm = moment.gate_size / 1000;
                 const data = moment.moment_data;
 
                 let startJ = null;
