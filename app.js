@@ -1160,6 +1160,17 @@ function clearLivePlaybackState() {
     lastReceivedRadialElevations = null;
 }
 
+function destroyLiveCanvasLayer() {
+    if (!liveCanvasLayer) return;
+    try {
+        liveTrackingLayer.removeLayer(liveCanvasLayer);
+    } catch (e) {
+        console.warn('Unable to remove live canvas layer:', e);
+    }
+    liveCanvasLayer = null;
+    liveCanvasDrawPending = false;
+}
+
 function setLiveLatencyMode(mode) {
     liveLatencyMode = mode === 'low-latency' ? 'low-latency' : 'buffered';
     bufferedRadialQueue = [];
@@ -1171,10 +1182,13 @@ function setLiveLatencyMode(mode) {
 }
 
 function applyLiveRadial(roundedAz, radial) {
+    const stationId = getCurrentStationId();
+    if (radial.stationId && radial.stationId !== stationId) return;
+
     if (!liveRadarData || !liveRadarData.radialsMap) {
         liveRadarData = { 
             radialsMap: new Map(), 
-            stationId: selectedRadarId,
+            stationId: stationId,
             azimuths: [],
             lastUpdated: [],
             revealedUpdate: [],
@@ -1183,7 +1197,6 @@ function applyLiveRadial(roundedAz, radial) {
         };
     }
     
-    const stationId = getCurrentStationId();
     const station = findStation(stationId);
     if (station) {
         radial.stationLat = station.lat;
@@ -1749,7 +1762,7 @@ function updateRadarLayersBasedOnMode() {
     
     if (currentRadarMode !== 'live-tracking') {
         liveRadarData = null;
-        liveCanvasLayer = null;
+        destroyLiveCanvasLayer();
         if (socket && socket.readyState === WebSocket.OPEN) {
             socket.send(JSON.stringify({ action: 'unsubscribe' }));
         }
@@ -1809,10 +1822,7 @@ function startLiveTracking() {
     // Fix memory leak: Remove old layers from liveTrackingLayer
     if (radarStationMarker) { liveTrackingLayer.removeLayer(radarStationMarker); radarStationMarker = null; }
     if (azimuthLine) { liveTrackingLayer.removeLayer(azimuthLine); azimuthLine = null; }
-
-    if (liveCanvasLayer) {
-        liveCanvasLayer._clearOffscreen();
-    }
+    destroyLiveCanvasLayer();
 
     const station = NEXRAD_STATIONS.find(s => s.id === selectedRadarId);
     if (!station) return;
