@@ -1905,16 +1905,43 @@ const RadarCanvasLayer = L.Layer.extend({
             let elev = null;
 
             if (selectedLiveElevation === 'auto') {
-                for (let e = 1; e <= 22; e++) {
-                    if (radial.elevations[e] && radial.elevations[e][momentKey]) {
-                        moment = radial.elevations[e][momentKey];
-                        if (moment && moment.moment_data) {
-                            elev = e;
-                            break;
+                if (currentLiveMode === 'reflectivity') {
+                    // COMPOSITE REFLECTIVITY: Max value across all available tilts
+                    let compositeData = null;
+                    let bestMoment = null;
+                    
+                    for (let e = 1; e <= 22; e++) {
+                        const m = radial.elevations[e]?.reflectivity;
+                        if (m && m.moment_data) {
+                            if (!compositeData) {
+                                compositeData = new Float32Array(m.moment_data.length).fill(-Infinity);
+                                bestMoment = m;
+                                elev = 'Comp';
+                            }
+                            for (let i = 0; i < m.moment_data.length; i++) {
+                                if (m.moment_data[i] > compositeData[i]) {
+                                    compositeData[i] = m.moment_data[i];
+                                }
+                            }
+                        }
+                    }
+                    if (bestMoment) {
+                        moment = { ...bestMoment, moment_data: compositeData };
+                    }
+                } else {
+                    // BASE VIEW: Lowest available tilt (usually 0.5°)
+                    for (let e = 1; e <= 22; e++) {
+                        if (radial.elevations[e] && radial.elevations[e][momentKey]) {
+                            moment = radial.elevations[e][momentKey];
+                            if (moment && moment.moment_data) {
+                                elev = e;
+                                break;
+                            }
                         }
                     }
                 }
             } else {
+                // TILT-LOCKED VIEW: Only show the user-selected elevation
                 const e = parseInt(selectedLiveElevation);
                 if (radial.elevations[e] && radial.elevations[e][momentKey]) {
                     moment = radial.elevations[e][momentKey];
