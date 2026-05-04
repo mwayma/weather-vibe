@@ -830,16 +830,12 @@ function initWebSocket() {
             if (liveCanvasLayer) liveCanvasLayer._clearOffscreen();
             liveRadarData = message.data;
             if (liveRadarData) {
-                // Optimize memory: Convert moment_data to Uint8Array
+                // Keep signed/decimal radar products intact while avoiding boxed arrays.
                 if (liveRadarData.elevations) {
                     for (const products of Object.values(liveRadarData.elevations)) {
                         for (const momentsArray of Object.values(products)) {
                             if (Array.isArray(momentsArray)) {
-                                momentsArray.forEach(m => {
-                                    if (m && m.moment_data && Array.isArray(m.moment_data)) {
-                                        m.moment_data = new Uint8Array(m.moment_data);
-                                    }
-                                });
+                                momentsArray.forEach(normalizeMomentData);
                             }
                         }
                     }
@@ -908,13 +904,11 @@ function initWebSocket() {
             const radials = message.radials.map(radial => {
                 const roundedAz = Math.round(radial.azimuth * 10) / 10;
                 
-                // Optimize memory: Convert moment_data to Uint8Array
+                // Keep signed/decimal radar products intact while avoiding boxed arrays.
                 if (radial.elevations) {
                     for (const products of Object.values(radial.elevations)) {
                         for (const m of Object.values(products)) {
-                            if (m && m.moment_data && Array.isArray(m.moment_data)) {
-                                m.moment_data = new Uint8Array(m.moment_data);
-                            }
+                            normalizeMomentData(m);
                         }
                     }
                 }
@@ -1004,6 +998,12 @@ function getDisplayAzimuth(azimuth) {
     const normalized = normalizeAzimuth(azimuth);
     const quantized = Math.round(normalized / LIVE_RADIAL_DISPLAY_RESOLUTION_DEG) * LIVE_RADIAL_DISPLAY_RESOLUTION_DEG;
     return normalizeAzimuth(quantized);
+}
+
+function normalizeMomentData(moment) {
+    if (moment?.moment_data && Array.isArray(moment.moment_data)) {
+        moment.moment_data = new Float32Array(moment.moment_data);
+    }
 }
 
 function requestLiveCanvasDraw() {
