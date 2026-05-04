@@ -979,6 +979,12 @@ setInterval(() => {
     }
 }, 1000);
 
+function findStation(id) {
+    if (!id || !NEXRAD_STATIONS) return null;
+    const normalized = id.length === 3 ? 'K' + id.toUpperCase() : id.toUpperCase();
+    return NEXRAD_STATIONS.find(s => s.id === normalized || s.id === normalized.slice(1));
+}
+
 function normalizeAzimuth(azimuth) {
     return ((Number(azimuth) % 360) + 360) % 360;
 }
