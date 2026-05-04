@@ -826,6 +826,11 @@ function initWebSocket() {
             console.log('Received initial state for', message.stationId);
             lastLiveDataMessageAt = Date.now();
             
+            // Sync global selection if it was unset or generic
+            if (!selectedRadarId || selectedRadarId === 'composite') {
+                selectedRadarId = message.stationId;
+            }
+            
             // Initialize if needed
             if (!liveRadarData || !liveRadarData.radialsMap) {
                 liveRadarData = { radialsMap: new Map(), stationId: message.stationId };
@@ -838,7 +843,7 @@ function initWebSocket() {
             
             const incomingData = message.data;
             if (incomingData && incomingData.azimuths) {
-                const station = NEXRAD_STATIONS.find(s => s.id === message.stationId);
+                const station = findStation(message.stationId);
                 
                 incomingData.azimuths.forEach((az, i) => {
                     const rounded = Math.round(az * 10) / 10;
@@ -958,6 +963,12 @@ setInterval(() => {
         subscribeToLiveStation();
     }
 }, 1000);
+
+function findStation(id) {
+    if (!id || !NEXRAD_STATIONS) return null;
+    const normalized = id.length === 3 ? 'K' + id.toUpperCase() : id.toUpperCase();
+    return NEXRAD_STATIONS.find(s => s.id === normalized || s.id === normalized.slice(1));
+}
 
 function normalizeAzimuth(azimuth) {
     return ((Number(azimuth) % 360) + 360) % 360;
@@ -1094,7 +1105,7 @@ function applyLiveRadial(roundedAz, radial) {
         liveRadarData = { radialsMap: new Map(), stationId: selectedRadarId };
     }
     
-    const station = NEXRAD_STATIONS.find(s => s.id === selectedRadarId);
+    const station = findStation(selectedRadarId);
     if (station) {
         radial.stationLat = station.lat;
         radial.stationLon = station.lon;
@@ -1128,7 +1139,7 @@ function mergeRealTimeData(newData) {
     }
 
     const now = Date.now();
-    const station = NEXRAD_STATIONS.find(s => s.id === selectedRadarId);
+    const station = findStation(selectedRadarId);
 
     newData.azimuths.forEach((az, i) => {
         const roundedAz = Math.round(az * 10) / 10;
@@ -1568,7 +1579,7 @@ function updateVelocityLayer() {
         radarVelocity = L.layerGroup(); 
         return;
     } else {
-        const station = NEXRAD_STATIONS.find(s => s.id === selectedRadarId);
+        const station = findStation(selectedRadarId);
         if (!station) { radarVelocity = L.layerGroup(); return; }
         const specificWmsUrl = 'https://mesonet.agron.iastate.edu/cgi-bin/wms/nexrad/ridge.cgi';
         const sectorId = station.id.length === 4 ? station.id.substring(1).toUpperCase() : station.id.toUpperCase();
@@ -1665,7 +1676,10 @@ function startLiveTracking() {
     }
 
     let stationId = selectedRadarId;
-    if (stationId.length === 3) stationId = 'K' + stationId;
+    if (stationId && stationId.length === 3) {
+        stationId = 'K' + stationId;
+        selectedRadarId = stationId; // Normalize global state
+    }
 
     subscribeToLiveStation();
 
@@ -1684,11 +1698,15 @@ function startLiveTracking() {
     lastLiveStatusUpdate = 0;
     lastSweepTime = performance.now();
 
+    if (liveCanvasLayer) {
+        liveCanvasLayer._updateCachedCoords();
+    }
+
     // Fix memory leak: Remove old layers from liveTrackingLayer
     if (radarStationMarker) { liveTrackingLayer.removeLayer(radarStationMarker); radarStationMarker = null; }
     if (azimuthLine) { liveTrackingLayer.removeLayer(azimuthLine); azimuthLine = null; }
 
-    const station = NEXRAD_STATIONS.find(s => s.id === selectedRadarId);
+    const station = findStation(selectedRadarId);
     if (!station) return;
 
     radarStationMarker = L.circleMarker([station.lat, station.lon], {
@@ -1801,7 +1819,8 @@ const RadarCanvasLayer = L.Layer.extend({
         return centerLayer.distanceTo(refLayer);
     },
     _updateCachedCoords: function() {
-        const station = NEXRAD_STATIONS.find(s => s.id === selectedRadarId);
+        const stationId = getCurrentStationId();
+        const station = findStation(stationId);
         if (!station || !this._topLeft) return;
 
         const dpr = window.devicePixelRatio || 1;
