@@ -27,7 +27,7 @@ const stationState = new Map(); // stationId -> { lastVolume, lastChunkKey, head
 const stationCache = new Map(); // stationId -> liveRadarData object
 
 const parser = new XMLParser();
-const VOLUME_DISCOVERY_INTERVAL_MS = 30000;
+const VOLUME_DISCOVERY_INTERVAL_MS = 15000;
 const RADIAL_BATCH_SIZE = 10;
 const RADIAL_BATCH_SPACING_MS = 0;
 const MAX_CLIENT_BUFFERED_BYTES = 10 * 1024 * 1024;
@@ -406,7 +406,9 @@ async function pollChunks(stationId) {
     const now = Date.now();
     const lockKey = `lock_${stationId}`;
     const lastPoll = stationState.get(lockKey) || 0;
-    if (pollingLocks.has(stationId) && (now - lastPoll) < 60000) return;
+    
+    // Reduce internal throttle to 15s to be more responsive to S3 updates
+    if (pollingLocks.has(stationId) && (now - lastPoll) < 15000) return;
     
     pollingLocks.add(stationId);
     stationState.set(lockKey, now);
@@ -512,6 +514,13 @@ async function pollChunks(stationId) {
                             mergeRadialsIntoCache(stationId, radials);
                             await radialBatcher.enqueue(radials);
                         }
+
+                        // Trigger immediate volume discovery if we reach elevation 15 or see an end chunk
+                        if (extracted?.maxElevation >= 15 || chunkId.includes('_E') || chunkId.includes('-E')) {
+                            console.log(`[${stationId}] End of volume scan detected (Elev ${extracted?.maxElevation || '?'}). Priming for new volume discovery...`);
+                            state.lastVolumeDiscovery = 0; // Reset discovery timer
+                            stationState.set(lockKey, 0); // Allow immediate re-poll
+                        }
                     } catch (e) {
                         console.warn(`[${stationId}] Chunk ${chunk.Key} error: ${e.message}`);
                         state.processedChunks.add(chunk.Key);
@@ -547,6 +556,7 @@ function extractRadialData(parsed, stationId, chunkId) {
     };
 
     let hasAnyData = false;
+    let maxElevationFound = 0;
     for (const e of elevations) {
         try {
             parsed.setElevation(e);
@@ -578,6 +588,7 @@ function extractRadialData(parsed, stationId, chunkId) {
                 if (moments && moments.some(m => m && m.moment_data)) {
                     hasAnyData = true;
                     elevationHasData = true;
+                    maxElevationFound = Math.max(maxElevationFound, e);
                     elevationProducts[productKey] = moments.map(m => m ? {
                         moment_data: Array.from(m.moment_data),
                         first_gate: m.first_gate,
@@ -602,7 +613,8 @@ function extractRadialData(parsed, stationId, chunkId) {
     return {
         azimuths: azimuths || [],
         timestamps: timestamps || [],
-        elevations: extractedElevations
+        elevations: extractedElevations,
+        maxElevation: maxElevationFound
     };
 }
 
