@@ -855,6 +855,7 @@ function initWebSocket() {
                 
                 incomingData.azimuths.forEach((az, i) => {
                     const rounded = Math.round(az * 10) / 10;
+                    const mapKey = `${message.stationId}_${rounded}`;
                     const radialElevations = {};
                     for (const [e, products] of Object.entries(incomingData.elevations)) {
                         radialElevations[e] = {};
@@ -862,7 +863,7 @@ function initWebSocket() {
                             radialElevations[e][product] = moments[i];
                         }
                     }
-                    liveRadarData.radialsMap.set(rounded, {
+                    liveRadarData.radialsMap.set(mapKey, {
                         azimuth: normalizeAzimuth(az),
                         timestamp: (incomingData.timestamps && incomingData.timestamps[i]) || Date.now(),
                         revealedUpdate: 1,
@@ -1113,7 +1114,8 @@ function applyLiveRadial(roundedAz, radial) {
         liveRadarData = { radialsMap: new Map(), stationId: selectedRadarId };
     }
     
-    const station = findStation(selectedRadarId);
+    const stationId = getCurrentStationId();
+    const station = findStation(stationId);
     if (station) {
         radial.stationLat = station.lat;
         radial.stationLon = station.lon;
@@ -1121,7 +1123,10 @@ function applyLiveRadial(roundedAz, radial) {
 
     radial.azimuth = normalizeAzimuth(radial.azimuth);
     radial.revealedUpdate = 1;
-    liveRadarData.radialsMap.set(roundedAz, radial);
+    
+    // Key by both station and azimuth to allow overlapping data but overwrite for the same station
+    const mapKey = `${stationId}_${roundedAz}`;
+    liveRadarData.radialsMap.set(mapKey, radial);
 
     if (!liveCanvasLayer) {
         renderLiveRadar();
@@ -1147,14 +1152,16 @@ function mergeRealTimeData(newData) {
     }
 
     const now = Date.now();
-    const station = findStation(selectedRadarId);
+    const stationId = getCurrentStationId();
+    const station = findStation(stationId);
 
     newData.azimuths.forEach((az, i) => {
         const roundedAz = Math.round(az * 10) / 10;
+        const mapKey = `${stationId}_${roundedAz}`;
         const timestamp = (newData.timestamps && newData.timestamps[i]) ? newData.timestamps[i] : now;
 
-        if (!liveRadarData.radialsMap.has(roundedAz)) {
-            liveRadarData.radialsMap.set(roundedAz, {
+        if (!liveRadarData.radialsMap.has(mapKey)) {
+            liveRadarData.radialsMap.set(mapKey, {
                 azimuth: az,
                 timestamp: timestamp,
                 elevations: {},
@@ -1163,7 +1170,7 @@ function mergeRealTimeData(newData) {
             });
         }
 
-        const radial = liveRadarData.radialsMap.get(roundedAz);
+        const radial = liveRadarData.radialsMap.get(mapKey);
         radial.timestamp = timestamp;
 
         for (const [e, elevations] of Object.entries(newData.elevations)) {
