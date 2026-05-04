@@ -1346,7 +1346,6 @@ function setupRadarButtons() {
         });
     }
 
-    const btnLiveDebris = document.getElementById('btn-live-debris');
     const btnLiveZdr = document.getElementById('btn-live-zdr');
     const btnLiveWidth = document.getElementById('btn-live-width');
     const elevSelect = document.getElementById('live-elevation-select');
