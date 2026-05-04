@@ -440,7 +440,15 @@ async function pollChunks(stationId) {
         if (!latestVolPrefix) return;
         stationState.set(stationId, state);
 
+        // POLL LAST TWO VOLUMES to catch trailing tilts of the finishing scan
+        const sortedPrefixes = [...commonPrefixes].sort((a, b) => {
+            const numA = parseInt(a.Prefix.split('/')[1]);
+            const numB = parseInt(b.Prefix.split('/')[1]);
+            return numA - numB;
+        });
+        const latestIdx = sortedPrefixes.findIndex(p => p.Prefix === latestVolPrefix);
         const volumesToPoll = [latestVolPrefix];
+        if (latestIdx > 0) volumesToPoll.unshift(sortedPrefixes[latestIdx - 1].Prefix);
 
         const radialBatcher = createRadialMicrobatcher(stationId);
 
@@ -514,8 +522,9 @@ async function pollChunks(stationId) {
                             broadcastRadialBatches(stationId, radials);
                         }
 
-                        // Trigger immediate volume discovery if we reach elevation 15 or see an end chunk
-                        if (extracted?.maxElevation >= 15 || chunkId.includes('_E') || chunkId.includes('-E')) {
+                        // Trigger immediate volume discovery if we reach a high elevation or see an end chunk
+                        // We use 20 as the threshold to catch most VCPs
+                        if (extracted?.maxElevation >= 20 || chunkId.includes('_E') || chunkId.includes('-E')) {
                             console.log(`[${stationId}] End of volume scan detected (Elev ${extracted?.maxElevation || '?'}). Priming for new volume discovery...`);
                             state.lastVolumeDiscovery = 0; // Reset discovery timer
                             stationState.set(lockKey, 0); // Allow immediate re-poll
@@ -543,7 +552,7 @@ async function pollChunks(stationId) {
 }
 
 function extractRadialData(parsed, stationId, chunkId) {
-    const elevations = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+    const elevations = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22];
     let azimuths = null;
     let timestamps = null;
     const extractedElevations = {};
