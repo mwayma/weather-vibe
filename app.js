@@ -833,7 +833,15 @@ function initWebSocket() {
             
             // Initialize if needed
             if (!liveRadarData || !liveRadarData.radialsMap) {
-                liveRadarData = { radialsMap: new Map(), stationId: message.stationId };
+                liveRadarData = { 
+                    radialsMap: new Map(), 
+                    stationId: message.stationId,
+                    azimuths: [],
+                    lastUpdated: [],
+                    revealedUpdate: [],
+                    timestamps: [],
+                    elevations: {}
+                };
                 clearLivePlaybackState();
                 if (liveCanvasLayer) liveCanvasLayer._clearOffscreen();
             }
@@ -1859,27 +1867,34 @@ const RadarCanvasLayer = L.Layer.extend({
 
         const ctx = this._offscreenCtx;
         const dpr = window.devicePixelRatio || 1;
-
+        
         let center = this._cachedCenter;
         let pixelsPerKm = this._cachedPixelsPerKm;
 
-        if (radial.stationLat && radial.stationLon) {
-            const cacheKey = `${radial.stationLat},${radial.stationLon}`;
-            if (!this._stationCenterCache) this._stationCenterCache = new Map();
+        const radialLat = radial.stationLat;
+        const radialLon = radial.stationLon;
 
+        if (radialLat && radialLon) {
+            const cacheKey = `${radialLat},${radialLon}`;
+            if (!this._stationCenterCache) this._stationCenterCache = new Map();
+            
             if (this._stationCenterCache.has(cacheKey)) {
                 const cached = this._stationCenterCache.get(cacheKey);
                 center = cached.center;
                 pixelsPerKm = cached.pixelsPerKm;
             } else {
-                const centerLayer = map.latLngToLayerPoint([radial.stationLat, radial.stationLon]);
+                const centerLayer = map.latLngToLayerPoint([radialLat, radialLon]);
                 center = {
                     x: (centerLayer.x - this._topLeft.x) * dpr,
                     y: (centerLayer.y - this._topLeft.y) * dpr
                 };
-                pixelsPerKm = this._getPixelsPerKm(radial.stationLat, radial.stationLon) * dpr;
+                pixelsPerKm = this._getPixelsPerKm(radialLat, radialLon) * dpr;
                 this._stationCenterCache.set(cacheKey, { center, pixelsPerKm });
             }
+        }
+
+        if (!center || isNaN(center.x) || isNaN(center.y) || !pixelsPerKm || isNaN(pixelsPerKm)) {
+            return;
         }
 
         let momentKey = 'reflectivity';
@@ -1913,8 +1928,8 @@ const RadarCanvasLayer = L.Layer.extend({
             if (elev) lastRenderedRadialElevation = elev;
 
             if (moment && moment.moment_data) {
-                const firstGateKm = moment.first_gate / 1000;
-                const firstGateActual = firstGateKm < 1 ? moment.first_gate : firstGateKm;
+                // If first_gate is > 1000, it's likely in meters. Convert to km.
+                const firstGateActual = (moment.first_gate > 1000) ? moment.first_gate / 1000 : moment.first_gate;
                 const gateSizeKm = moment.gate_size / 1000;
                 const data = moment.moment_data;
 
