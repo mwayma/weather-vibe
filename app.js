@@ -1197,13 +1197,12 @@ function mergeRealTimeData(newData) {
                 radial.elevations[e][product] = moments[i];
             }
         }
-        });
+    });
 
-        if (liveCanvasLayer) {
+    if (liveCanvasLayer) {
         liveCanvasLayer._needsFullRedraw = true;
         requestLiveCanvasDraw();
-        }
-        }
+    }
 
     // CRITICAL: Ensure the layer exists and is ready to render
     if (!liveCanvasLayer) {
