@@ -1111,7 +1111,15 @@ function setLiveLatencyMode(mode) {
 
 function applyLiveRadial(roundedAz, radial) {
     if (!liveRadarData || !liveRadarData.radialsMap) {
-        liveRadarData = { radialsMap: new Map(), stationId: selectedRadarId };
+        liveRadarData = { 
+            radialsMap: new Map(), 
+            stationId: selectedRadarId,
+            azimuths: [],
+            lastUpdated: [],
+            revealedUpdate: [],
+            timestamps: [],
+            elevations: {}
+        };
     }
     
     const stationId = getCurrentStationId();
@@ -1128,10 +1136,20 @@ function applyLiveRadial(roundedAz, radial) {
     const mapKey = `${stationId}_${roundedAz}`;
     liveRadarData.radialsMap.set(mapKey, radial);
 
+    // Prune old data (older than 10 mins) to keep visuals clean and memory low
+    const now = Date.now();
+    const PRUNE_THRESHOLD_MS = 600000; 
+    for (const [key, r] of liveRadarData.radialsMap.entries()) {
+        if (now - r.timestamp > PRUNE_THRESHOLD_MS) {
+            liveRadarData.radialsMap.delete(key);
+        }
+    }
+
     if (!liveCanvasLayer) {
         renderLiveRadar();
     } else {
-        liveCanvasLayer._drawRadialToOffscreen(radial);
+        // Trigger a full redraw instead of incremental drawing to prevent smearing
+        liveCanvasLayer._needsFullRedraw = true;
         requestLiveCanvasDraw();
     }
 }
@@ -1179,7 +1197,13 @@ function mergeRealTimeData(newData) {
                 radial.elevations[e][product] = moments[i];
             }
         }
-    });
+        });
+
+        if (liveCanvasLayer) {
+        liveCanvasLayer._needsFullRedraw = true;
+        requestLiveCanvasDraw();
+        }
+        }
 
     // CRITICAL: Ensure the layer exists and is ready to render
     if (!liveCanvasLayer) {
