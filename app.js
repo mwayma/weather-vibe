@@ -761,6 +761,7 @@ const LIVE_BUFFER_DELAY_MS = 15000;
 const LIVE_BUFFER_MAX_EXTRA_LAG_MS = 600000; // 10 minutes history allowed in buffer
 const MAX_BUFFERED_RADIALS_PER_FRAME = 40;
 const MAX_BUFFERED_QUEUE_RADIALS = 5000;
+const LIVE_RADIAL_DISPLAY_RESOLUTION_DEG = 0.5;
 
 let socket = null;
 function getCurrentStationId() {
@@ -859,7 +860,8 @@ function initWebSocket() {
                 // Build the radialsMap for future incremental updates
                 liveRadarData.radialsMap = new Map();
                 liveRadarData.azimuths.forEach((az, i) => {
-                    const rounded = Math.round(az * 10) / 10;
+                    const displayAzimuth = getDisplayAzimuth(az);
+                    const mapKey = `${message.stationId || currentStationId}_${displayAzimuth.toFixed(1)}`;
                     const radialElevations = {};
                     for (const [e, products] of Object.entries(liveRadarData.elevations)) {
                         radialElevations[e] = {};
@@ -867,12 +869,27 @@ function initWebSocket() {
                             radialElevations[e][product] = moments[i];
                         }
                     }
-                    liveRadarData.radialsMap.set(rounded, {
-                        azimuth: az,
-                        timestamp: liveRadarData.timestamps[i],
-                        revealedUpdate: liveRadarData.revealedUpdate[i],
-                        elevations: radialElevations
-                    });
+                    const existing = liveRadarData.radialsMap.get(mapKey);
+                    if (!existing) {
+                        liveRadarData.radialsMap.set(mapKey, {
+                            azimuth: displayAzimuth,
+                            sourceAzimuth: normalizeAzimuth(az),
+                            timestamp: liveRadarData.timestamps[i],
+                            revealedUpdate: liveRadarData.revealedUpdate[i],
+                            elevations: radialElevations,
+                            isNewDisplayRay: true
+                        });
+                    } else {
+                        existing.timestamp = Math.max(existing.timestamp || 0, liveRadarData.timestamps[i] || 0);
+                        existing.sourceAzimuth = normalizeAzimuth(az);
+                        existing.revealedUpdate = liveRadarData.revealedUpdate[i];
+                        for (const [e, products] of Object.entries(radialElevations)) {
+                            if (!existing.elevations[e]) existing.elevations[e] = {};
+                            for (const [product, moment] of Object.entries(products)) {
+                                if (moment) existing.elevations[e][product] = moment;
+                            }
+                        }
+                    }
                 });
             }
             if (liveCanvasLayer) liveCanvasLayer._needsFullRedraw = true;
@@ -938,7 +955,6 @@ function initWebSocket() {
             liveRadarData = { radialsMap: new Map(), azimuths: [], lastUpdated: [], revealedUpdate: [], timestamps: [], elevations: {} };
             clearLivePlaybackState();
             window._lastSweepAngle = currentAngle;
-            if (liveCanvasLayer) liveCanvasLayer._clearOffscreen();
             requestLiveCanvasDraw();
         } else if (message.type === 'status') {
             console.log('WebSocket Status:', message.message);
@@ -987,6 +1003,12 @@ function findStation(id) {
 
 function normalizeAzimuth(azimuth) {
     return ((Number(azimuth) % 360) + 360) % 360;
+}
+
+function getDisplayAzimuth(azimuth) {
+    const normalized = normalizeAzimuth(azimuth);
+    const quantized = Math.round(normalized / LIVE_RADIAL_DISPLAY_RESOLUTION_DEG) * LIVE_RADIAL_DISPLAY_RESOLUTION_DEG;
+    return normalizeAzimuth(quantized);
 }
 
 function requestLiveCanvasDraw() {
@@ -1114,7 +1136,7 @@ function processBufferedRadials() {
     if (ready.length === 0) return;
 
     ready.forEach(radial => {
-        const roundedAz = Math.round(radial.azimuth * 10) / 10;
+        const roundedAz = getDisplayAzimuth(radial.azimuth);
         applyLiveRadial(roundedAz, radial);
     });
 
@@ -1169,23 +1191,27 @@ function applyLiveRadial(roundedAz, radial) {
     }
 
     radial.azimuth = normalizeAzimuth(radial.azimuth);
+    const displayAzimuth = getDisplayAzimuth(radial.azimuth);
     radial.revealedUpdate = 1;
     
-    // Key by both station and azimuth to allow overlapping data but overwrite for the same station
-    const mapKey = `${stationId}_${roundedAz}`;
+    // Key by station and display azimuth so slightly offset tilts merge into one composite ray.
+    const mapKey = `${stationId}_${displayAzimuth.toFixed(1)}`;
     
     if (!liveRadarData.radialsMap.has(mapKey)) {
         liveRadarData.radialsMap.set(mapKey, {
-            azimuth: radial.azimuth,
+            azimuth: displayAzimuth,
+            sourceAzimuth: radial.azimuth,
             timestamp: radial.timestamp,
             elevations: {},
             stationLat: station ? station.lat : null,
-            stationLon: station ? station.lon : null
+            stationLon: station ? station.lon : null,
+            isNewDisplayRay: true
         });
     }
 
     const existingRadial = liveRadarData.radialsMap.get(mapKey);
     existingRadial.timestamp = radial.timestamp;
+    existingRadial.sourceAzimuth = radial.azimuth;
     existingRadial.revealedUpdate = 1;
 
     // Merge new elevations into the existing radial
@@ -1193,7 +1219,7 @@ function applyLiveRadial(roundedAz, radial) {
         for (const [e, products] of Object.entries(radial.elevations)) {
             if (!existingRadial.elevations[e]) existingRadial.elevations[e] = {};
             for (const [product, moment] of Object.entries(products)) {
-                existingRadial.elevations[e][product] = moment;
+                if (moment) existingRadial.elevations[e][product] = moment;
             }
         }
     }
@@ -1203,6 +1229,7 @@ function applyLiveRadial(roundedAz, radial) {
     } else {
         // Incremental draw is smoother and prevents full-screen flickers
         liveCanvasLayer._drawRadialToOffscreen(existingRadial);
+        existingRadial.isNewDisplayRay = false;
         requestLiveCanvasDraw();
     }
 }
@@ -1940,10 +1967,9 @@ const RadarCanvasLayer = L.Layer.extend({
         const scale = COLOR_SCALES[momentKey];
         if (!scale) return;
 
-        const arcWidthRad = ((360 / 720) * Math.PI / 180) * 2.2;
+        const arcWidthRad = (LIVE_RADIAL_DISPLAY_RESOLUTION_DEG * Math.PI / 180) * 1.15;
         const gateStep = 1;
         const azimuth = normalizeAzimuth(radial.azimuth);
-        const isReflectivityComposite = selectedLiveElevation === 'auto' && currentLiveMode === 'reflectivity';
         let moment = null;
 
         if (selectedLiveElevation === 'auto') {
@@ -1992,15 +2018,13 @@ const RadarCanvasLayer = L.Layer.extend({
         ctx.translate(center.x, center.y);
         ctx.rotate((azimuth - 90) * Math.PI / 180);
 
-        if (!isReflectivityComposite) {
-            ctx.globalCompositeOperation = 'destination-out';
-            ctx.fillStyle = 'rgba(0,0,0,1)';
-            ctx.beginPath();
-            ctx.moveTo(0, 0);
-            ctx.arc(0, 0, 500 * pixelsPerKm, -arcWidthRad / 2, arcWidthRad / 2);
-            ctx.closePath();
-            ctx.fill();
-        }
+        ctx.globalCompositeOperation = 'destination-out';
+        ctx.fillStyle = 'rgba(0,0,0,1)';
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.arc(0, 0, 500 * pixelsPerKm, -arcWidthRad / 2, arcWidthRad / 2);
+        ctx.closePath();
+        ctx.fill();
 
         ctx.globalCompositeOperation = 'source-over';
         try {
