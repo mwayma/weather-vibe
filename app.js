@@ -893,13 +893,6 @@ function initWebSocket() {
                 });
             }
             if (liveCanvasLayer) liveCanvasLayer._needsFullRedraw = true;
-            if (liveLatencyMode === 'buffered' && liveRadarData?.radialsMap) {
-                const initialRadials = Array.from(liveRadarData.radialsMap.values());
-                liveRadarData.radialsMap.clear();
-                enqueueBufferedRadials(initialRadials);
-                if (liveCanvasLayer) liveCanvasLayer._clearOffscreen();
-                processBufferedRadials();
-            }
             renderLiveRadar();
         } else if (message.type === 'radial_batch') {
             // Verify stationId
@@ -951,11 +944,13 @@ function initWebSocket() {
             updateLiveDataTimestamp(message.data);
         } else if (message.type === 'clear_data') {
             if (message.stationId && message.stationId !== currentStationId) return;
-            console.log('Server requested data clear (New Volume)');
-            liveRadarData = { radialsMap: new Map(), azimuths: [], lastUpdated: [], revealedUpdate: [], timestamps: [], elevations: {} };
-            clearLivePlaybackState();
+            console.log('Server requested soft volume transition:', message.volumeId);
             window._lastSweepAngle = currentAngle;
             requestLiveCanvasDraw();
+        } else if (message.type === 'volume_start') {
+            if (message.stationId && message.stationId !== currentStationId) return;
+            console.log('Server started new volume:', message.volumeId);
+            window._lastSweepAngle = currentAngle;
         } else if (message.type === 'status') {
             console.log('WebSocket Status:', message.message);
         } else if (message.type === 'heartbeat') {
@@ -1479,6 +1474,8 @@ function setupRadarButtons() {
         if (liveCanvasLayer) {
             liveCanvasLayer._needsFullRedraw = true;
             requestLiveCanvasDraw();
+        } else if (liveRadarData?.radialsMap?.size) {
+            renderLiveRadar();
         }
     };
 
