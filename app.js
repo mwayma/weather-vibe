@@ -4,6 +4,7 @@ const map = L.map('map', {
     minZoom: 4,
     maxZoom: 12,
     zoomControl: false,
+    preferCanvas: true,
     zoomSnap: 0.1,
     zoomDelta: 0.1,
     wheelPxPerZoomLevel: 200
@@ -27,20 +28,24 @@ const riverStyle = { color: "#0000a8", weight: 1.5, opacity: 1, interactive: fal
 const stateStyle = { color: "#ffffff", weight: 2, opacity: 0.8, fillOpacity: 0, interactive: false };
 const countyStyle = { color: "#444466", weight: 0.8, opacity: 0.5, fillOpacity: 0, interactive: false };
 
+const landRenderer = L.canvas({ pane: 'landPane', padding: 0.5 });
+const waterRenderer = L.canvas({ pane: 'waterPane', padding: 0.5 });
+const boundaryRenderer = L.canvas({ pane: 'boundaryPane', padding: 0.5 });
+
 let landLayer = null;
 let waterLayer = null;
 let riverLayer = null;
 
 // Load base land and water bodies
 fetch('data/land.json').then(res => res.json()).then(data => {
-    landLayer = L.geoJSON(data, { style: landStyle, pane: 'landPane' }).addTo(map);
+    landLayer = L.geoJSON(data, { style: landStyle, pane: 'landPane', renderer: landRenderer }).addTo(map);
 });
 fetch('data/lakes.json').then(res => res.json()).then(data => {
-    waterLayer = L.geoJSON(data, { style: waterStyle, pane: 'waterPane' });
+    waterLayer = L.geoJSON(data, { style: waterStyle, pane: 'waterPane', renderer: waterRenderer });
     if (document.getElementById('chk-water')?.checked !== false) waterLayer.addTo(map);
 });
 fetch('data/rivers.json').then(res => res.json()).then(data => {
-    riverLayer = L.geoJSON(data, { style: riverStyle, pane: 'waterPane' });
+    riverLayer = L.geoJSON(data, { style: riverStyle, pane: 'waterPane', renderer: waterRenderer });
     if (document.getElementById('chk-rivers')?.checked !== false) riverLayer.addTo(map);
 });
 
@@ -50,13 +55,13 @@ let countiesLayer = null;
 const countiesLookup = {};
 
 fetch('data/states.json').then(res => res.json()).then(data => {
-    statesLayer = L.geoJSON(data, { style: stateStyle, pane: 'boundaryPane' });
+    statesLayer = L.geoJSON(data, { style: stateStyle, pane: 'boundaryPane', renderer: boundaryRenderer });
     if (document.getElementById('chk-states')?.checked !== false) statesLayer.addTo(map);
 });
 fetch('data/counties.json').then(res => res.json()).then(data => {
     countiesData = data;
     data.features.forEach(c => { countiesLookup[c.properties.STATE + c.properties.COUNTY] = c; });
-    countiesLayer = L.geoJSON(data, { style: countyStyle, pane: 'boundaryPane' });
+    countiesLayer = L.geoJSON(data, { style: countyStyle, pane: 'boundaryPane', renderer: boundaryRenderer });
     if (document.getElementById('chk-counties')?.checked !== false) countiesLayer.addTo(map);
     if (typeof activeAlertData !== 'undefined' && activeAlertData) renderAlerts();
 });
@@ -312,6 +317,8 @@ function renderAlerts() {
 const cityLayer = L.layerGroup().addTo(map);
 let allCities = [];
 let isCitiesVisible = true;
+let cityUpdateSeq = 0;
+let lastRenderedCityKey = '';
 
 // Load local cities as baseline
 fetch('data/cities.json')
@@ -334,7 +341,8 @@ fetch('data/cities.json')
 
 const citiesWorker = new Worker('cities-worker.js');
 citiesWorker.onmessage = function(e) {
-    const { visibleMarkers } = e.data;
+    const { visibleMarkers, requestId } = e.data;
+    if (requestId && requestId !== cityUpdateSeq) return;
     renderVisibleCities(visibleMarkers);
 };
 
@@ -346,6 +354,7 @@ function updateVisibleCities() {
     const zoom = map.getZoom();
     
     const data = {
+        requestId: ++cityUpdateSeq,
         bounds: {
             south: bounds.getSouth(),
             north: bounds.getNorth(),
@@ -362,6 +371,12 @@ function updateVisibleCities() {
 }
 
 function renderVisibleCities(visibleMarkers) {
+    const cityKey = `${currentRadarMode}|` + visibleMarkers
+        .map(city => `${city.city}|${city.state}|${city.latitude}|${city.longitude}`)
+        .join(';');
+    if (cityKey === lastRenderedCityKey) return;
+    lastRenderedCityKey = cityKey;
+
     cityLayer.clearLayers();
     
     visibleMarkers.forEach(city => {
@@ -1880,7 +1895,6 @@ function startLiveTracking() {
                 applyLiveRadial(roundedAz, radial);
                 incomingRadialBuffer.delete(roundedAz);
             }
-            requestLiveCanvasDraw();
         } else if (incomingRadialBuffer.size > 0) {
             // Initialize rendering if data is waiting
             for (const [roundedAz, radial] of incomingRadialBuffer) {
@@ -1928,8 +1942,6 @@ const RadarCanvasLayer = L.Layer.extend({
         const pos = map.containerPointToLayerPoint([0, 0]);
         L.DomUtil.setPosition(this._container, pos);
         this._topLeft = pos;
-        this._updateCachedCoords();
-        this._draw(); 
     },
     _getPixelsPerKm: function(stationLat, stationLon) {
         const centerLayer = map.latLngToLayerPoint([stationLat, stationLon]);
