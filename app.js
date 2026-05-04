@@ -2019,7 +2019,8 @@ const RadarCanvasLayer = L.Layer.extend({
         const scale = COLOR_SCALES[momentKey];
         if (!scale || !station || !this._topLeft) return;
 
-        const halfBeamWidthDeg = 0.6;
+        const fillHalfBeamWidthDeg = 0.6;
+        const eraseHalfBeamWidthDeg = 0.28;
         const gateStep = 1;
         const azimuth = normalizeAzimuth(radial.azimuth);
         let moment = null;
@@ -2102,7 +2103,7 @@ const RadarCanvasLayer = L.Layer.extend({
                 station.lat,
                 station.lon,
                 azimuth,
-                halfBeamWidthDeg,
+                eraseHalfBeamWidthDeg,
                 Math.max(0, firstGateActual),
                 firstGateActual + data.length * gateSizeKm
             );
@@ -2120,7 +2121,7 @@ const RadarCanvasLayer = L.Layer.extend({
                         const r1 = firstGateActual + startJ * gateSizeKm;
                         const r2 = firstGateActual + j * gateSizeKm;
                         ctx.fillStyle = currentColor;
-                        this._fillGateWedge(ctx, station.lat, station.lon, azimuth, halfBeamWidthDeg, r1, r2);
+                        this._fillGateWedge(ctx, station.lat, station.lon, azimuth, fillHalfBeamWidthDeg, r1, r2);
                     }
                     currentColor = color;
                     startJ = j;
