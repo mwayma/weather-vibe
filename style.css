@@ -400,22 +400,21 @@ body, html {
 }
 
 .reflectivity-spectrum {
-    background: linear-gradient(to right, #00ecec, #01a0f6, #0000f6, #00ff00, #00c800, #009000, #ffff00, #e7c000, #ff9000, #ff0000, #d60000, #c00000, #ff00ff, #9955c9, #ffffff);
+    background: linear-gradient(to right, #04e9e7, #019ff4, #0300f4, #02fd02, #01c501, #008e00, #fdf802, #e5bc00, #fd9500, #fd0000, #d40000, #bc0000, #f800fd, #9854c6, #fdfdfd);
 }
 
 .velocity-spectrum {
-    background: linear-gradient(to right, #00ff00, #00cc00, #008800, #004400, #777777, #440000, #880000, #cc0000, #ff0000);
+    background: linear-gradient(to right, #00ffff, #0099ff, #0000ff, #00ff00, #00c000, #007000, #9a9a9a, #700000, #a00000, #ff0000, #ff9900, #ffff00, #ffffff);
 }
 
 .debris-spectrum {
-    background: linear-gradient(to right, #000, #ff00ff, #0000ff, #00ffff, #00ff00, #ffff00);
+    background: linear-gradient(to right, #6a00ff, #0055ff, #00d5ff, #00ff00, #ffff00, #ff0000, #ffffff);
 }
 
 .zdr-spectrum {
-    background: linear-gradient(to right, #777, #0000f6, #00ff00, #ffff00, #ff0000, #ff00ff);
+    background: linear-gradient(to right, #4d4d4d, #0066ff, #00ccff, #00ff00, #ffff00, #ff9900, #ff0000, #ff00ff, #ffffff);
 }
 
 .width-spectrum {
-    background: linear-gradient(to right, #777, #0000a8, #00ecec, #01a0f6, #00ff00, #ffff00, #ff0000);
+    background: linear-gradient(to right, #4d4d4d, #0055ff, #00d5ff, #00ff00, #ffff00, #ff9900, #ff0000, #ff00ff);
 }
-

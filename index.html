@@ -30,14 +30,14 @@
                                 </div>
                                 <button id="btn-live-tracking" style="width: 100%; margin-bottom: 5px;">Live Tracking</button>
                                 <div id="live-tracking-options" style="padding-left: 10px; margin-bottom: 10px; display: none;">
-                                    <button id="btn-live-reflectivity" class="active" style="width: 100%; font-size: 0.9em; padding: 5px; margin-bottom: 3px;">Reflectivity (Z)</button>
-                                    <button id="btn-live-velocity" style="width: 100%; font-size: 0.9em; padding: 5px; margin-bottom: 3px;">Velocity (V)</button>
-                                    <button id="btn-live-debris" style="width: 100%; font-size: 0.9em; padding: 5px; margin-bottom: 3px;">Debris (CC)</button>
-                                    <button id="btn-live-zdr" style="width: 100%; font-size: 0.9em; padding: 5px; margin-bottom: 3px;">Diff Refl (ZDR)</button>
-                                    <button id="btn-live-width" style="width: 100%; font-size: 0.9em; padding: 5px; margin-bottom: 6px;">Width (W)</button>
+                                    <button id="btn-live-reflectivity" class="active" style="width: 100%; font-size: 0.9em; padding: 5px; margin-bottom: 3px;">Composite Reflectivity (Z)</button>
+                                    <button id="btn-live-velocity" style="width: 100%; font-size: 0.9em; padding: 5px; margin-bottom: 3px;">Base Velocity (V)</button>
+                                    <button id="btn-live-debris" style="width: 100%; font-size: 0.9em; padding: 5px; margin-bottom: 3px;">Correlation Coeff (CC)</button>
+                                    <button id="btn-live-zdr" style="width: 100%; font-size: 0.9em; padding: 5px; margin-bottom: 3px;">Differential Refl (ZDR)</button>
+                                    <button id="btn-live-width" style="width: 100%; font-size: 0.9em; padding: 5px; margin-bottom: 6px;">Spectrum Width (SW)</button>
 
                                     <div style="margin-bottom: 6px; color: #fff; font-size: 0.85em;">
-                                        <label for="live-elevation-select">Scan Elevation:</label>
+                                        <label for="live-elevation-select">View Elevation:</label>
                                         <select id="live-elevation-select" style="width: 100%; margin-top: 2px; padding: 3px; font-size: 0.9em; background: #333; color: #fff; border: 1px solid #555;">
                                             <option value="auto">Auto (Composite Z / Base Tilt)</option>
                                             <option value="1">Tilt 1 (0.5° approx)</option>
@@ -118,49 +118,52 @@
             
             <!-- Spectrum Legends for Live Tracking -->
             <div id="live-reflectivity-legend" style="display:none; margin-top: 10px;">
-                <div class="legend-title">LIVE PRECIPITATION (REFLECTIVITY)</div>
+                <div class="legend-title">COMPOSITE REFLECTIVITY (dBZ)</div>
                 <div class="spectrum-bar reflectivity-spectrum"></div>
                 <div style="display: flex; justify-content: space-between; font-size: 10px; color: #aaa;">
-                    <span>Light</span>
-                    <span>Heavy/Hail</span>
+                    <span>5</span>
+                    <span>35</span>
+                    <span>55</span>
+                    <span>75+</span>
                 </div>
             </div>
             
             <div id="live-velocity-legend" style="display:none; margin-top: 10px;">
-                <div class="legend-title">LIVE VELOCITY (WIND)</div>
+                <div class="legend-title">BASE VELOCITY</div>
                 <div class="spectrum-bar velocity-spectrum"></div>
                 <div style="display: flex; justify-content: space-between; font-size: 10px; color: #aaa;">
-                    <span>Inbound (Green)</span>
-                    <span>Outbound (Red)</span>
+                    <span>Inbound</span>
+                    <span>0</span>
+                    <span>Outbound</span>
                 </div>
-                <div class="v-note">Look for bright Red/Green touching for rotation</div>
+                <div class="v-note">Adjacent strong inbound/outbound bins indicate rotation</div>
             </div>
 
             <div id="live-debris-legend" style="display:none; margin-top: 10px;">
-                <div class="legend-title">LIVE DEBRIS (CC)</div>
+                <div class="legend-title">CORRELATION COEFFICIENT</div>
                 <div class="spectrum-bar debris-spectrum"></div>
                 <div style="display: flex; justify-content: space-between; font-size: 10px; color: #aaa;">
-                    <span>Debris (Low CC)</span>
-                    <span>Rain (High CC)</span>
+                    <span>Low CC</span>
+                    <span>Rain/Hail</span>
                 </div>
-                <div class="v-note">Look for blue/magenta in heavy rain areas</div>
+                <div class="v-note">Low CC colocated with high Z can indicate debris</div>
             </div>
 
             <div id="live-zdr-legend" style="display:none; margin-top: 10px;">
-                <div class="legend-title">DIFF REFLECTIVITY (ZDR)</div>
+                <div class="legend-title">DIFFERENTIAL REFLECTIVITY</div>
                 <div class="spectrum-bar zdr-spectrum"></div>
                 <div style="display: flex; justify-content: space-between; font-size: 10px; color: #aaa;">
-                    <span>Rain</span>
-                    <span>Hail/Large Rain</span>
+                    <span>Negative</span>
+                    <span>Large drops</span>
                 </div>
             </div>
 
             <div id="live-width-legend" style="display:none; margin-top: 10px;">
-                <div class="legend-title">SPECTRUM WIDTH (W)</div>
+                <div class="legend-title">SPECTRUM WIDTH</div>
                 <div class="spectrum-bar width-spectrum"></div>
                 <div style="display: flex; justify-content: space-between; font-size: 10px; color: #aaa;">
-                    <span>Calm</span>
-                    <span>Turbulence</span>
+                    <span>Low</span>
+                    <span>High shear</span>
                 </div>
             </div>
         </div>

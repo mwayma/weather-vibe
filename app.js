@@ -1269,7 +1269,9 @@ function syncLiveRadarArrays() {
         liveRadarData.elevations[e] = {
             reflectivity: new Array(len).fill(null),
             velocity: new Array(len).fill(null),
-            debris: new Array(len).fill(null)
+            debris: new Array(len).fill(null),
+            zdr: new Array(len).fill(null),
+            width: new Array(len).fill(null)
         };
     }
 
@@ -1292,66 +1294,47 @@ function syncLiveRadarArrays() {
 
 initWebSocket();
 
-const COLOR_SCALES = {
-    reflectivity: (val) => {
-        if (val === null || val < 5) return null;
-        if (val < 10) return '#00ecec';
-        if (val < 15) return '#01a0f6';
-        if (val < 20) return '#0000f6';
-        if (val < 25) return '#00ff00';
-        if (val < 30) return '#00c800';
-        if (val < 35) return '#009000';
-        if (val < 40) return '#ffff00';
-        if (val < 45) return '#e7c000';
-        if (val < 50) return '#ff9000';
-        if (val < 55) return '#ff0000';
-        if (val < 60) return '#d60000';
-        if (val < 65) return '#c00000';
-        if (val < 70) return '#ff00ff';
-        if (val < 75) return '#9955c9';
-        return '#ffffff';
-    },
-    velocity: (val) => {
-        if (val === null) return null;
-        if (val < -60) return '#00ff00';
-        if (val < -40) return '#00cc00';
-        if (val < -20) return '#008800';
-        if (val < 0) return '#004400';
-        if (val === 0) return '#777777';
-        if (val < 20) return '#440000';
-        if (val < 40) return '#880000';
-        if (val < 60) return '#cc0000';
-        return '#ff0000';
-    },
-    debris: (val) => {
-        if (val === null || val < 0.7) return null;
-        if (val < 0.8) return '#ff00ff';
-        if (val < 0.9) return '#0000ff';
-        if (val < 0.95) return '#00ffff';
-        if (val < 0.98) return '#00ff00';
-        return '#ffff00';
-    },
-    zdr: (val) => {
-        if (val === null) return null;
-        if (val < -1) return '#777777';
-        if (val < 0) return '#0000f6';
-        if (val < 1) return '#00ff00';
-        if (val < 2) return '#ffff00';
-        if (val < 3) return '#ff9000';
-        if (val < 4) return '#ff0000';
-        return '#ff00ff';
-    },
-    width: (val) => {
-        if (val === null || val < 1) return null;
-        if (val < 2) return '#777777';
-        if (val < 4) return '#0000a8';
-        if (val < 6) return '#00ecec';
-        if (val < 8) return '#01a0f6';
-        if (val < 10) return '#00ff00';
-        if (val < 12) return '#ffff00';
-        return '#ff0000';
+const COLOR_BINS = {
+    reflectivity: [
+        [5, null], [10, '#04e9e7'], [15, '#019ff4'], [20, '#0300f4'],
+        [25, '#02fd02'], [30, '#01c501'], [35, '#008e00'],
+        [40, '#fdf802'], [45, '#e5bc00'], [50, '#fd9500'],
+        [55, '#fd0000'], [60, '#d40000'], [65, '#bc0000'],
+        [70, '#f800fd'], [75, '#9854c6'], [Infinity, '#fdfdfd']
+    ],
+    velocity: [
+        [-80, '#00ffff'], [-60, '#0099ff'], [-40, '#0000ff'],
+        [-20, '#00ff00'], [-10, '#00c000'], [-5, '#007000'],
+        [5, '#9a9a9a'], [10, '#700000'], [20, '#a00000'],
+        [40, '#ff0000'], [60, '#ff9900'], [80, '#ffff00'],
+        [Infinity, '#ffffff']
+    ],
+    debris: [
+        [0.6, null], [0.75, '#6a00ff'], [0.82, '#0055ff'],
+        [0.9, '#00d5ff'], [0.95, '#00ff00'], [0.98, '#ffff00'],
+        [1.01, '#ff0000'], [Infinity, '#ffffff']
+    ],
+    zdr: [
+        [-3, '#4d4d4d'], [-1, '#0066ff'], [0, '#00ccff'],
+        [1, '#00ff00'], [2, '#ffff00'], [3, '#ff9900'],
+        [5, '#ff0000'], [8, '#ff00ff'], [Infinity, '#ffffff']
+    ],
+    width: [
+        [1, null], [2, '#4d4d4d'], [4, '#0055ff'],
+        [6, '#00d5ff'], [8, '#00ff00'], [10, '#ffff00'],
+        [14, '#ff9900'], [18, '#ff0000'], [Infinity, '#ff00ff']
+    ]
+};
+
+const COLOR_SCALES = Object.fromEntries(Object.entries(COLOR_BINS).map(([product, bins]) => [
+    product,
+    (val) => {
+        if (val === null || val === undefined || Number.isNaN(Number(val))) return null;
+        const numeric = Number(val);
+        const bin = bins.find(([upper]) => numeric < upper);
+        return bin ? bin[1] : null;
     }
-    };
+]));
 
     let selectedLiveElevation = 'auto'; // 'auto' or 1-22
 function setupRadarButtons() {
@@ -1706,18 +1689,15 @@ function updateReflectivityLayer() {
 }
 
 function updateLiveLegends() {
-    const refLegend = document.getElementById('live-reflectivity-legend');
-    const velLegend = document.getElementById('live-velocity-legend');
-    const debLegend = document.getElementById('live-debris-legend');
-
-    if (refLegend) refLegend.style.display = 'none';
-    if (velLegend) velLegend.style.display = 'none';
-    if (debLegend) debLegend.style.display = 'none';
+    const liveLegendIds = ['reflectivity', 'velocity', 'debris', 'zdr', 'width'];
+    liveLegendIds.forEach(product => {
+        const legend = document.getElementById(`live-${product}-legend`);
+        if (legend) legend.style.display = 'none';
+    });
 
     if (currentRadarMode === 'live-tracking') {
-        if (currentLiveMode === 'reflectivity' && refLegend) refLegend.style.display = 'block';
-        if (currentLiveMode === 'velocity' && velLegend) velLegend.style.display = 'block';
-        if (currentLiveMode === 'debris' && debLegend) debLegend.style.display = 'block';
+        const activeLegend = document.getElementById(`live-${currentLiveMode}-legend`);
+        if (activeLegend) activeLegend.style.display = 'block';
     }
 }
 
@@ -1963,6 +1943,7 @@ const RadarCanvasLayer = L.Layer.extend({
         const arcWidthRad = ((360 / 720) * Math.PI / 180) * 2.2;
         const gateStep = 1;
         const azimuth = normalizeAzimuth(radial.azimuth);
+        const isReflectivityComposite = selectedLiveElevation === 'auto' && currentLiveMode === 'reflectivity';
         let moment = null;
 
         if (selectedLiveElevation === 'auto') {
@@ -2011,13 +1992,15 @@ const RadarCanvasLayer = L.Layer.extend({
         ctx.translate(center.x, center.y);
         ctx.rotate((azimuth - 90) * Math.PI / 180);
 
-        ctx.globalCompositeOperation = 'destination-out';
-        ctx.fillStyle = 'rgba(0,0,0,1)';
-        ctx.beginPath();
-        ctx.moveTo(0, 0);
-        ctx.arc(0, 0, 500 * pixelsPerKm, -arcWidthRad / 2, arcWidthRad / 2);
-        ctx.closePath();
-        ctx.fill();
+        if (!isReflectivityComposite) {
+            ctx.globalCompositeOperation = 'destination-out';
+            ctx.fillStyle = 'rgba(0,0,0,1)';
+            ctx.beginPath();
+            ctx.moveTo(0, 0);
+            ctx.arc(0, 0, 500 * pixelsPerKm, -arcWidthRad / 2, arcWidthRad / 2);
+            ctx.closePath();
+            ctx.fill();
+        }
 
         ctx.globalCompositeOperation = 'source-over';
         try {
