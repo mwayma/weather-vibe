@@ -736,7 +736,7 @@ let liveDataRefreshInterval = null;
 let liveCanvasLayer = null;
 let targetAzimuth = 0;
 let currentAngle = 0;
-let sweepSpeed = 0.045; // Degrees per millisecond (approx 16s per rotation)
+let sweepSpeed = 0.009; // Degrees per millisecond
 let lastSweepTime = performance.now();
 let lastAzimuthMetadataTime = 0;
 let liveCanvasDrawPending = false;
@@ -759,8 +759,8 @@ const LIVE_DATA_RESUBSCRIBE_MS = 60000;
 const LIVE_SOCKET_STALE_MS = 45000;
 const LIVE_BUFFER_DELAY_MS = 15000;
 const LIVE_BUFFER_MAX_EXTRA_LAG_MS = 600000; // 10 minutes history allowed in buffer
-const MAX_BUFFERED_RADIALS_PER_FRAME = 100;
-const MAX_BUFFERED_QUEUE_RADIALS = 10000;
+const MAX_BUFFERED_RADIALS_PER_FRAME = 40;
+const MAX_BUFFERED_QUEUE_RADIALS = 5000;
 
 let socket = null;
 function getCurrentStationId() {
@@ -825,60 +825,63 @@ function initWebSocket() {
 
             console.log('Received initial state for', message.stationId);
             lastLiveDataMessageAt = Date.now();
-            
-            // Sync global selection if it was unset or generic
-            if (!selectedRadarId || selectedRadarId === 'composite') {
-                selectedRadarId = message.stationId;
-            }
-            
-            // Initialize if needed
-            if (!liveRadarData || !liveRadarData.radialsMap) {
-                liveRadarData = { 
-                    radialsMap: new Map(), 
-                    stationId: message.stationId,
-                    azimuths: [],
-                    lastUpdated: [],
-                    revealedUpdate: [],
-                    timestamps: [],
-                    elevations: {}
-                };
-                clearLivePlaybackState();
-                if (liveCanvasLayer) liveCanvasLayer._clearOffscreen();
-            }
-            
-            // Mark current station as the "active" one for metadata purposes
-            liveRadarData.stationId = message.stationId;
-            
-            const incomingData = message.data;
-            if (incomingData && incomingData.azimuths) {
-                const station = findStation(message.stationId);
+            clearLivePlaybackState();
+            if (liveCanvasLayer) liveCanvasLayer._clearOffscreen();
+            liveRadarData = message.data;
+            if (liveRadarData) {
+                // Optimize memory: Convert moment_data to Uint8Array
+                if (liveRadarData.elevations) {
+                    for (const products of Object.values(liveRadarData.elevations)) {
+                        for (const momentsArray of Object.values(products)) {
+                            if (Array.isArray(momentsArray)) {
+                                momentsArray.forEach(m => {
+                                    if (m && m.moment_data && Array.isArray(m.moment_data)) {
+                                        m.moment_data = new Uint8Array(m.moment_data);
+                                    }
+                                });
+                            }
+                        }
+                    }
+                }
+
+                // Initialize metadata arrays if missing
+                if (!liveRadarData.lastUpdated) {
+                    liveRadarData.lastUpdated = new Array(liveRadarData.azimuths.length).fill(Date.now());
+                }
+                if (!liveRadarData.revealedUpdate) {
+                    // Mark as already revealed so initial state is visible immediately
+                    liveRadarData.revealedUpdate = new Array(liveRadarData.azimuths.length).fill(1);
+                }
+                if (!liveRadarData.timestamps) {
+                    liveRadarData.timestamps = [...liveRadarData.lastUpdated];
+                }
                 
-                incomingData.azimuths.forEach((az, i) => {
+                // Build the radialsMap for future incremental updates
+                liveRadarData.radialsMap = new Map();
+                liveRadarData.azimuths.forEach((az, i) => {
                     const rounded = Math.round(az * 10) / 10;
-                    const mapKey = `${message.stationId}_${rounded}`;
                     const radialElevations = {};
-                    for (const [e, products] of Object.entries(incomingData.elevations)) {
+                    for (const [e, products] of Object.entries(liveRadarData.elevations)) {
                         radialElevations[e] = {};
                         for (const [product, moments] of Object.entries(products)) {
                             radialElevations[e][product] = moments[i];
                         }
                     }
-                    liveRadarData.radialsMap.set(mapKey, {
-                        azimuth: normalizeAzimuth(az),
-                        timestamp: (incomingData.timestamps && incomingData.timestamps[i]) || Date.now(),
-                        revealedUpdate: 1,
-                        elevations: radialElevations,
-                        stationLat: station ? station.lat : null,
-                        stationLon: station ? station.lon : null
+                    liveRadarData.radialsMap.set(rounded, {
+                        azimuth: az,
+                        timestamp: liveRadarData.timestamps[i],
+                        revealedUpdate: liveRadarData.revealedUpdate[i],
+                        elevations: radialElevations
                     });
                 });
             }
-
             if (liveCanvasLayer) liveCanvasLayer._needsFullRedraw = true;
-            if (liveLatencyMode === 'buffered' && incomingData?.azimuths) {
-                // For buffered mode, we might want to still enqueue them or just rely on the full redraw
-                // Since initial_state is usually a "snapshot", full redraw is best.
+            if (liveLatencyMode === 'buffered' && liveRadarData?.radialsMap) {
+                const initialRadials = Array.from(liveRadarData.radialsMap.values());
+                liveRadarData.radialsMap.clear();
+                enqueueBufferedRadials(initialRadials);
                 if (liveCanvasLayer) liveCanvasLayer._clearOffscreen();
+                processBufferedRadials();
             }
             renderLiveRadar();
         } else if (message.type === 'radial_batch') {
@@ -896,7 +899,7 @@ function initWebSocket() {
                 const roundedAz = Math.round(radial.azimuth * 10) / 10;
                 
                 // Optimize memory: Convert moment_data to Uint8Array
-                /* if (radial.elevations) {
+                if (radial.elevations) {
                     for (const products of Object.values(radial.elevations)) {
                         for (const m of Object.values(products)) {
                             if (m && m.moment_data && Array.isArray(m.moment_data)) {
@@ -904,7 +907,7 @@ function initWebSocket() {
                             }
                         }
                     }
-                } */
+                }
                 radial.azimuth = normalizeAzimuth(radial.azimuth);
                 return { radial, roundedAz };
             });
@@ -931,21 +934,11 @@ function initWebSocket() {
             updateLiveDataTimestamp(message.data);
         } else if (message.type === 'clear_data') {
             if (message.stationId && message.stationId !== currentStationId) return;
-            console.log('Server requested data clear for', message.stationId);
-            
-            // Delete only radials belonging to this station
-            if (liveRadarData && liveRadarData.radialsMap) {
-                const prefix = `${message.stationId}_`;
-                for (const key of liveRadarData.radialsMap.keys()) {
-                    if (key.startsWith(prefix)) {
-                        liveRadarData.radialsMap.delete(key);
-                    }
-                }
-            }
-            
-            if (liveCanvasLayer) {
-                liveCanvasLayer._renderFull(); // Full redraw to show the "cleared" state (other stations remain)
-            }
+            console.log('Server requested data clear (New Volume)');
+            liveRadarData = { radialsMap: new Map(), azimuths: [], lastUpdated: [], revealedUpdate: [], timestamps: [], elevations: {} };
+            clearLivePlaybackState();
+            window._lastSweepAngle = currentAngle;
+            if (liveCanvasLayer) liveCanvasLayer._clearOffscreen();
             requestLiveCanvasDraw();
         } else if (message.type === 'status') {
             console.log('WebSocket Status:', message.message);
@@ -985,12 +978,6 @@ setInterval(() => {
         subscribeToLiveStation();
     }
 }, 1000);
-
-function findStation(id) {
-    if (!id || !NEXRAD_STATIONS) return null;
-    const normalized = id.length === 3 ? 'K' + id.toUpperCase() : id.toUpperCase();
-    return NEXRAD_STATIONS.find(s => s.id === normalized || s.id === normalized.slice(1));
-}
 
 function normalizeAzimuth(azimuth) {
     return ((Number(azimuth) % 360) + 360) % 360;
@@ -1123,36 +1110,18 @@ function setLiveLatencyMode(mode) {
 }
 
 function applyLiveRadial(roundedAz, radial) {
-    if (!liveRadarData || !liveRadarData.radialsMap) {
-        liveRadarData = { 
-            radialsMap: new Map(), 
-            stationId: selectedRadarId,
-            azimuths: [],
-            lastUpdated: [],
-            revealedUpdate: [],
-            timestamps: [],
-            elevations: {}
-        };
+    if (!liveRadarData) {
+        liveRadarData = { radialsMap: new Map(), azimuths: [], lastUpdated: [], revealedUpdate: [], timestamps: [], elevations: {} };
     }
-    
-    const stationId = getCurrentStationId();
-    const station = findStation(stationId);
-    if (station) {
-        radial.stationLat = station.lat;
-        radial.stationLon = station.lon;
-    }
+    if (!liveRadarData.radialsMap) liveRadarData.radialsMap = new Map();
 
     radial.azimuth = normalizeAzimuth(radial.azimuth);
     radial.revealedUpdate = 1;
-    
-    // Key by both station and azimuth to allow overlapping data but overwrite for the same station
-    const mapKey = `${stationId}_${roundedAz}`;
-    liveRadarData.radialsMap.set(mapKey, radial);
+    liveRadarData.radialsMap.set(roundedAz, radial);
 
     if (!liveCanvasLayer) {
         renderLiveRadar();
     } else {
-        // Incremental draw is smoother and prevents full-screen flickers
         liveCanvasLayer._drawRadialToOffscreen(radial);
         requestLiveCanvasDraw();
     }
@@ -1174,25 +1143,19 @@ function mergeRealTimeData(newData) {
     }
 
     const now = Date.now();
-    const stationId = getCurrentStationId();
-    const station = findStation(stationId);
-
     newData.azimuths.forEach((az, i) => {
         const roundedAz = Math.round(az * 10) / 10;
-        const mapKey = `${stationId}_${roundedAz}`;
         const timestamp = (newData.timestamps && newData.timestamps[i]) ? newData.timestamps[i] : now;
 
-        if (!liveRadarData.radialsMap.has(mapKey)) {
-            liveRadarData.radialsMap.set(mapKey, {
+        if (!liveRadarData.radialsMap.has(roundedAz)) {
+            liveRadarData.radialsMap.set(roundedAz, {
                 azimuth: az,
                 timestamp: timestamp,
-                elevations: {},
-                stationLat: station ? station.lat : null,
-                stationLon: station ? station.lon : null
+                elevations: {}
             });
         }
 
-        const radial = liveRadarData.radialsMap.get(mapKey);
+        const radial = liveRadarData.radialsMap.get(roundedAz);
         radial.timestamp = timestamp;
 
         for (const [e, elevations] of Object.entries(newData.elevations)) {
@@ -1201,16 +1164,7 @@ function mergeRealTimeData(newData) {
                 radial.elevations[e][product] = moments[i];
             }
         }
-
-        // Draw each merged radial immediately
-        if (liveCanvasLayer) {
-            liveCanvasLayer._drawRadialToOffscreen(radial);
-        }
     });
-
-    if (liveCanvasLayer) {
-        requestLiveCanvasDraw();
-    }
 
     // CRITICAL: Ensure the layer exists and is ready to render
     if (!liveCanvasLayer) {
@@ -1625,7 +1579,7 @@ function updateVelocityLayer() {
         radarVelocity = L.layerGroup(); 
         return;
     } else {
-        const station = findStation(selectedRadarId);
+        const station = NEXRAD_STATIONS.find(s => s.id === selectedRadarId);
         if (!station) { radarVelocity = L.layerGroup(); return; }
         const specificWmsUrl = 'https://mesonet.agron.iastate.edu/cgi-bin/wms/nexrad/ridge.cgi';
         const sectorId = station.id.length === 4 ? station.id.substring(1).toUpperCase() : station.id.toUpperCase();
@@ -1724,35 +1678,29 @@ function startLiveTracking() {
     let stationId = selectedRadarId;
     if (stationId && stationId.length === 3) {
         stationId = 'K' + stationId;
-        selectedRadarId = stationId; // Normalize global state
+        selectedRadarId = stationId;
     }
 
     subscribeToLiveStation();
 
-    // Only clear if we don't have a map yet
-    if (!liveRadarData || !liveRadarData.radialsMap) {
-        liveRadarData = { radialsMap: new Map() };
-        clearLivePlaybackState();
-        if (liveCanvasLayer) {
-            liveCanvasLayer._clearOffscreen();
-        }
-    }
-    
+    // CRITICAL: Clear existing data to prevent geo-contamination
+    liveRadarData = null;
+    clearLivePlaybackState();
     currentAngle = 0;
     targetAzimuth = 0;
     lastAzimuthMetadataTime = 0;
     lastLiveStatusUpdate = 0;
     lastSweepTime = performance.now();
 
-    if (liveCanvasLayer) {
-        liveCanvasLayer._updateCachedCoords();
-    }
-
     // Fix memory leak: Remove old layers from liveTrackingLayer
     if (radarStationMarker) { liveTrackingLayer.removeLayer(radarStationMarker); radarStationMarker = null; }
     if (azimuthLine) { liveTrackingLayer.removeLayer(azimuthLine); azimuthLine = null; }
 
-    const station = findStation(selectedRadarId);
+    if (liveCanvasLayer) {
+        liveCanvasLayer._clearOffscreen();
+    }
+
+    const station = NEXRAD_STATIONS.find(s => s.id === selectedRadarId);
     if (!station) return;
 
     radarStationMarker = L.circleMarker([station.lat, station.lon], {
@@ -1777,11 +1725,10 @@ function startLiveTracking() {
         lastSweepTime = now;
 
         const ageSinceMetadata = now - lastAzimuthMetadataTime;
-        if (lastAzimuthMetadataTime && ageSinceMetadata < 3000) {
+        if (lastAzimuthMetadataTime && ageSinceMetadata < 2500) {
             const diff = ((targetAzimuth - currentAngle + 540) % 360) - 180;
-            // Smoother interpolation (300ms instead of 120ms)
-            if (Math.abs(diff) > 0.1) {
-                currentAngle = normalizeAzimuth(currentAngle + diff * Math.min(1, dt / 300));
+            if (Math.abs(diff) > 0.2) {
+                currentAngle = normalizeAzimuth(currentAngle + diff * Math.min(1, dt / 120));
             } else {
                 currentAngle = targetAzimuth;
             }
@@ -1866,22 +1813,17 @@ const RadarCanvasLayer = L.Layer.extend({
         return centerLayer.distanceTo(refLayer);
     },
     _updateCachedCoords: function() {
-        const stationId = getCurrentStationId();
-        const station = findStation(stationId);
+        const station = NEXRAD_STATIONS.find(s => s.id === selectedRadarId);
         if (!station || !this._topLeft) return;
 
         const dpr = window.devicePixelRatio || 1;
         const centerLayer = map.latLngToLayerPoint([station.lat, station.lon]);
-        this._cachedCenter = {
-            x: (centerLayer.x - this._topLeft.x) * dpr,
-            y: (centerLayer.y - this._topLeft.y) * dpr
+        this._cachedCenter = { 
+            x: (centerLayer.x - this._topLeft.x) * dpr, 
+            y: (centerLayer.y - this._topLeft.y) * dpr 
         };
         this._cachedPixelsPerKm = this._getPixelsPerKm(station.lat, station.lon) * dpr;
-
-        // Reset the per-station center cache on coordinate updates (zoom/pan)
-        this._stationCenterCache = new Map();
     },
-
     _reset: function() {
         const size = map.getSize();
         const dpr = window.devicePixelRatio || 1;
@@ -1903,41 +1845,12 @@ const RadarCanvasLayer = L.Layer.extend({
     },
     _drawRadialToOffscreen: function(radial) {
         if (!this._offscreenCanvas || !this._offscreenCtx || !this._cachedCenter) return;
-
-        const ctx = this._offscreenCtx;
-        const dpr = window.devicePixelRatio || 1;
         
-        let center = this._cachedCenter;
-        let pixelsPerKm = this._cachedPixelsPerKm;
-
-        const radialLat = radial.stationLat;
-        const radialLon = radial.stationLon;
-
-        if (radialLat && radialLon) {
-            const cacheKey = `${radialLat},${radialLon}`;
-            if (!this._stationCenterCache) this._stationCenterCache = new Map();
-            
-            if (this._stationCenterCache.has(cacheKey)) {
-                const cached = this._stationCenterCache.get(cacheKey);
-                center = cached.center;
-                pixelsPerKm = cached.pixelsPerKm;
-            } else {
-                const centerLayer = map.latLngToLayerPoint([radialLat, radialLon]);
-                center = {
-                    x: (centerLayer.x - this._topLeft.x) * dpr,
-                    y: (centerLayer.y - this._topLeft.y) * dpr
-                };
-                pixelsPerKm = this._getPixelsPerKm(radialLat, radialLon) * dpr;
-                this._stationCenterCache.set(cacheKey, { center, pixelsPerKm });
-            }
-        }
-
-        if (!center || isNaN(center.x) || isNaN(center.y) || !pixelsPerKm || isNaN(pixelsPerKm)) {
-            return;
-        }
+        const ctx = this._offscreenCtx;
+        const center = this._cachedCenter;
+        const pixelsPerKm = this._cachedPixelsPerKm;
 
         let momentKey = 'reflectivity';
-
         if (currentLiveMode === 'velocity') { momentKey = 'velocity'; }
         else if (currentLiveMode === 'debris') { momentKey = 'debris'; }
         
@@ -1946,20 +1859,11 @@ const RadarCanvasLayer = L.Layer.extend({
         const gateStep = 1;
         const azimuth = normalizeAzimuth(radial.azimuth);
         ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.globalCompositeOperation = 'source-over';
         ctx.save();
         ctx.translate(center.x, center.y);
         ctx.rotate((azimuth - 90) * Math.PI / 180);
 
-        // CLEAR THE WEDGE FIRST to prevent smearing/accumulation
-        ctx.globalCompositeOperation = 'destination-out';
-        ctx.fillStyle = 'rgba(0,0,0,1)';
-        ctx.beginPath();
-        ctx.moveTo(0, 0);
-        ctx.arc(0, 0, 500 * pixelsPerKm, -arcWidthRad/2, arcWidthRad/2);
-        ctx.closePath();
-        ctx.fill();
-
-        ctx.globalCompositeOperation = 'source-over';
         try {
             let moment = null;
             let elev = null;
@@ -1976,10 +1880,8 @@ const RadarCanvasLayer = L.Layer.extend({
             if (elev) lastRenderedRadialElevation = elev;
 
             if (moment && moment.moment_data) {
-                // If first_gate is > 1000, it's likely in meters. Convert to km.
+                // Scaling Fix: gate_size and first_gate
                 const firstGateActual = (moment.first_gate > 1000) ? moment.first_gate / 1000 : moment.first_gate;
-                
-                // If gate_size is >= 1, it's likely in meters. Convert to km.
                 const gateSizeKm = (moment.gate_size >= 1) ? moment.gate_size / 1000 : moment.gate_size;
                 
                 const data = moment.moment_data;

@@ -118,8 +118,7 @@ function getConsolidatedData(stationId) {
     const result = {
         azimuths: [],
         timestamps: [],
-        elevations: {},
-        stationId: stationId
+        elevations: {}
     };
 
     sortedAzimuths.forEach(az => {
@@ -468,7 +467,7 @@ async function pollChunks(stationId) {
                 state.lastVolume = volumeId;
                 state.lastChunkKey = null; 
                 state.headerChunk = null;
-                // broadcast(stationId, { type: 'clear_data', stationId, volumeId });
+                broadcast(stationId, { type: 'clear_data', stationId, volumeId });
                 stationState.set(stationId, state);
             }
 
@@ -512,7 +511,7 @@ async function pollChunks(stationId) {
                         if (radials.length > 0) {
                             radials.sort((a, b) => a.timestamp - b.timestamp);
                             mergeRadialsIntoCache(stationId, radials);
-                            await radialBatcher.enqueue(radials);
+                            broadcastRadialBatches(stationId, radials);
                         }
 
                         // Trigger immediate volume discovery if we reach elevation 15 or see an end chunk
@@ -521,12 +520,12 @@ async function pollChunks(stationId) {
                             state.lastVolumeDiscovery = 0; // Reset discovery timer
                             stationState.set(lockKey, 0); // Allow immediate re-poll
                         }
-                    } catch (e) {
-                        console.warn(`[${stationId}] Chunk ${chunk.Key} error: ${e.message}`);
+                        } catch (e) {
                         state.processedChunks.add(chunk.Key);
                         trimProcessedChunks(state);
-                    }
-                }
+                        }
+                        }
+
 
                 if (volPrefix === latestVolPrefix) {
                     state.lastChunkKey = latestKey;
