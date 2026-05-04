@@ -2020,7 +2020,6 @@ const RadarCanvasLayer = L.Layer.extend({
         if (!scale || !station || !this._topLeft) return;
 
         const fillHalfBeamWidthDeg = 0.6;
-        const eraseHalfBeamWidthDeg = 0.28;
         const gateStep = 1;
         const azimuth = normalizeAzimuth(radial.azimuth);
         let moment = null;
@@ -2095,18 +2094,6 @@ const RadarCanvasLayer = L.Layer.extend({
             const gateSizeKm = this._normalizeGateDistanceKm(moment.gate_size);
             const data = moment.moment_data;
             if (!(gateSizeKm > 0)) return;
-
-            ctx.globalCompositeOperation = 'destination-out';
-            ctx.fillStyle = 'rgba(0,0,0,1)';
-            this._fillGateWedge(
-                ctx,
-                station.lat,
-                station.lon,
-                azimuth,
-                eraseHalfBeamWidthDeg,
-                Math.max(0, firstGateActual),
-                firstGateActual + data.length * gateSizeKm
-            );
 
             ctx.globalCompositeOperation = 'source-over';
             let startJ = null;
