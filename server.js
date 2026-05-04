@@ -579,7 +579,7 @@ function extractRadialData(parsed, stationId, chunkId) {
                     hasAnyData = true;
                     elevationHasData = true;
                     elevationProducts[productKey] = moments.map(m => m ? {
-                        moment_data: m.moment_data,
+                        moment_data: Array.from(m.moment_data),
                         first_gate: m.first_gate,
                         gate_size: m.gate_size
                     } : null);
