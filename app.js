@@ -746,7 +746,9 @@ let lastSocketMessageAt = Date.now();
 let lastLiveResubscribeAt = 0;
 let lastRenderedRadialTimestamp = 0;
 let lastRenderedRadialAzimuth = null;
-let lastLiveStatusLabel = 'Buffered Live';
+let lastRenderedRadialElevation = null;
+let lastLiveStatusLabel = 'Live';
+
 let liveReconnectInProgress = false;
 let socketGeneration = 0;
 let liveLatencyMode = 'buffered';
@@ -824,53 +826,45 @@ function initWebSocket() {
             console.log('Received initial state for', message.stationId);
             lastLiveDataMessageAt = Date.now();
             
-            // Only clear if this is a genuinely new station or we have no data
-            const isNewStation = !liveRadarData || liveRadarData.stationId !== message.stationId;
-            if (isNewStation) {
+            // Initialize if needed
+            if (!liveRadarData || !liveRadarData.radialsMap) {
+                liveRadarData = { radialsMap: new Map(), stationId: message.stationId };
                 clearLivePlaybackState();
                 if (liveCanvasLayer) liveCanvasLayer._clearOffscreen();
             }
             
-            liveRadarData = message.data;
-            if (liveRadarData) {
-                // Initialize metadata arrays if missing
-                if (!liveRadarData.lastUpdated) {
-                    liveRadarData.lastUpdated = new Array(liveRadarData.azimuths.length).fill(Date.now());
-                }
-                if (!liveRadarData.revealedUpdate) {
-                    // Mark as already revealed so initial state is visible immediately
-                    liveRadarData.revealedUpdate = new Array(liveRadarData.azimuths.length).fill(1);
-                }
-                if (!liveRadarData.timestamps) {
-                    liveRadarData.timestamps = [...liveRadarData.lastUpdated];
-                }
+            // Mark current station as the "active" one for metadata purposes
+            liveRadarData.stationId = message.stationId;
+            
+            const incomingData = message.data;
+            if (incomingData && incomingData.azimuths) {
+                const station = NEXRAD_STATIONS.find(s => s.id === message.stationId);
                 
-                // Build the radialsMap for future incremental updates
-                liveRadarData.radialsMap = new Map();
-                liveRadarData.azimuths.forEach((az, i) => {
+                incomingData.azimuths.forEach((az, i) => {
                     const rounded = Math.round(az * 10) / 10;
                     const radialElevations = {};
-                    for (const [e, products] of Object.entries(liveRadarData.elevations)) {
+                    for (const [e, products] of Object.entries(incomingData.elevations)) {
                         radialElevations[e] = {};
                         for (const [product, moments] of Object.entries(products)) {
                             radialElevations[e][product] = moments[i];
                         }
                     }
                     liveRadarData.radialsMap.set(rounded, {
-                        azimuth: az,
-                        timestamp: liveRadarData.timestamps[i],
-                        revealedUpdate: liveRadarData.revealedUpdate[i],
-                        elevations: radialElevations
+                        azimuth: normalizeAzimuth(az),
+                        timestamp: (incomingData.timestamps && incomingData.timestamps[i]) || Date.now(),
+                        revealedUpdate: 1,
+                        elevations: radialElevations,
+                        stationLat: station ? station.lat : null,
+                        stationLon: station ? station.lon : null
                     });
                 });
             }
+
             if (liveCanvasLayer) liveCanvasLayer._needsFullRedraw = true;
-            if (liveLatencyMode === 'buffered' && liveRadarData?.radialsMap) {
-                const initialRadials = Array.from(liveRadarData.radialsMap.values());
-                liveRadarData.radialsMap.clear();
-                enqueueBufferedRadials(initialRadials);
+            if (liveLatencyMode === 'buffered' && incomingData?.azimuths) {
+                // For buffered mode, we might want to still enqueue them or just rely on the full redraw
+                // Since initial_state is usually a "snapshot", full redraw is best.
                 if (liveCanvasLayer) liveCanvasLayer._clearOffscreen();
-                processBufferedRadials();
             }
             renderLiveRadar();
         } else if (message.type === 'radial_batch') {
@@ -923,11 +917,8 @@ function initWebSocket() {
             updateLiveDataTimestamp(message.data);
         } else if (message.type === 'clear_data') {
             if (message.stationId && message.stationId !== currentStationId) return;
-            console.log('Server requested data clear (New Volume)');
-            liveRadarData = { radialsMap: new Map(), azimuths: [], lastUpdated: [], revealedUpdate: [], timestamps: [], elevations: {} };
-            clearLivePlaybackState();
+            console.log('Server requested data clear (New Volume) - ignoring wipe to maintain persistence');
             window._lastSweepAngle = currentAngle;
-            if (liveCanvasLayer) liveCanvasLayer._clearOffscreen();
             requestLiveCanvasDraw();
         } else if (message.type === 'status') {
             console.log('WebSocket Status:', message.message);
@@ -1016,10 +1007,11 @@ function renderLiveStatus(force = false) {
     const chunkDate = new Date(lastRenderedRadialTimestamp);
     const lagMs = now - lastRenderedRadialTimestamp;
     const azText = Number.isFinite(Number(lastRenderedRadialAzimuth)) ? ` | Az ${lastRenderedRadialAzimuth.toFixed(1)}°` : '';
+    const elevText = lastRenderedRadialElevation ? ` | Elev ${lastRenderedRadialElevation}` : '';
     const staleText = (now - lastLiveDataMessageAt) > LIVE_DATA_STALE_MS
         ? ` | no chunks ${formatLag(now - lastLiveDataMessageAt).replace(' lag', '')}`
         : '';
-    setTimestampForMode('live-tracking', `${lastLiveStatusLabel}: ${chunkDate.toLocaleTimeString()} | ${formatLag(lagMs)}${azText}${staleText}${socketText}`);
+    setTimestampForMode('live-tracking', `${lastLiveStatusLabel}: ${chunkDate.toLocaleTimeString()} | ${formatLag(lagMs)}${azText}${elevText}${staleText}${socketText}`);
     lastLiveStatusUpdate = now;
 }
 
@@ -1098,10 +1090,15 @@ function setLiveLatencyMode(mode) {
 }
 
 function applyLiveRadial(roundedAz, radial) {
-    if (!liveRadarData) {
-        liveRadarData = { radialsMap: new Map(), azimuths: [], lastUpdated: [], revealedUpdate: [], timestamps: [], elevations: {} };
+    if (!liveRadarData || !liveRadarData.radialsMap) {
+        liveRadarData = { radialsMap: new Map(), stationId: selectedRadarId };
     }
-    if (!liveRadarData.radialsMap) liveRadarData.radialsMap = new Map();
+    
+    const station = NEXRAD_STATIONS.find(s => s.id === selectedRadarId);
+    if (station) {
+        radial.stationLat = station.lat;
+        radial.stationLon = station.lon;
+    }
 
     radial.azimuth = normalizeAzimuth(radial.azimuth);
     radial.revealedUpdate = 1;
@@ -1131,6 +1128,8 @@ function mergeRealTimeData(newData) {
     }
 
     const now = Date.now();
+    const station = NEXRAD_STATIONS.find(s => s.id === selectedRadarId);
+
     newData.azimuths.forEach((az, i) => {
         const roundedAz = Math.round(az * 10) / 10;
         const timestamp = (newData.timestamps && newData.timestamps[i]) ? newData.timestamps[i] : now;
@@ -1139,7 +1138,9 @@ function mergeRealTimeData(newData) {
             liveRadarData.radialsMap.set(roundedAz, {
                 azimuth: az,
                 timestamp: timestamp,
-                elevations: {}
+                elevations: {},
+                stationLat: station ? station.lat : null,
+                stationLon: station ? station.lon : null
             });
         }
 
@@ -1668,9 +1669,15 @@ function startLiveTracking() {
 
     subscribeToLiveStation();
 
-    // CRITICAL: Clear existing data to prevent geo-contamination
-    liveRadarData = null;
-    clearLivePlaybackState();
+    // Only clear if we don't have a map yet
+    if (!liveRadarData || !liveRadarData.radialsMap) {
+        liveRadarData = { radialsMap: new Map() };
+        clearLivePlaybackState();
+        if (liveCanvasLayer) {
+            liveCanvasLayer._clearOffscreen();
+        }
+    }
+    
     currentAngle = 0;
     targetAzimuth = 0;
     lastAzimuthMetadataTime = 0;
@@ -1680,10 +1687,6 @@ function startLiveTracking() {
     // Fix memory leak: Remove old layers from liveTrackingLayer
     if (radarStationMarker) { liveTrackingLayer.removeLayer(radarStationMarker); radarStationMarker = null; }
     if (azimuthLine) { liveTrackingLayer.removeLayer(azimuthLine); azimuthLine = null; }
-
-    if (liveCanvasLayer) {
-        liveCanvasLayer._clearOffscreen();
-    }
 
     const station = NEXRAD_STATIONS.find(s => s.id === selectedRadarId);
     if (!station) return;
@@ -1803,12 +1806,16 @@ const RadarCanvasLayer = L.Layer.extend({
 
         const dpr = window.devicePixelRatio || 1;
         const centerLayer = map.latLngToLayerPoint([station.lat, station.lon]);
-        this._cachedCenter = { 
-            x: (centerLayer.x - this._topLeft.x) * dpr, 
-            y: (centerLayer.y - this._topLeft.y) * dpr 
+        this._cachedCenter = {
+            x: (centerLayer.x - this._topLeft.x) * dpr,
+            y: (centerLayer.y - this._topLeft.y) * dpr
         };
         this._cachedPixelsPerKm = this._getPixelsPerKm(station.lat, station.lon) * dpr;
+
+        // Reset the per-station center cache on coordinate updates (zoom/pan)
+        this._stationCenterCache = new Map();
     },
+
     _reset: function() {
         const size = map.getSize();
         const dpr = window.devicePixelRatio || 1;
@@ -1830,12 +1837,34 @@ const RadarCanvasLayer = L.Layer.extend({
     },
     _drawRadialToOffscreen: function(radial) {
         if (!this._offscreenCanvas || !this._offscreenCtx || !this._cachedCenter) return;
-        
+
         const ctx = this._offscreenCtx;
-        const center = this._cachedCenter;
-        const pixelsPerKm = this._cachedPixelsPerKm;
+        const dpr = window.devicePixelRatio || 1;
+
+        let center = this._cachedCenter;
+        let pixelsPerKm = this._cachedPixelsPerKm;
+
+        if (radial.stationLat && radial.stationLon) {
+            const cacheKey = `${radial.stationLat},${radial.stationLon}`;
+            if (!this._stationCenterCache) this._stationCenterCache = new Map();
+
+            if (this._stationCenterCache.has(cacheKey)) {
+                const cached = this._stationCenterCache.get(cacheKey);
+                center = cached.center;
+                pixelsPerKm = cached.pixelsPerKm;
+            } else {
+                const centerLayer = map.latLngToLayerPoint([radial.stationLat, radial.stationLon]);
+                center = {
+                    x: (centerLayer.x - this._topLeft.x) * dpr,
+                    y: (centerLayer.y - this._topLeft.y) * dpr
+                };
+                pixelsPerKm = this._getPixelsPerKm(radial.stationLat, radial.stationLon) * dpr;
+                this._stationCenterCache.set(cacheKey, { center, pixelsPerKm });
+            }
+        }
 
         let momentKey = 'reflectivity';
+
         if (currentLiveMode === 'velocity') { momentKey = 'velocity'; }
         else if (currentLiveMode === 'debris') { momentKey = 'debris'; }
         
@@ -1851,12 +1880,18 @@ const RadarCanvasLayer = L.Layer.extend({
 
         try {
             let moment = null;
+            let elev = null;
             for (let e = 1; e <= 5; e++) {
                 if (radial.elevations[e] && radial.elevations[e][momentKey]) {
                     moment = radial.elevations[e][momentKey];
-                    if (moment && moment.moment_data) break;
+                    if (moment && moment.moment_data) {
+                        elev = e;
+                        break;
+                    }
                 }
             }
+
+            if (elev) lastRenderedRadialElevation = elev;
 
             if (moment && moment.moment_data) {
                 const firstGateKm = moment.first_gate / 1000;
