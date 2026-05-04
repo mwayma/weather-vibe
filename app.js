@@ -1185,7 +1185,7 @@ function syncLiveRadarArrays() {
     
     // Pre-initialize elevation products with null arrays to ensure length consistency
     liveRadarData.elevations = {};
-    for (let e = 1; e <= 5; e++) {
+    for (let e = 1; e <= 15; e++) {
         liveRadarData.elevations[e] = {
             reflectivity: new Array(len).fill(null),
             velocity: new Array(len).fill(null),
@@ -1900,7 +1900,7 @@ const RadarCanvasLayer = L.Layer.extend({
         try {
             let moment = null;
             let elev = null;
-            for (let e = 1; e <= 5; e++) {
+            for (let e = 1; e <= 15; e++) {
                 if (radial.elevations[e] && radial.elevations[e][momentKey]) {
                     moment = radial.elevations[e][momentKey];
                     if (moment && moment.moment_data) {
