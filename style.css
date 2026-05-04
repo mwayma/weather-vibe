@@ -334,8 +334,8 @@ body, html {
     border: 2px solid white;
 }
 
-.inbound { background-color: rgba(0, 255, 0, 0.6); border-color: #00ff00; }
-.outbound { background-color: rgba(255, 0, 0, 0.6); border-color: #ff0000; }
+.toward-radar { background-color: rgba(0, 255, 0, 0.6); border-color: #00ff00; }
+.away-radar { background-color: rgba(255, 0, 0, 0.6); border-color: #ff0000; }
 
 .v-note {
     font-size: 10px;
@@ -404,7 +404,7 @@ body, html {
 }
 
 .velocity-spectrum {
-    background: linear-gradient(to right, #00ffff, #0099ff, #0000ff, #00ff00, #00c000, #007000, #9a9a9a, #700000, #a00000, #ff0000, #ff9900, #ffff00, #ffffff);
+    background: linear-gradient(to right, #00ffff, #00ccff, #0099ff, #00ff00, #00c000, #007000, #111111, #700000, #a00000, #ff0000, #ff9900, #ffff00);
 }
 
 .debris-spectrum {

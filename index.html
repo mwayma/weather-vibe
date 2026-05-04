@@ -108,12 +108,12 @@
             <div id="velocity-legend" style="display:none;">
                 <div class="legend-title">WIND ROTATION (BASE VELOCITY)</div>
                 <div class="v-scale">
-                    <span class="v-box inbound"></span> Inbound (Toward Radar)
+                    <span class="v-box toward-radar"></span> Green/Blue: Toward Radar
                 </div>
                 <div class="v-scale">
-                    <span class="v-box outbound"></span> Outbound (Away)
+                    <span class="v-box away-radar"></span> Red/Yellow: Away From Radar
                 </div>
-                <div class="v-note">Look for Red next to Green to spot rotation!</div>
+                <div class="v-note">Look for adjacent toward/away couplets to spot rotation</div>
             </div>
             
             <!-- Spectrum Legends for Live Tracking -->
@@ -132,9 +132,9 @@
                 <div class="legend-title">BASE VELOCITY</div>
                 <div class="spectrum-bar velocity-spectrum"></div>
                 <div style="display: flex; justify-content: space-between; font-size: 10px; color: #aaa;">
-                    <span>Inbound</span>
-                    <span>0</span>
-                    <span>Outbound</span>
+                    <span>Toward</span>
+                    <span>Weak/0 hidden</span>
+                    <span>Away</span>
                 </div>
                 <div class="v-note">Adjacent strong inbound/outbound bins indicate rotation</div>
             </div>
