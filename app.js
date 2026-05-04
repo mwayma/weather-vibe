@@ -1919,7 +1919,8 @@ const RadarCanvasLayer = L.Layer.extend({
 
         map.on('viewreset', this._reset, this); 
         map.on('move', this._onMove, this);
-        map.on('moveend', this._reset, this);
+        map.on('moveend', this._onMoveEnd, this);
+        map.on('zoomstart', this._onZoomStart, this);
         this._reset();
     },
     onRemove: function(map) {
@@ -1928,16 +1929,25 @@ const RadarCanvasLayer = L.Layer.extend({
         }
         map.off('viewreset', this._reset, this); 
         map.off('move', this._onMove, this);
-        map.off('moveend', this._reset, this);
+        map.off('moveend', this._onMoveEnd, this);
+        map.off('zoomstart', this._onZoomStart, this);
         this._offscreenCanvas = null;
         this._offscreenCtx = null;
     },
+    _onZoomStart: function() {
+        this._isZooming = true;
+        if (this._container) this._container.style.visibility = 'hidden';
+    },
     _onMove: function() {
+        if (this._isZooming) return;
         const pos = map.containerPointToLayerPoint([0, 0]);
         L.DomUtil.setPosition(this._container, pos);
-        this._topLeft = pos;
-        this._needsFullRedraw = true; // Redraw on pan to maintain alignment
         this._draw(); 
+    },
+    _onMoveEnd: function() {
+        this._isZooming = false;
+        if (this._container) this._container.style.visibility = 'visible';
+        this._reset();
     },
     _reset: function() {
         const size = map.getSize();
@@ -1965,7 +1975,6 @@ const RadarCanvasLayer = L.Layer.extend({
     _getRadialGeometry: function(stationLat, stationLon, azimuth) {
         const p0 = map.latLngToLayerPoint([stationLat, stationLon]);
         
-        // Project a point 100km away at this azimuth to get local scale and rotation
         const earthRadiusKm = 6371.0088;
         const testRangeKm = 100;
         const angularDistance = testRangeKm / earthRadiusKm;
