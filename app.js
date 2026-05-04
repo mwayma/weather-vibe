@@ -770,10 +770,10 @@ function getCurrentStationId() {
     return currentStationId;
 }
 
-function subscribeToLiveStation() {
+function subscribeToLiveStation(initial = false) {
     const stationId = getCurrentStationId();
     if (socket && socket.readyState === WebSocket.OPEN && currentRadarMode === 'live-tracking' && stationId && stationId !== 'composite') {
-        socket.send(JSON.stringify({ action: 'subscribe', station: stationId, initial: false }));
+        socket.send(JSON.stringify({ action: 'subscribe', station: stationId, initial }));
         lastLiveResubscribeAt = Date.now();
     }
 }
@@ -806,7 +806,7 @@ function initWebSocket() {
         if (generation !== socketGeneration) return;
         console.log('WebSocket connected');
         lastSocketMessageAt = Date.now();
-        subscribeToLiveStation();
+        subscribeToLiveStation(!liveRadarData?.radialsMap?.size);
     };
 
     socket.onmessage = (event) => {
@@ -1805,8 +1805,6 @@ function startLiveTracking() {
         selectedRadarId = stationId;
     }
 
-    subscribeToLiveStation();
-
     // CRITICAL: Clear existing data to prevent geo-contamination
     liveRadarData = null;
     clearLivePlaybackState();
@@ -1836,6 +1834,7 @@ function startLiveTracking() {
         ? `Buffered Live: building ${Math.round(LIVE_BUFFER_DELAY_MS / 1000)}s buffer for ${stationId}...`
         : `Low Latency: connecting to ${stationId}...`;
     setTimestampForMode('live-tracking', liveModeLabel);
+    subscribeToLiveStation(true);
     
     if (liveScanInterval) cancelAnimationFrame(liveScanInterval);
     if (liveDataRefreshInterval) clearInterval(liveDataRefreshInterval);

@@ -399,6 +399,14 @@ function trimProcessedChunks(state) {
     }
 }
 
+function trimHeaderChunks(state) {
+    const keys = Object.keys(state.headerChunks || {});
+    while (keys.length > 4) {
+        const key = keys.shift();
+        delete state.headerChunks[key];
+    }
+}
+
 async function pollChunks(stationId) {
     stationId = normalizeStationId(stationId);
     
@@ -428,27 +436,39 @@ async function pollChunks(stationId) {
             lastVolume: null, 
             lastChunkKey: null, 
             headerChunk: null,
+            headerChunks: {},
             processedChunks: new Set(),
+            previousVolPrefix: null,
             latestVolPrefix: null,
             latestVolTimestamp: 0,
             lastVolumeDiscovery: 0
         };
 
         if (!state.processedChunks) state.processedChunks = new Set();
+        if (!state.headerChunks) state.headerChunks = {};
 
+        const priorLatestVolPrefix = state.latestVolPrefix;
         const latestVolPrefix = await chooseLatestVolume(stationId, commonPrefixes, state, now);
         if (!latestVolPrefix) return;
+        if (priorLatestVolPrefix && priorLatestVolPrefix !== latestVolPrefix) {
+            state.previousVolPrefix = priorLatestVolPrefix;
+        }
         stationState.set(stationId, state);
 
-        // POLL LAST TWO VOLUMES to catch trailing tilts of the finishing scan
+        // Poll current and previous folders to keep volume handoffs continuous.
         const sortedPrefixes = [...commonPrefixes].sort((a, b) => {
             const numA = parseInt(a.Prefix.split('/')[1]);
             const numB = parseInt(b.Prefix.split('/')[1]);
             return numA - numB;
         });
         const latestIdx = sortedPrefixes.findIndex(p => p.Prefix === latestVolPrefix);
-        const volumesToPoll = [latestVolPrefix];
-        if (latestIdx > 0) volumesToPoll.unshift(sortedPrefixes[latestIdx - 1].Prefix);
+        const volumesToPollSet = new Set();
+        if (state.previousVolPrefix) volumesToPollSet.add(state.previousVolPrefix);
+        if (latestIdx >= 0 && sortedPrefixes.length > 1) {
+            volumesToPollSet.add(sortedPrefixes[(latestIdx - 1 + sortedPrefixes.length) % sortedPrefixes.length].Prefix);
+        }
+        volumesToPollSet.add(latestVolPrefix);
+        const volumesToPoll = Array.from(volumesToPollSet);
 
         const radialBatcher = createRadialMicrobatcher(stationId);
 
@@ -474,7 +494,6 @@ async function pollChunks(stationId) {
                 console.log(`[${stationId}] Transitioning to new volume: ${volumeId}`);
                 state.lastVolume = volumeId;
                 state.lastChunkKey = null; 
-                state.headerChunk = null;
                 broadcast(stationId, { type: 'volume_start', stationId, volumeId });
                 stationState.set(stationId, state);
             }
@@ -488,11 +507,14 @@ async function pollChunks(stationId) {
                 const lastId = latestKey.split('/').pop();
                 console.log(`[${stationId}] Vol ${volPrefix}: Processing ${unseen.length} new chunks (${firstId} to ${lastId})`);
                 
-                if (!state.headerChunk) {
+                let headerChunk = state.headerChunks[volPrefix];
+                if (!headerChunk) {
                     const headerKey = contents.find(c => isStartChunk(c.Key))?.Key;
                     if (headerKey) {
                         const hRes = await fetchWithTimeout(`${BUCKET_URL}/${headerKey}`);
-                        state.headerChunk = await hRes.arrayBuffer();
+                        headerChunk = await hRes.arrayBuffer();
+                        state.headerChunks[volPrefix] = headerChunk;
+                        trimHeaderChunks(state);
                     }
                 }
 
@@ -503,8 +525,8 @@ async function pollChunks(stationId) {
                         const chunkBuffer = await dataRes.arrayBuffer();
                         
                         let combinedBuffer;
-                        if (state.headerChunk && !isStartChunk(chunk.Key)) {
-                            combinedBuffer = Buffer.concat([Buffer.from(state.headerChunk), Buffer.from(chunkBuffer)]);
+                        if (headerChunk && !isStartChunk(chunk.Key)) {
+                            combinedBuffer = Buffer.concat([Buffer.from(headerChunk), Buffer.from(chunkBuffer)]);
                         } else {
                             combinedBuffer = Buffer.from(chunkBuffer);
                         }
