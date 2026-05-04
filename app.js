@@ -2019,7 +2019,7 @@ const RadarCanvasLayer = L.Layer.extend({
         const scale = COLOR_SCALES[momentKey];
         if (!scale || !station || !this._topLeft) return;
 
-        const halfBeamWidthDeg = LIVE_RADIAL_DISPLAY_RESOLUTION_DEG * 0.575;
+        const halfBeamWidthDeg = LIVE_RADIAL_DISPLAY_RESOLUTION_DEG * 0.62;
         const gateStep = 1;
         const azimuth = normalizeAzimuth(radial.azimuth);
         let moment = null;
@@ -2067,23 +2067,25 @@ const RadarCanvasLayer = L.Layer.extend({
 
         ctx.setTransform(1, 0, 0, 1, 0, 0);
 
-        ctx.globalCompositeOperation = 'destination-out';
-        ctx.fillStyle = 'rgba(0,0,0,1)';
-        ctx.beginPath();
-        const clearLeft = this._rangeAzimuthToCanvasPoint(station.lat, station.lon, 500, azimuth - halfBeamWidthDeg);
-        const clearRight = this._rangeAzimuthToCanvasPoint(station.lat, station.lon, 500, azimuth + halfBeamWidthDeg);
-        ctx.moveTo(center.x, center.y);
-        ctx.lineTo(clearLeft.x, clearLeft.y);
-        ctx.lineTo(clearRight.x, clearRight.y);
-        ctx.closePath();
-        ctx.fill();
-
-        ctx.globalCompositeOperation = 'source-over';
         try {
             // Scaling Fix: gate_size and first_gate
             const firstGateActual = (moment.first_gate > 1000) ? moment.first_gate / 1000 : moment.first_gate;
             const gateSizeKm = (moment.gate_size >= 1) ? moment.gate_size / 1000 : moment.gate_size;
             const data = moment.moment_data;
+
+            ctx.globalCompositeOperation = 'destination-out';
+            ctx.fillStyle = 'rgba(0,0,0,1)';
+            this._fillGateWedge(
+                ctx,
+                station.lat,
+                station.lon,
+                azimuth,
+                halfBeamWidthDeg,
+                Math.max(0, firstGateActual),
+                firstGateActual + data.length * gateSizeKm
+            );
+
+            ctx.globalCompositeOperation = 'source-over';
             let startJ = null;
             let currentColor = null;
 
