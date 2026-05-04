@@ -3,7 +3,7 @@ body, html {
     padding: 0;
     height: 100%;
     width: 100%;
-    background-color: #0000a8;
+    background-color: #051019;
     font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
     color: white;
     overflow: hidden;
@@ -12,7 +12,7 @@ body, html {
 #map {
     height: 100%;
     width: 100%;
-    background-color: #00008a; /* Deep blue background for the map itself */
+    background-color: #071523;
 }
 
 #ui-overlay {
@@ -23,48 +23,65 @@ body, html {
     pointer-events: none;
     display: flex;
     flex-direction: column;
-    padding: 20px;
+    padding: 12px;
     z-index: 1000;
 }
 
 #header {
-    background: linear-gradient(135deg, rgba(20, 20, 20, 0.95), rgba(40, 40, 60, 0.8));
-    padding: 15px 25px;
-    border-bottom: 4px solid #ffaa00;
-    border-radius: 0 0 10px 0;
-    box-shadow: 0 4px 15px rgba(0,0,0,0.5);
-    width: fit-content;
+    width: 340px;
+    max-width: calc(100vw - 24px);
     position: relative;
-    backdrop-filter: blur(5px);
+}
+
+.control-panel {
+    background: rgba(8, 14, 20, 0.92);
+    border: 1px solid rgba(132, 155, 175, 0.36);
+    border-radius: 6px;
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+    padding: 12px;
+    pointer-events: auto;
+}
+
+.app-title-row {
+    align-items: baseline;
+    border-bottom: 1px solid rgba(132, 155, 175, 0.28);
+    display: flex;
+    gap: 10px;
+    justify-content: space-between;
+    padding-bottom: 8px;
 }
 
 #header h1 {
     margin: 0;
-    font-size: 26px;
-    letter-spacing: 3px;
+    font-size: 20px;
+    color: #f6fbff;
+    font-weight: 700;
+}
+
+.app-kicker {
+    color: #8cc8ff;
+    font-size: 11px;
+    font-weight: 700;
     text-transform: uppercase;
-    color: #ffffff;
-    text-shadow: 2px 2px 4px #000000;
-    font-weight: 800;
 }
 
 #timestamp {
-    font-size: 15px;
-    color: #ffd700;
-    margin-top: 5px;
-    font-weight: bold;
-    text-shadow: 1px 1px 2px #000;
+    font-size: 12px;
+    color: #f5d66b;
+    margin-top: 8px;
+    line-height: 1.35;
+    min-height: 16px;
 }
 
 #live-indicator {
     position: absolute;
-    top: -10px;
-    right: -10px;
+    top: 10px;
+    right: 10px;
     background: #ff0000;
     color: white;
     font-size: 10px;
     font-weight: bold;
-    padding: 2px 8px;
+    padding: 3px 8px;
     border-radius: 4px;
     animation: blink 1s infinite;
     display: none; /* Hidden by default */
@@ -72,10 +89,10 @@ body, html {
 
 /* Live Tracking Styles */
 #btn-live-tracking.active {
-    background: #ffffff !important;
-    color: #000000 !important;
-    border-color: #ffffff !important;
-    box-shadow: 0 0 15px #ffffff;
+    background: #e9f4ff !important;
+    color: #07111a !important;
+    border-color: #e9f4ff !important;
+    box-shadow: 0 0 0 1px rgba(233, 244, 255, 0.4);
 }
 
 @keyframes blink {
@@ -97,69 +114,149 @@ body, html {
     pointer-events: auto;
 }
 
+#controls-container-main {
+    margin-top: 10px;
+}
+
+.panel-toggle,
+.section-toggle {
+    align-items: center;
+    color: #d7e9f8;
+    cursor: pointer;
+    display: flex;
+    font-size: 12px;
+    font-weight: 700;
+    justify-content: space-between;
+    letter-spacing: 0;
+    margin: 0;
+    text-transform: uppercase;
+}
+
+.panel-toggle {
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(132, 155, 175, 0.22);
+    border-radius: 5px;
+    padding: 8px 10px;
+}
+
+.controls-body {
+    display: block;
+    margin-top: 8px;
+}
+
 #radar-controls {
     display: flex;
     flex-direction: column;
-    gap: 10px;
-    margin-top: 10px;
+    gap: 8px;
+    margin-top: 0;
     pointer-events: auto;
 }
 
+.control-section {
+    background: rgba(255, 255, 255, 0.055);
+    border: 1px solid rgba(132, 155, 175, 0.2);
+    border-radius: 6px;
+    padding: 10px;
+}
+
+.button-grid,
+.subgrid,
+.latency-row {
+    display: grid;
+    gap: 6px;
+    margin-top: 8px;
+}
+
+.button-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.subgrid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.latency-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 #radar-controls button {
-    background: rgba(100, 100, 150, 0.8);
-    color: white;
-    border: 2px solid #0055ff;
-    padding: 8px 12px;
+    background: rgba(32, 48, 62, 0.94);
+    color: #e7f1fb;
+    border: 1px solid rgba(92, 147, 195, 0.58);
+    padding: 8px 9px;
     font-size: 12px;
-    font-weight: bold;
+    font-weight: 700;
     cursor: pointer;
     border-radius: 4px;
     transition: background-color 0.3s ease, border-color 0.3s ease, box-shadow 0.3s ease, color 0.3s ease;
     pointer-events: auto;
-    text-transform: uppercase;
+    min-height: 34px;
 }
 
 #radar-controls button:hover {
-    background: rgba(120, 120, 180, 0.9);
-    box-shadow: 0 0 10px #0055ff;
+    background: rgba(44, 68, 88, 0.98);
+    box-shadow: 0 0 0 1px rgba(112, 187, 255, 0.3);
 }
 
 #radar-controls button.active {
-    background: #0055ff;
-    box-shadow: 0 0 15px #0055ff, inset 0 0 10px rgba(255, 255, 255, 0.3);
+    background: #0d70b7;
+    border-color: #6fc6ff;
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.18);
+}
+
+.nested-options {
+    border-left: 2px solid rgba(111, 198, 255, 0.42);
+    margin-top: 8px;
+    padding-left: 10px;
+}
+
+.secondary-button {
+    width: 100%;
+}
+
+.field-group {
+    color: #d7e9f8;
+    font-size: 12px;
+    margin: 8px 0;
+}
+
+.field-group label,
+#radar-selector label {
+    display: block;
+    margin-bottom: 5px;
 }
 
 #radar-selector {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-top: 10px;
+    display: block;
+    margin-top: 8px;
     font-size: 12px;
-    font-weight: bold;
-    text-transform: uppercase;
     color: #cccccc;
     pointer-events: auto;
 }
 
 #radar-selector label {
-    color: #cccccc;
+    color: #d7e9f8;
+    font-weight: 700;
 }
 
-#radar-selector select {
-    background: rgba(100, 100, 150, 0.8);
-    color: white;
-    border: 2px solid #0055ff;
-    padding: 6px 10px;
-    font-size: 11px;
-    font-weight: bold;
+#radar-selector select,
+#live-elevation-select {
+    background: rgba(20, 31, 40, 0.98);
+    color: #f6fbff;
+    border: 1px solid rgba(92, 147, 195, 0.58);
+    padding: 8px 9px;
+    font-size: 12px;
+    font-weight: 600;
     cursor: pointer;
     border-radius: 4px;
     transition: background-color 0.3s ease, border-color 0.3s ease, box-shadow 0.3s ease, color 0.3s ease;
+    width: 100%;
 }
 
-#radar-selector select:hover {
-    background: rgba(120, 120, 180, 0.9);
-    box-shadow: 0 0 10px #0055ff;
+#radar-selector select:hover,
+#live-elevation-select:hover {
+    background: rgba(30, 48, 62, 0.98);
+    box-shadow: 0 0 0 1px rgba(112, 187, 255, 0.3);
 }
 
 #radar-selector select option {
@@ -168,38 +265,54 @@ body, html {
 }
 
 #btn-loop {
-    background: rgba(0, 128, 0, 0.8);
-    border-color: #00ff00;
+    border-color: rgba(82, 206, 139, 0.75);
 }
 
 #btn-loop:hover {
-    background: rgba(0, 160, 0, 0.9);
-    box-shadow: 0 0 10px #00ff00;
+    background: rgba(28, 85, 56, 0.95);
 }
 
 #btn-loop.active {
-    background: #00cc00;
-    box-shadow: 0 0 15px #00cc00, inset 0 0 10px rgba(255, 255, 255, 0.3);
+    background: #159653;
+    border-color: #77e0a5;
+}
+
+.layer-grid {
+    display: grid;
+    gap: 7px 10px;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    margin-top: 8px;
+}
+
+.layer-grid label,
+.nested-options label {
+    align-items: center;
+    color: #e7f1fb;
+    cursor: pointer;
+    display: flex;
+    font-size: 12px;
+    gap: 6px;
 }
 
 #legend {
     position: absolute;
-    top: 20px;
-    right: 20px;
-    background: rgba(0, 0, 0, 0.8);
-    padding: 15px;
-    border: 1px solid #555;
+    top: 12px;
+    right: 12px;
+    background: rgba(8, 14, 20, 0.92);
+    padding: 12px;
+    border: 1px solid rgba(132, 155, 175, 0.36);
     pointer-events: auto;
     z-index: 1001;
-    border-radius: 5px;
+    border-radius: 6px;
+    max-width: 280px;
     transition: background-color 0.3s ease, border-color 0.3s ease, box-shadow 0.3s ease, opacity 0.3s ease;
 }
 
 #legend-toggle-btn {
     position: absolute;
-    top: 20px;
-    right: 20px;
-    background: rgba(46, 46, 46, 0.9);
+    top: 12px;
+    right: 12px;
+    background: rgba(8, 14, 20, 0.92);
     color: white;
     padding: 8px;
     border-radius: 5px;
@@ -207,42 +320,67 @@ body, html {
     z-index: 1002;
     pointer-events: auto;
     display: none; /* Only show on mobile if needed or as a generic toggle */
-    border: 1px solid #0055ff;
+    border: 1px solid rgba(132, 155, 175, 0.36);
 }
 
 /* Mobile Responsiveness */
 @media (max-width: 768px) {
     #ui-overlay {
-        padding: 10px;
+        bottom: 0;
+        justify-content: flex-end;
+        padding: 8px;
     }
 
     #header {
-        padding: 8px 15px;
-        width: calc(100% - 30px);
+        max-height: 58vh;
+        width: 100%;
+    }
+
+    .control-panel {
+        border-radius: 8px;
+        box-sizing: border-box;
+        overflow-y: auto;
+        padding: 10px;
     }
 
     #header h1 {
         font-size: 18px;
     }
 
+    .app-kicker {
+        font-size: 10px;
+    }
+
     #main-controls-toggle {
-        width: 100% !important;
         box-sizing: border-box;
     }
 
     #main-controls-content {
-        width: 100% !important;
         box-sizing: border-box;
+    }
+
+    .button-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .subgrid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
     }
 
     #legend {
         top: auto;
-        bottom: 20px;
-        right: 10px;
-        left: 10px;
+        bottom: calc(58vh + 18px);
+        right: 8px;
+        left: 8px;
         max-height: 30vh;
         overflow-y: auto;
         font-size: 10px;
+        max-width: none;
+    }
+
+    #legend-toggle-btn {
+        top: 8px;
+        right: 8px;
     }
 
     .legend-item, .v-scale {
@@ -255,11 +393,13 @@ body, html {
     }
 
     #radar-controls button {
-        padding: 10px 15px; /* Larger touch area */
+        padding: 10px 9px;
         font-size: 13px;
+        min-height: 42px;
     }
 
-    #radar-selector select {
+    #radar-selector select,
+    #live-elevation-select {
         padding: 8px 12px;
         font-size: 12px;
     }

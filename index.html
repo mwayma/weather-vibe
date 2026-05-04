@@ -10,35 +10,44 @@
 <body>
     <div id="map"></div>
     <div id="ui-overlay">
-        <div id="header">
+        <section id="header" class="control-panel" aria-label="Weather radar controls">
             <div id="live-indicator">LIVE</div>
-            <h1>NATIONAL WEATHER RADAR</h1>
-            <div id="timestamp">Loading...</div>
+            <div class="app-title-row">
+                <h1>Weather Vibe</h1>
+                <div class="app-kicker">Radar Console</div>
+            </div>
+            <div id="timestamp" class="status-line">Loading...</div>
             <div id="radar-status-warning"></div>
-            <div id="controls-container-main" style="pointer-events: auto;">
-                <h2 id="main-controls-toggle" style="margin: 0; font-size: 1.2em; color: #fff; cursor: pointer; display: flex; justify-content: space-between; background: rgba(0,0,0,0.5); padding: 10px; border-radius: 5px; width: 220px;">Controls <span>▶</span></h2>
-                <div id="main-controls-content" style="display: none; padding: 10px; border-radius: 5px; background: rgba(0,0,0,0.5); margin-top: 5px; width: 220px;">
+            <div id="controls-container-main">
+                <h2 id="main-controls-toggle" class="panel-toggle">Controls <span>▼</span></h2>
+                <div id="main-controls-content" class="controls-body">
                     <div id="radar-controls">
-                        <div class="control-section" style="margin-bottom: 15px; background: rgba(0,0,0,0.5); padding: 10px; border-radius: 5px;">
-                            <h3 id="weather-views-toggle" style="margin-top: 0; margin-bottom: 10px; font-size: 1.1em; color: #fff; cursor: pointer; display: flex; justify-content: space-between;">
-                                Weather Views <span>▼</span>
+                        <div class="control-section">
+                            <h3 id="weather-views-toggle" class="section-toggle">
+                                Products <span>▼</span>
                             </h3>
                             <div id="weather-views-content">
-                                <button id="btn-reflectivity" class="active" style="width: 100%; margin-bottom: 5px;">Precipitation (Rain)</button>
-                                <div id="precip-options" style="padding-left: 10px; margin-bottom: 10px;">
-                                    <button id="btn-loop" style="width: 100%; font-size: 0.9em; padding: 5px;">Play Loop</button>
+                                <div class="button-grid">
+                                    <button id="btn-reflectivity" class="active">Precipitation</button>
+                                    <button id="btn-live-tracking">Live Radar</button>
+                                    <button id="btn-velocity">Wind</button>
+                                    <button id="btn-temperature">Temperature</button>
                                 </div>
-                                <button id="btn-live-tracking" style="width: 100%; margin-bottom: 5px;">Live Tracking</button>
-                                <div id="live-tracking-options" style="padding-left: 10px; margin-bottom: 10px; display: none;">
-                                    <button id="btn-live-reflectivity" class="active" style="width: 100%; font-size: 0.9em; padding: 5px; margin-bottom: 3px;">Composite Reflectivity (Z)</button>
-                                    <button id="btn-live-velocity" style="width: 100%; font-size: 0.9em; padding: 5px; margin-bottom: 3px;">Base Velocity (V)</button>
-                                    <button id="btn-live-debris" style="width: 100%; font-size: 0.9em; padding: 5px; margin-bottom: 3px;">Correlation Coeff (CC)</button>
-                                    <button id="btn-live-zdr" style="width: 100%; font-size: 0.9em; padding: 5px; margin-bottom: 3px;">Differential Refl (ZDR)</button>
-                                    <button id="btn-live-width" style="width: 100%; font-size: 0.9em; padding: 5px; margin-bottom: 6px;">Spectrum Width (SW)</button>
+                                <div id="precip-options" class="nested-options">
+                                    <button id="btn-loop" class="secondary-button">Play Loop</button>
+                                </div>
+                                <div id="live-tracking-options" class="nested-options" style="display: none;">
+                                    <div class="subgrid">
+                                        <button id="btn-live-reflectivity" class="active">Reflectivity</button>
+                                        <button id="btn-live-velocity">Velocity</button>
+                                        <button id="btn-live-debris">CC</button>
+                                        <button id="btn-live-zdr">ZDR</button>
+                                        <button id="btn-live-width">Width</button>
+                                    </div>
 
-                                    <div style="margin-bottom: 6px; color: #fff; font-size: 0.85em;">
+                                    <div class="field-group">
                                         <label for="live-elevation-select">View Elevation:</label>
-                                        <select id="live-elevation-select" style="width: 100%; margin-top: 2px; padding: 3px; font-size: 0.9em; background: #333; color: #fff; border: 1px solid #555;">
+                                        <select id="live-elevation-select">
                                             <option value="auto">Auto (Composite Z / Base Tilt)</option>
                                             <option value="1">Tilt 1 (0.5° approx)</option>
                                             <option value="2">Tilt 2</option>
@@ -51,40 +60,40 @@
                                         </select>
                                     </div>
 
-                                    <button id="btn-live-buffered" class="active" style="width: 100%; font-size: 0.85em; padding: 5px; margin-bottom: 3px;">Buffered Live</button>
-                                    <button id="btn-live-low-latency" style="width: 100%; font-size: 0.85em; padding: 5px;">Low Latency</button>
+                                    <div class="latency-row">
+                                        <button id="btn-live-buffered" class="active">Buffered</button>
+                                        <button id="btn-live-low-latency">Low Latency</button>
+                                    </div>
                                 </div>
 
-                                <button id="btn-velocity" style="width: 100%; margin-bottom: 5px;">Base Velocity (Wind)</button>
-                                <button id="btn-temperature" style="width: 100%; margin-bottom: 5px;">Temperature</button>
-                                <div id="temp-options" style="padding-left: 10px; margin-bottom: 10px; display: none; color: #eee; font-size: 0.9em;">
-                                    <label style="cursor: pointer;"><input type="checkbox" id="chk-temp-gradient" checked> Map Gradient Overlay</label>
+                                <div id="temp-options" class="nested-options" style="display: none;">
+                                    <label><input type="checkbox" id="chk-temp-gradient" checked> Gradient Overlay</label>
                                 </div>
                             </div>
                         </div>
-                        <div class="control-section" style="background: rgba(0,0,0,0.5); padding: 10px; border-radius: 5px;">
-                            <h3 id="map-layers-toggle" style="margin: 0; font-size: 1.1em; color: #fff; cursor: pointer; display: flex; justify-content: space-between;">
-                                Map Controls <span>▼</span>
+                        <div class="control-section">
+                            <h3 id="map-layers-toggle" class="section-toggle">
+                                Map Layers <span>▼</span>
                             </h3>
-                            <div id="map-layers-content" style="margin-top: 10px; color: #eee; font-size: 0.95em;">
-                                <div style="margin-bottom: 5px;"><label style="cursor: pointer;"><input type="checkbox" id="chk-cities" checked> Cities</label></div>
-                                <div style="margin-bottom: 5px;"><label style="cursor: pointer;"><input type="checkbox" id="chk-roads" checked> Roads</label></div>
-                                <div style="margin-bottom: 5px;"><label style="cursor: pointer;"><input type="checkbox" id="chk-rivers" checked> Rivers</label></div>
-                                <div style="margin-bottom: 5px;"><label style="cursor: pointer;"><input type="checkbox" id="chk-water" checked> Water Bodies</label></div>
-                                <div style="margin-bottom: 5px;"><label style="cursor: pointer;"><input type="checkbox" id="chk-counties" checked> Counties</label></div>
-                                <div style="margin-bottom: 5px;"><label style="cursor: pointer;"><input type="checkbox" id="chk-states" checked> States</label></div>
+                            <div id="map-layers-content" class="layer-grid">
+                                <label><input type="checkbox" id="chk-cities" checked> Cities</label>
+                                <label><input type="checkbox" id="chk-roads" checked> Roads</label>
+                                <label><input type="checkbox" id="chk-rivers" checked> Rivers</label>
+                                <label><input type="checkbox" id="chk-water" checked> Water</label>
+                                <label><input type="checkbox" id="chk-counties" checked> Counties</label>
+                                <label><input type="checkbox" id="chk-states" checked> States</label>
                             </div>
                         </div>
                     </div>
-                    <div id="radar-selector">
-                        <label for="radar-select">Select Radar:</label>
+                    <div id="radar-selector" class="control-section">
+                        <label for="radar-select">Radar Site</label>
                         <select id="radar-select">
                             <option value="composite">Composite (Multi-site)</option>
                         </select>
                     </div>
                 </div>
             </div>
-        </div>
+        </section>
         <div id="legend-toggle-btn">LEGEND <span>▼</span></div>
         <div id="legend">
             <div id="reflectivity-legend">
