@@ -10,7 +10,7 @@ self.onmessage = function(e) {
     }
     
     if (type === 'update') {
-        const { requestId, bounds, zoom, minGapLat, minGapLng, maxCitiesOnScreen } = data;
+        const { bounds, zoom, minGapLat, minGapLng, maxCitiesOnScreen } = data;
         const { south, north, west, east } = bounds;
         
         const visibleMarkers = [];
@@ -36,6 +36,6 @@ self.onmessage = function(e) {
             }
         }
         
-        self.postMessage({ visibleMarkers, requestId });
+        self.postMessage({ visibleMarkers });
     }
 };

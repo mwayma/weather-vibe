@@ -4,7 +4,6 @@ const map = L.map('map', {
     minZoom: 4,
     maxZoom: 12,
     zoomControl: false,
-    preferCanvas: true,
     zoomSnap: 0.1,
     zoomDelta: 0.1,
     wheelPxPerZoomLevel: 200
@@ -20,12 +19,6 @@ map.createPane('waterPane');
 map.getPane('waterPane').style.zIndex = 160;
 map.createPane('boundaryPane');
 map.getPane('boundaryPane').style.zIndex = 170;
-map.createPane('liveRadarPane');
-map.getPane('liveRadarPane').style.zIndex = 420;
-map.getPane('liveRadarPane').style.pointerEvents = 'none';
-map.createPane('liveSweepPane');
-map.getPane('liveSweepPane').style.zIndex = 460;
-map.getPane('liveSweepPane').style.pointerEvents = 'none';
 
 // 1. Base Map Setup (Local GeoJSON) 
 const landStyle = { fillColor: "#818181", fillOpacity: 1, color: "none", interactive: false };
@@ -34,25 +27,20 @@ const riverStyle = { color: "#0000a8", weight: 1.5, opacity: 1, interactive: fal
 const stateStyle = { color: "#ffffff", weight: 2, opacity: 0.8, fillOpacity: 0, interactive: false };
 const countyStyle = { color: "#444466", weight: 0.8, opacity: 0.5, fillOpacity: 0, interactive: false };
 
-const landRenderer = L.canvas({ pane: 'landPane', padding: 0.5 });
-const waterRenderer = L.canvas({ pane: 'waterPane', padding: 0.5 });
-const boundaryRenderer = L.canvas({ pane: 'boundaryPane', padding: 0.5 });
-const liveSweepRenderer = L.canvas({ pane: 'liveSweepPane', padding: 0.5 });
-
 let landLayer = null;
 let waterLayer = null;
 let riverLayer = null;
 
 // Load base land and water bodies
 fetch('data/land.json').then(res => res.json()).then(data => {
-    landLayer = L.geoJSON(data, { style: landStyle, pane: 'landPane', renderer: landRenderer }).addTo(map);
+    landLayer = L.geoJSON(data, { style: landStyle, pane: 'landPane' }).addTo(map);
 });
 fetch('data/lakes.json').then(res => res.json()).then(data => {
-    waterLayer = L.geoJSON(data, { style: waterStyle, pane: 'waterPane', renderer: waterRenderer });
+    waterLayer = L.geoJSON(data, { style: waterStyle, pane: 'waterPane' });
     if (document.getElementById('chk-water')?.checked !== false) waterLayer.addTo(map);
 });
 fetch('data/rivers.json').then(res => res.json()).then(data => {
-    riverLayer = L.geoJSON(data, { style: riverStyle, pane: 'waterPane', renderer: waterRenderer });
+    riverLayer = L.geoJSON(data, { style: riverStyle, pane: 'waterPane' });
     if (document.getElementById('chk-rivers')?.checked !== false) riverLayer.addTo(map);
 });
 
@@ -62,13 +50,13 @@ let countiesLayer = null;
 const countiesLookup = {};
 
 fetch('data/states.json').then(res => res.json()).then(data => {
-    statesLayer = L.geoJSON(data, { style: stateStyle, pane: 'boundaryPane', renderer: boundaryRenderer });
+    statesLayer = L.geoJSON(data, { style: stateStyle, pane: 'boundaryPane' });
     if (document.getElementById('chk-states')?.checked !== false) statesLayer.addTo(map);
 });
 fetch('data/counties.json').then(res => res.json()).then(data => {
     countiesData = data;
     data.features.forEach(c => { countiesLookup[c.properties.STATE + c.properties.COUNTY] = c; });
-    countiesLayer = L.geoJSON(data, { style: countyStyle, pane: 'boundaryPane', renderer: boundaryRenderer });
+    countiesLayer = L.geoJSON(data, { style: countyStyle, pane: 'boundaryPane' });
     if (document.getElementById('chk-counties')?.checked !== false) countiesLayer.addTo(map);
     if (typeof activeAlertData !== 'undefined' && activeAlertData) renderAlerts();
 });
@@ -324,8 +312,6 @@ function renderAlerts() {
 const cityLayer = L.layerGroup().addTo(map);
 let allCities = [];
 let isCitiesVisible = true;
-let cityUpdateSeq = 0;
-let lastRenderedCityKey = '';
 
 // Load local cities as baseline
 fetch('data/cities.json')
@@ -348,8 +334,7 @@ fetch('data/cities.json')
 
 const citiesWorker = new Worker('cities-worker.js');
 citiesWorker.onmessage = function(e) {
-    const { visibleMarkers, requestId } = e.data;
-    if (requestId && requestId !== cityUpdateSeq) return;
+    const { visibleMarkers } = e.data;
     renderVisibleCities(visibleMarkers);
 };
 
@@ -361,7 +346,6 @@ function updateVisibleCities() {
     const zoom = map.getZoom();
     
     const data = {
-        requestId: ++cityUpdateSeq,
         bounds: {
             south: bounds.getSouth(),
             north: bounds.getNorth(),
@@ -378,12 +362,6 @@ function updateVisibleCities() {
 }
 
 function renderVisibleCities(visibleMarkers) {
-    const cityKey = `${currentRadarMode}|` + visibleMarkers
-        .map(city => `${city.city}|${city.state}|${city.latitude}|${city.longitude}`)
-        .join(';');
-    if (cityKey === lastRenderedCityKey) return;
-    lastRenderedCityKey = cityKey;
-
     cityLayer.clearLayers();
     
     visibleMarkers.forEach(city => {
@@ -527,51 +505,41 @@ function updateRadarSelector() {
     const select = document.getElementById('radar-select');
     if (!select) return;
 
-    const previousRadarId = selectedRadarId;
     const nearbyRadars = getNearbyRadars();
-    const isSingleSiteMode = currentRadarMode === 'live-tracking' || currentRadarMode === 'velocity';
-    const currentStation = findStation(selectedRadarId);
-    const isCurrentSelectionAvailable = selectedRadarId === 'composite' || nearbyRadars.some(radar => radar.id === selectedRadarId);
+    
+    // Clear existing options except composite
+    while (select.options.length > 1) {
+        select.remove(1);
+    }
+    
+    let isCurrentSelectionAvailable = (selectedRadarId === 'composite');
 
-    if (!selectedRadarId || (selectedRadarId === 'composite' && isSingleSiteMode) || (!currentStation && selectedRadarId !== 'composite')) {
+    // Add nearby radars
+    nearbyRadars.forEach(radar => {
+        const option = document.createElement('option');
+        option.value = radar.id;
+        option.text = `${radar.name} (${Math.round(radar.distance)} mi)`;
+        select.appendChild(option);
+        
+        if (radar.id === selectedRadarId) {
+            isCurrentSelectionAvailable = true;
+        }
+    });
+    
+    const needsSingleSite = currentRadarMode !== 'reflectivity';
+    if (!isCurrentSelectionAvailable || selectedRadarId === '' || (selectedRadarId === 'composite' && needsSingleSite)) {
         if (nearbyRadars.length > 0) {
             selectedRadarId = nearbyRadars[0].id;
         } else {
             selectedRadarId = 'composite';
         }
-    } else if (!isCurrentSelectionAvailable && !isSingleSiteMode && currentRadarMode !== 'reflectivity') {
-        selectedRadarId = nearbyRadars.length > 0 ? nearbyRadars[0].id : 'composite';
-    }
-
-    const displayRadars = [...nearbyRadars];
-    if (currentStation && selectedRadarId !== 'composite' && !displayRadars.some(radar => radar.id === currentStation.id)) {
-        displayRadars.unshift({ ...currentStation, distance: null, pinned: true });
-    }
-
-    const optionsKey = displayRadars
-        .map(radar => `${radar.id}:${radar.pinned ? 'selected' : Math.round(radar.distance)}`)
-        .join('|');
-    if (select.dataset.optionsKey !== optionsKey) {
-        while (select.options.length > 1) {
-            select.remove(1);
+        
+        if (NEXRAD_STATIONS.length > 0) {
+            updateRadarLayersBasedOnMode();
         }
-
-        displayRadars.forEach(radar => {
-            const option = document.createElement('option');
-            option.value = radar.id;
-            option.text = radar.pinned
-                ? `${radar.name} (selected)`
-                : `${radar.name} (${Math.round(radar.distance)} mi)`;
-            select.appendChild(option);
-        });
-
-        select.dataset.optionsKey = optionsKey;
     }
     
     select.value = selectedRadarId;
-    if (selectedRadarId !== previousRadarId && NEXRAD_STATIONS.length > 0) {
-        updateRadarLayersBasedOnMode();
-    }
 }
 
 // Update radar selector on map move with debounce
@@ -597,7 +565,7 @@ function formatIEMTime(date) {
 function setTimestampForMode(mode, text) {
     if (currentRadarMode !== mode) return;
     const timestampEl = document.getElementById('timestamp');
-    if (timestampEl && timestampEl.textContent !== text) timestampEl.textContent = text;
+    if (timestampEl) timestampEl.innerText = text;
 }
 
 function formatLag(ms) {
@@ -770,7 +738,6 @@ let targetAzimuth = 0;
 let currentAngle = 0;
 let sweepSpeed = 0.009; // Degrees per millisecond
 let lastSweepTime = performance.now();
-let lastSweepLineUpdate = 0;
 let lastAzimuthMetadataTime = 0;
 let liveCanvasDrawPending = false;
 let lastLiveStatusUpdate = 0;
@@ -791,7 +758,6 @@ const LIVE_DATA_STALE_MS = 25000;
 const LIVE_DATA_RESUBSCRIBE_MS = 60000;
 const LIVE_SOCKET_STALE_MS = 45000;
 const LIVE_BUFFER_DELAY_MS = 15000;
-const SWEEP_LINE_FRAME_MS = 33;
 const LIVE_BUFFER_MAX_EXTRA_LAG_MS = 600000; // 10 minutes history allowed in buffer
 const MAX_BUFFERED_RADIALS_PER_FRAME = 40;
 const MAX_BUFFERED_QUEUE_RADIALS = 5000;
@@ -1851,7 +1817,6 @@ function startLiveTracking() {
     targetAzimuth = 0;
     lastAzimuthMetadataTime = 0;
     lastLiveStatusUpdate = 0;
-    lastSweepLineUpdate = 0;
     lastSweepTime = performance.now();
 
     // Fix memory leak: Remove old layers from liveTrackingLayer
@@ -1863,22 +1828,11 @@ function startLiveTracking() {
     if (!station) return;
 
     radarStationMarker = L.circleMarker([station.lat, station.lon], {
-        radius: 10,
-        fillColor: '#ffffff',
-        color: '#000',
-        weight: 2,
-        opacity: 1,
-        fillOpacity: 1,
-        pane: 'liveSweepPane',
-        renderer: liveSweepRenderer
+        radius: 10, fillColor: '#ffffff', color: '#000', weight: 2, opacity: 1, fillOpacity: 1
     }).addTo(liveTrackingLayer);
 
     azimuthLine = L.polyline([[station.lat, station.lon], [station.lat, station.lon]], {
-        color: '#ffffff',
-        weight: 2,
-        opacity: liveLatencyMode === 'buffered' ? 0.8 : 0,
-        pane: 'liveSweepPane',
-        renderer: liveSweepRenderer
+        color: '#ffffff', weight: 2, opacity: liveLatencyMode === 'buffered' ? 0.8 : 0
     }).addTo(liveTrackingLayer);
 
     const liveModeLabel = liveLatencyMode === 'buffered'
@@ -1914,9 +1868,8 @@ function startLiveTracking() {
         const endLat = station.lat + dist * Math.sin(rad);
         const endLon = station.lon + dist * Math.cos(rad);
         
-        if (azimuthLine && now - lastSweepLineUpdate >= SWEEP_LINE_FRAME_MS) {
+        if (azimuthLine) {
             azimuthLine.setLatLngs([[station.lat, station.lon], [endLat, endLon]]);
-            lastSweepLineUpdate = now;
         }
 
         processBufferedRadials();
@@ -1927,6 +1880,7 @@ function startLiveTracking() {
                 applyLiveRadial(roundedAz, radial);
                 incomingRadialBuffer.delete(roundedAz);
             }
+            requestLiveCanvasDraw();
         } else if (incomingRadialBuffer.size > 0) {
             // Initialize rendering if data is waiting
             for (const [roundedAz, radial] of incomingRadialBuffer) {
@@ -1947,18 +1901,17 @@ function startLiveTracking() {
 
 const RadarCanvasLayer = L.Layer.extend({
     onAdd: function(map) {
-        this._container = L.DomUtil.create('canvas', 'leaflet-layer');
+        this._container = L.DomUtil.create('canvas', 'leaflet-zoom-animated');
         this._container.style.pointerEvents = 'none';
-        map.getPane('liveRadarPane').appendChild(this._container);
+        map.getPanes().overlayPane.appendChild(this._container);
 
         this._offscreenCanvas = document.createElement('canvas');
         this._offscreenCtx = this._offscreenCanvas.getContext('2d');
         this._needsFullRedraw = true;
 
         map.on('viewreset', this._reset, this); 
-        map.on('zoomstart', this._onZoomStart, this);
+        map.on('move', this._onMove, this);
         map.on('moveend', this._reset, this);
-        map.on('zoomend', this._reset, this);
         this._reset();
     },
     onRemove: function(map) {
@@ -1966,14 +1919,23 @@ const RadarCanvasLayer = L.Layer.extend({
             this._container.parentNode.removeChild(this._container);
         }
         map.off('viewreset', this._reset, this); 
-        map.off('zoomstart', this._onZoomStart, this);
+        map.off('move', this._onMove, this);
         map.off('moveend', this._reset, this);
-        map.off('zoomend', this._reset, this);
         this._offscreenCanvas = null;
         this._offscreenCtx = null;
     },
-    _onZoomStart: function() {
-        if (this._container) this._container.style.visibility = 'hidden';
+    _onMove: function() {
+        const pos = map.containerPointToLayerPoint([0, 0]);
+        L.DomUtil.setPosition(this._container, pos);
+        this._topLeft = pos;
+        this._updateCachedCoords();
+        this._draw(); 
+    },
+    _getPixelsPerKm: function(stationLat, stationLon) {
+        const centerLayer = map.latLngToLayerPoint([stationLat, stationLon]);
+        const refPoint = L.latLng(stationLat + 0.00899, stationLon);
+        const refLayer = map.latLngToLayerPoint(refPoint);
+        return centerLayer.distanceTo(refLayer);
     },
     _updateCachedCoords: function() {
         const station = NEXRAD_STATIONS.find(s => s.id === selectedRadarId);
@@ -1985,8 +1947,7 @@ const RadarCanvasLayer = L.Layer.extend({
             x: (centerLayer.x - this._topLeft.x) * dpr, 
             y: (centerLayer.y - this._topLeft.y) * dpr 
         };
-        this._cachedStation = station;
-        this._cachedDpr = dpr;
+        this._cachedPixelsPerKm = this._getPixelsPerKm(station.lat, station.lon) * dpr;
     },
     _reset: function() {
         const size = map.getSize();
@@ -2001,10 +1962,8 @@ const RadarCanvasLayer = L.Layer.extend({
         this._offscreenCanvas.height = size.y * dpr;
 
         const pos = map.containerPointToLayerPoint([0, 0]);
-        L.DomUtil.setTransform(this._container, pos, 1);
-        this._container.style.visibility = 'visible';
+        L.DomUtil.setPosition(this._container, pos);
         this._topLeft = pos;
-        this._bounds = map.getBounds();
         this._updateCachedCoords();
         this._needsFullRedraw = true;
         this._draw();
@@ -2014,57 +1973,36 @@ const RadarCanvasLayer = L.Layer.extend({
         
         const ctx = this._offscreenCtx;
         const center = this._cachedCenter;
-        const station = this._cachedStation || findStation(getCurrentStationId());
+        const pixelsPerKm = this._cachedPixelsPerKm;
         const momentKey = getLiveMomentKey();
         const scale = COLOR_SCALES[momentKey];
-        if (!scale || !station || !this._topLeft) return;
+        if (!scale) return;
 
-        const fillHalfBeamWidthDeg = 0.6;
+        const arcWidthRad = (LIVE_RADIAL_DISPLAY_RESOLUTION_DEG * Math.PI / 180) * 1.15;
         const gateStep = 1;
         const azimuth = normalizeAzimuth(radial.azimuth);
         let moment = null;
 
         if (selectedLiveElevation === 'auto') {
             if (currentLiveMode === 'reflectivity') {
+                let compositeData = null;
                 let bestMoment = null;
-                let masterElev = 1;
                 
                 for (let e = 1; e <= 22; e++) {
                     const m = radial.elevations[e]?.reflectivity;
                     if (m?.moment_data) {
-                        bestMoment = m;
-                        masterElev = e;
-                        break;
-                    }
-                }
-
-                if (bestMoment) {
-                    const masterFirst = this._normalizeGateDistanceKm(bestMoment.first_gate);
-                    const masterSize = this._normalizeGateDistanceKm(bestMoment.gate_size);
-                    const compositeData = new Float32Array(bestMoment.moment_data);
-
-                    if (masterSize > 0) {
-                        for (let e = masterElev + 1; e <= 22; e++) {
-                            const m = radial.elevations[e]?.reflectivity;
-                            if (!m?.moment_data) continue;
-
-                            const mFirst = this._normalizeGateDistanceKm(m.first_gate);
-                            const mSize = this._normalizeGateDistanceKm(m.gate_size);
-                            if (!(mSize > 0)) continue;
-
-                            for (let i = 0; i < m.moment_data.length; i++) {
-                                const val = m.moment_data[i];
-                                if (val === null || val === undefined || Number.isNaN(Number(val))) continue;
-
-                                const rangeKm = mFirst + i * mSize;
-                                const masterIdx = Math.round((rangeKm - masterFirst) / masterSize);
-                                if (masterIdx >= 0 && masterIdx < compositeData.length && val > compositeData[masterIdx]) {
-                                    compositeData[masterIdx] = val;
-                                }
+                        if (!compositeData) {
+                            compositeData = new Float32Array(m.moment_data.length).fill(-Infinity);
+                            bestMoment = m;
+                        }
+                        for (let i = 0; i < m.moment_data.length; i++) {
+                            if (m.moment_data[i] > compositeData[i]) {
+                                compositeData[i] = m.moment_data[i];
                             }
                         }
                     }
-
+                }
+                if (bestMoment) {
                     moment = { ...bestMoment, moment_data: compositeData };
                 }
             } else {
@@ -2087,15 +2025,24 @@ const RadarCanvasLayer = L.Layer.extend({
         if (!moment?.moment_data) return;
 
         ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.save();
+        ctx.translate(center.x, center.y);
+        ctx.rotate((azimuth - 90) * Math.PI / 180);
 
+        ctx.globalCompositeOperation = 'destination-out';
+        ctx.fillStyle = 'rgba(0,0,0,1)';
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.arc(0, 0, 500 * pixelsPerKm, -arcWidthRad / 2, arcWidthRad / 2);
+        ctx.closePath();
+        ctx.fill();
+
+        ctx.globalCompositeOperation = 'source-over';
         try {
             // Scaling Fix: gate_size and first_gate
-            const firstGateActual = this._normalizeGateDistanceKm(moment.first_gate);
-            const gateSizeKm = this._normalizeGateDistanceKm(moment.gate_size);
+            const firstGateActual = (moment.first_gate > 1000) ? moment.first_gate / 1000 : moment.first_gate;
+            const gateSizeKm = (moment.gate_size >= 1) ? moment.gate_size / 1000 : moment.gate_size;
             const data = moment.moment_data;
-            if (!(gateSizeKm > 0)) return;
-
-            ctx.globalCompositeOperation = 'source-over';
             let startJ = null;
             let currentColor = null;
 
@@ -2105,66 +2052,24 @@ const RadarCanvasLayer = L.Layer.extend({
                 
                 if (color !== currentColor) {
                     if (currentColor !== null && startJ !== null) {
-                        const r1 = firstGateActual + startJ * gateSizeKm;
-                        const r2 = firstGateActual + j * gateSizeKm;
+                        const r1 = (firstGateActual + startJ * gateSizeKm) * pixelsPerKm;
+                        const r2 = (firstGateActual + j * gateSizeKm) * pixelsPerKm;
                         ctx.fillStyle = currentColor;
-                        this._fillGateWedge(ctx, station.lat, station.lon, azimuth, fillHalfBeamWidthDeg, r1, r2);
+                        ctx.beginPath();
+                        ctx.arc(0, 0, r1, -arcWidthRad / 2, arcWidthRad / 2);
+                        ctx.arc(0, 0, r2, arcWidthRad / 2, -arcWidthRad / 2, true);
+                        ctx.closePath();
+                        ctx.fill();
                     }
                     currentColor = color;
                     startJ = j;
                 }
             }
         } finally {
+            ctx.restore();
             ctx.setTransform(1, 0, 0, 1, 0, 0);
             ctx.globalCompositeOperation = 'source-over';
         }
-    },
-    _normalizeGateDistanceKm: function(value) {
-        const numeric = Number(value);
-        if (!Number.isFinite(numeric)) return 0;
-        return numeric > 10 ? numeric / 1000 : numeric;
-    },
-    _rangeAzimuthToCanvasPoint: function(stationLat, stationLon, rangeKm, azimuthDeg) {
-        const earthRadiusKm = 6371.0088;
-        const angularDistance = rangeKm / earthRadiusKm;
-        const bearing = normalizeAzimuth(azimuthDeg) * Math.PI / 180;
-        const lat1 = stationLat * Math.PI / 180;
-        const lon1 = stationLon * Math.PI / 180;
-
-        const sinLat1 = Math.sin(lat1);
-        const cosLat1 = Math.cos(lat1);
-        const sinDistance = Math.sin(angularDistance);
-        const cosDistance = Math.cos(angularDistance);
-
-        const lat2 = Math.asin(
-            sinLat1 * cosDistance +
-            cosLat1 * sinDistance * Math.cos(bearing)
-        );
-        const lon2 = lon1 + Math.atan2(
-            Math.sin(bearing) * sinDistance * cosLat1,
-            cosDistance - sinLat1 * Math.sin(lat2)
-        );
-
-        const point = map.latLngToLayerPoint([lat2 * 180 / Math.PI, lon2 * 180 / Math.PI]);
-        const dpr = this._cachedDpr || window.devicePixelRatio || 1;
-        return {
-            x: (point.x - this._topLeft.x) * dpr,
-            y: (point.y - this._topLeft.y) * dpr
-        };
-    },
-    _fillGateWedge: function(ctx, stationLat, stationLon, azimuth, halfBeamWidthDeg, innerRangeKm, outerRangeKm) {
-        const innerLeft = this._rangeAzimuthToCanvasPoint(stationLat, stationLon, innerRangeKm, azimuth - halfBeamWidthDeg);
-        const outerLeft = this._rangeAzimuthToCanvasPoint(stationLat, stationLon, outerRangeKm, azimuth - halfBeamWidthDeg);
-        const outerRight = this._rangeAzimuthToCanvasPoint(stationLat, stationLon, outerRangeKm, azimuth + halfBeamWidthDeg);
-        const innerRight = this._rangeAzimuthToCanvasPoint(stationLat, stationLon, innerRangeKm, azimuth + halfBeamWidthDeg);
-
-        ctx.beginPath();
-        ctx.moveTo(innerLeft.x, innerLeft.y);
-        ctx.lineTo(outerLeft.x, outerLeft.y);
-        ctx.lineTo(outerRight.x, outerRight.y);
-        ctx.lineTo(innerRight.x, innerRight.y);
-        ctx.closePath();
-        ctx.fill();
     },
     _clearOffscreen: function() {
         if (!this._offscreenCanvas || !this._offscreenCtx) return;
