@@ -1940,7 +1940,7 @@ function startLiveTracking() {
 
 const RadarCanvasLayer = L.Layer.extend({
     onAdd: function(map) {
-        this._container = L.DomUtil.create('canvas', 'leaflet-zoom-animated');
+        this._container = L.DomUtil.create('canvas', 'leaflet-layer');
         this._container.style.pointerEvents = 'none';
         map.getPane('liveRadarPane').appendChild(this._container);
 
@@ -1949,7 +1949,7 @@ const RadarCanvasLayer = L.Layer.extend({
         this._needsFullRedraw = true;
 
         map.on('viewreset', this._reset, this); 
-        map.on('zoomanim', this._onZoomAnim, this);
+        map.on('zoomstart', this._onZoomStart, this);
         map.on('moveend', this._reset, this);
         map.on('zoomend', this._reset, this);
         this._reset();
@@ -1959,18 +1959,14 @@ const RadarCanvasLayer = L.Layer.extend({
             this._container.parentNode.removeChild(this._container);
         }
         map.off('viewreset', this._reset, this); 
-        map.off('zoomanim', this._onZoomAnim, this);
+        map.off('zoomstart', this._onZoomStart, this);
         map.off('moveend', this._reset, this);
         map.off('zoomend', this._reset, this);
         this._offscreenCanvas = null;
         this._offscreenCtx = null;
     },
-    _onZoomAnim: function(e) {
-        if (!this._container || !this._bounds || typeof map._latLngBoundsToNewLayerBounds !== 'function') return;
-
-        const scale = map.getZoomScale(e.zoom);
-        const offset = map._latLngBoundsToNewLayerBounds(this._bounds, e.zoom, e.center).min;
-        L.DomUtil.setTransform(this._container, offset, scale);
+    _onZoomStart: function() {
+        if (this._container) this._container.style.visibility = 'hidden';
     },
     _getPixelsPerKm: function(stationLat, stationLon) {
         const centerLayer = map.latLngToLayerPoint([stationLat, stationLon]);
@@ -2004,6 +2000,7 @@ const RadarCanvasLayer = L.Layer.extend({
 
         const pos = map.containerPointToLayerPoint([0, 0]);
         L.DomUtil.setTransform(this._container, pos, 1);
+        this._container.style.visibility = 'visible';
         this._topLeft = pos;
         this._bounds = map.getBounds();
         this._updateCachedCoords();
