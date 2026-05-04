@@ -1925,7 +1925,6 @@ const RadarCanvasLayer = L.Layer.extend({
 
         map.on('viewreset', this._reset, this); 
         map.on('zoomanim', this._onZoomAnim, this);
-        map.on('move', this._onMove, this);
         map.on('moveend', this._reset, this);
         map.on('zoomend', this._reset, this);
         this._reset();
@@ -1936,16 +1935,10 @@ const RadarCanvasLayer = L.Layer.extend({
         }
         map.off('viewreset', this._reset, this); 
         map.off('zoomanim', this._onZoomAnim, this);
-        map.off('move', this._onMove, this);
         map.off('moveend', this._reset, this);
         map.off('zoomend', this._reset, this);
         this._offscreenCanvas = null;
         this._offscreenCtx = null;
-    },
-    _onMove: function() {
-        const pos = map.containerPointToLayerPoint([0, 0]);
-        L.DomUtil.setTransform(this._container, pos, 1);
-        this._topLeft = pos;
     },
     _onZoomAnim: function(e) {
         if (!this._container || !this._bounds || typeof map._latLngBoundsToNewLayerBounds !== 'function') return;
