@@ -1924,6 +1924,7 @@ const RadarCanvasLayer = L.Layer.extend({
         this._needsFullRedraw = true;
 
         map.on('viewreset', this._reset, this); 
+        map.on('zoomanim', this._onZoomAnim, this);
         map.on('move', this._onMove, this);
         map.on('moveend', this._reset, this);
         this._reset();
@@ -1933,6 +1934,7 @@ const RadarCanvasLayer = L.Layer.extend({
             this._container.parentNode.removeChild(this._container);
         }
         map.off('viewreset', this._reset, this); 
+        map.off('zoomanim', this._onZoomAnim, this);
         map.off('move', this._onMove, this);
         map.off('moveend', this._reset, this);
         this._offscreenCanvas = null;
@@ -1942,6 +1944,13 @@ const RadarCanvasLayer = L.Layer.extend({
         const pos = map.containerPointToLayerPoint([0, 0]);
         L.DomUtil.setPosition(this._container, pos);
         this._topLeft = pos;
+    },
+    _onZoomAnim: function(e) {
+        if (!this._container || !this._bounds || typeof map._latLngBoundsToNewLayerBounds !== 'function') return;
+
+        const scale = map.getZoomScale(e.zoom);
+        const offset = map._latLngBoundsToNewLayerBounds(this._bounds, e.zoom, e.center).min;
+        L.DomUtil.setTransform(this._container, offset, scale);
     },
     _getPixelsPerKm: function(stationLat, stationLon) {
         const centerLayer = map.latLngToLayerPoint([stationLat, stationLon]);
@@ -1976,6 +1985,7 @@ const RadarCanvasLayer = L.Layer.extend({
         const pos = map.containerPointToLayerPoint([0, 0]);
         L.DomUtil.setPosition(this._container, pos);
         this._topLeft = pos;
+        this._bounds = map.getBounds();
         this._updateCachedCoords();
         this._needsFullRedraw = true;
         this._draw();
