@@ -527,37 +527,41 @@ function updateRadarSelector() {
     const select = document.getElementById('radar-select');
     if (!select) return;
 
+    const previousRadarId = selectedRadarId;
     const nearbyRadars = getNearbyRadars();
-    let isCurrentSelectionAvailable = (selectedRadarId === 'composite');
-    nearbyRadars.forEach(radar => {
-        if (radar.id === selectedRadarId) isCurrentSelectionAvailable = true;
-    });
-    
-    const needsSingleSite = currentRadarMode !== 'reflectivity';
-    if (!isCurrentSelectionAvailable || selectedRadarId === '' || (selectedRadarId === 'composite' && needsSingleSite)) {
+    const isSingleSiteMode = currentRadarMode === 'live-tracking' || currentRadarMode === 'velocity';
+    const currentStation = findStation(selectedRadarId);
+    const isCurrentSelectionAvailable = selectedRadarId === 'composite' || nearbyRadars.some(radar => radar.id === selectedRadarId);
+
+    if (!selectedRadarId || (selectedRadarId === 'composite' && isSingleSiteMode) || (!currentStation && selectedRadarId !== 'composite')) {
         if (nearbyRadars.length > 0) {
             selectedRadarId = nearbyRadars[0].id;
         } else {
             selectedRadarId = 'composite';
         }
-        
-        if (NEXRAD_STATIONS.length > 0) {
-            updateRadarLayersBasedOnMode();
-        }
+    } else if (!isCurrentSelectionAvailable && !isSingleSiteMode && currentRadarMode !== 'reflectivity') {
+        selectedRadarId = nearbyRadars.length > 0 ? nearbyRadars[0].id : 'composite';
     }
 
-    const optionsKey = nearbyRadars
-        .map(radar => `${radar.id}:${Math.round(radar.distance)}`)
+    const displayRadars = [...nearbyRadars];
+    if (currentStation && selectedRadarId !== 'composite' && !displayRadars.some(radar => radar.id === currentStation.id)) {
+        displayRadars.unshift({ ...currentStation, distance: null, pinned: true });
+    }
+
+    const optionsKey = displayRadars
+        .map(radar => `${radar.id}:${radar.pinned ? 'selected' : Math.round(radar.distance)}`)
         .join('|');
     if (select.dataset.optionsKey !== optionsKey) {
         while (select.options.length > 1) {
             select.remove(1);
         }
 
-        nearbyRadars.forEach(radar => {
+        displayRadars.forEach(radar => {
             const option = document.createElement('option');
             option.value = radar.id;
-            option.text = `${radar.name} (${Math.round(radar.distance)} mi)`;
+            option.text = radar.pinned
+                ? `${radar.name} (selected)`
+                : `${radar.name} (${Math.round(radar.distance)} mi)`;
             select.appendChild(option);
         });
 
@@ -565,6 +569,9 @@ function updateRadarSelector() {
     }
     
     select.value = selectedRadarId;
+    if (selectedRadarId !== previousRadarId && NEXRAD_STATIONS.length > 0) {
+        updateRadarLayersBasedOnMode();
+    }
 }
 
 // Update radar selector on map move with debounce
