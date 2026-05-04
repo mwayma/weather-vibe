@@ -121,7 +121,7 @@ function getConsolidatedData(stationId) {
         elevations: {}
     };
 
-    sortedAzimuths.forEach(az => {
+    sortedAzimuths.forEach((az, i) => {
         const radial = state.radials.get(az);
         result.azimuths.push(radial.azimuth);
         result.timestamps.push(radial.timestamp);
@@ -129,8 +129,8 @@ function getConsolidatedData(stationId) {
         for (const [e, products] of Object.entries(radial.elevations)) {
             if (!result.elevations[e]) result.elevations[e] = {};
             for (const [product, moment] of Object.entries(products)) {
-                if (!result.elevations[e][product]) result.elevations[e][product] = [];
-                result.elevations[e][product].push(moment);
+                if (!result.elevations[e][product]) result.elevations[e][product] = new Array(sortedAzimuths.length).fill(null);
+                result.elevations[e][product][i] = moment || null;
             }
         }
     });

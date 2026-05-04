@@ -746,7 +746,7 @@ let lastSocketMessageAt = Date.now();
 let lastLiveResubscribeAt = 0;
 let lastRenderedRadialTimestamp = 0;
 let lastRenderedRadialAzimuth = null;
-let lastRenderedRadialElevation = null;
+let lastReceivedRadialElevations = null;
 let lastLiveStatusLabel = 'Live';
 
 let liveReconnectInProgress = false;
@@ -1010,7 +1010,36 @@ function recordRenderedRadials(radials, label = 'Live') {
 
     lastRenderedRadialTimestamp = latest.timestamp;
     lastRenderedRadialAzimuth = Number.isFinite(Number(latest.azimuth)) ? normalizeAzimuth(latest.azimuth) : lastRenderedRadialAzimuth;
+    lastReceivedRadialElevations = summarizeRadialElevations(radials);
     lastLiveStatusLabel = label;
+}
+
+function getLiveMomentKey() {
+    if (currentLiveMode === 'velocity') return 'velocity';
+    if (currentLiveMode === 'debris') return 'debris';
+    if (currentLiveMode === 'zdr') return 'zdr';
+    if (currentLiveMode === 'width') return 'width';
+    return 'reflectivity';
+}
+
+function summarizeRadialElevations(radials) {
+    const momentKey = getLiveMomentKey();
+    const elevations = new Set();
+
+    radials.forEach(radial => {
+        for (const [e, products] of Object.entries(radial.elevations || {})) {
+            const moment = products?.[momentKey];
+            if (moment?.moment_data) elevations.add(Number(e));
+        }
+    });
+
+    const sorted = Array.from(elevations).filter(Number.isFinite).sort((a, b) => a - b);
+    if (sorted.length === 0) return null;
+    if (sorted.length === 1) return `Tilt ${sorted[0]}`;
+
+    const first = sorted[0];
+    const contiguous = sorted.every((value, index) => value === first + index);
+    return contiguous ? `Tilts ${first}-${sorted[sorted.length - 1]}` : `Tilts ${sorted.join(',')}`;
 }
 
 function renderLiveStatus(force = false) {
@@ -1033,11 +1062,14 @@ function renderLiveStatus(force = false) {
     const chunkDate = new Date(lastRenderedRadialTimestamp);
     const lagMs = now - lastRenderedRadialTimestamp;
     const azText = Number.isFinite(Number(lastRenderedRadialAzimuth)) ? ` | Az ${lastRenderedRadialAzimuth.toFixed(1)}°` : '';
-    const elevText = lastRenderedRadialElevation ? ` | Elev ${lastRenderedRadialElevation}` : '';
+    const scanText = lastReceivedRadialElevations ? ` | Scan ${lastReceivedRadialElevations}` : '';
+    const viewText = selectedLiveElevation === 'auto'
+        ? (currentLiveMode === 'reflectivity' ? ' | View Composite' : ' | View Base')
+        : ` | View Tilt ${selectedLiveElevation}`;
     const staleText = (now - lastLiveDataMessageAt) > LIVE_DATA_STALE_MS
         ? ` | no chunks ${formatLag(now - lastLiveDataMessageAt).replace(' lag', '')}`
         : '';
-    setTimestampForMode('live-tracking', `${lastLiveStatusLabel}: ${chunkDate.toLocaleTimeString()} | ${formatLag(lagMs)}${azText}${elevText}${staleText}${socketText}`);
+    setTimestampForMode('live-tracking', `${lastLiveStatusLabel}: ${chunkDate.toLocaleTimeString()} | ${formatLag(lagMs)}${azText}${scanText}${viewText}${staleText}${socketText}`);
     lastLiveStatusUpdate = now;
 }
 
@@ -1103,6 +1135,7 @@ function clearLivePlaybackState() {
     liveCanvasDrawPending = false;
     lastRenderedRadialTimestamp = 0;
     lastRenderedRadialAzimuth = null;
+    lastReceivedRadialElevations = null;
 }
 
 function setLiveLatencyMode(mode) {
@@ -1923,112 +1956,95 @@ const RadarCanvasLayer = L.Layer.extend({
         const ctx = this._offscreenCtx;
         const center = this._cachedCenter;
         const pixelsPerKm = this._cachedPixelsPerKm;
-
-        let momentKey = 'reflectivity';
-        if (currentLiveMode === 'velocity') { momentKey = 'velocity'; }
-        else if (currentLiveMode === 'debris') { momentKey = 'debris'; }
-        
+        const momentKey = getLiveMomentKey();
         const scale = COLOR_SCALES[momentKey];
-        const arcWidthRad = ( (360 / 720) * Math.PI / 180) * 2.2;
+        if (!scale) return;
+
+        const arcWidthRad = ((360 / 720) * Math.PI / 180) * 2.2;
         const gateStep = 1;
         const azimuth = normalizeAzimuth(radial.azimuth);
+        let moment = null;
+
+        if (selectedLiveElevation === 'auto') {
+            if (currentLiveMode === 'reflectivity') {
+                let compositeData = null;
+                let bestMoment = null;
+                
+                for (let e = 1; e <= 22; e++) {
+                    const m = radial.elevations[e]?.reflectivity;
+                    if (m?.moment_data) {
+                        if (!compositeData) {
+                            compositeData = new Float32Array(m.moment_data.length).fill(-Infinity);
+                            bestMoment = m;
+                        }
+                        for (let i = 0; i < m.moment_data.length; i++) {
+                            if (m.moment_data[i] > compositeData[i]) {
+                                compositeData[i] = m.moment_data[i];
+                            }
+                        }
+                    }
+                }
+                if (bestMoment) {
+                    moment = { ...bestMoment, moment_data: compositeData };
+                }
+            } else {
+                for (let e = 1; e <= 22; e++) {
+                    const candidate = radial.elevations[e]?.[momentKey];
+                    if (candidate?.moment_data) {
+                        moment = candidate;
+                        break;
+                    }
+                }
+            }
+        } else {
+            const e = parseInt(selectedLiveElevation);
+            const candidate = radial.elevations[e]?.[momentKey];
+            if (candidate?.moment_data) {
+                moment = candidate;
+            }
+        }
+
+        if (!moment?.moment_data) return;
+
         ctx.setTransform(1, 0, 0, 1, 0, 0);
         ctx.save();
         ctx.translate(center.x, center.y);
         ctx.rotate((azimuth - 90) * Math.PI / 180);
 
-        // CLEAR THE WEDGE FIRST to prevent smearing/accumulation
         ctx.globalCompositeOperation = 'destination-out';
         ctx.fillStyle = 'rgba(0,0,0,1)';
         ctx.beginPath();
         ctx.moveTo(0, 0);
-        ctx.arc(0, 0, 500 * pixelsPerKm, -arcWidthRad/2, arcWidthRad/2);
+        ctx.arc(0, 0, 500 * pixelsPerKm, -arcWidthRad / 2, arcWidthRad / 2);
         ctx.closePath();
         ctx.fill();
 
         ctx.globalCompositeOperation = 'source-over';
         try {
-            let moment = null;
-            let elev = null;
+            // Scaling Fix: gate_size and first_gate
+            const firstGateActual = (moment.first_gate > 1000) ? moment.first_gate / 1000 : moment.first_gate;
+            const gateSizeKm = (moment.gate_size >= 1) ? moment.gate_size / 1000 : moment.gate_size;
+            const data = moment.moment_data;
+            let startJ = null;
+            let currentColor = null;
 
-            if (selectedLiveElevation === 'auto') {
-                if (currentLiveMode === 'reflectivity') {
-                    // COMPOSITE REFLECTIVITY: Max value across all available tilts
-                    let compositeData = null;
-                    let bestMoment = null;
-                    
-                    for (let e = 1; e <= 22; e++) {
-                        const m = radial.elevations[e]?.reflectivity;
-                        if (m && m.moment_data) {
-                            if (!compositeData) {
-                                compositeData = new Float32Array(m.moment_data.length).fill(-Infinity);
-                                bestMoment = m;
-                                elev = 'Comp';
-                            }
-                            for (let i = 0; i < m.moment_data.length; i++) {
-                                if (m.moment_data[i] > compositeData[i]) {
-                                    compositeData[i] = m.moment_data[i];
-                                }
-                            }
-                        }
-                    }
-                    if (bestMoment) {
-                        moment = { ...bestMoment, moment_data: compositeData };
-                    }
-                } else {
-                    // BASE VIEW: Lowest available tilt (usually 0.5°)
-                    for (let e = 1; e <= 22; e++) {
-                        if (radial.elevations[e] && radial.elevations[e][momentKey]) {
-                            moment = radial.elevations[e][momentKey];
-                            if (moment && moment.moment_data) {
-                                elev = e;
-                                break;
-                            }
-                        }
-                    }
-                }
-            } else {
-                // TILT-LOCKED VIEW: Only show the user-selected elevation
-                const e = parseInt(selectedLiveElevation);
-                if (radial.elevations[e] && radial.elevations[e][momentKey]) {
-                    moment = radial.elevations[e][momentKey];
-                    if (moment && moment.moment_data) {
-                        elev = e;
-                    }
-                }
-            }
-
-            if (elev) lastRenderedRadialElevation = elev;
-
-            if (moment && moment.moment_data) {
-                // Scaling Fix: gate_size and first_gate
-                const firstGateActual = (moment.first_gate > 1000) ? moment.first_gate / 1000 : moment.first_gate;
-                const gateSizeKm = (moment.gate_size >= 1) ? moment.gate_size / 1000 : moment.gate_size;
+            for (let j = 0; j <= data.length; j += gateStep) {
+                const val = j < data.length ? data[j] : null;
+                const color = val !== null && val !== undefined ? scale(val) : null;
                 
-                const data = moment.moment_data;
-
-                let startJ = null;
-                let currentColor = null;
-
-                for (let j = 0; j <= data.length; j += gateStep) {
-                    const val = j < data.length ? data[j] : null;
-                    const color = val !== null && val !== undefined ? scale(val) : null;
-                    
-                    if (color !== currentColor) {
-                        if (currentColor !== null && startJ !== null) {
-                            const r1 = (firstGateActual + startJ * gateSizeKm) * pixelsPerKm;
-                            const r2 = (firstGateActual + j * gateSizeKm) * pixelsPerKm;
-                            ctx.fillStyle = currentColor;
-                            ctx.beginPath();
-                            ctx.arc(0, 0, r1, -arcWidthRad/2, arcWidthRad/2);
-                            ctx.arc(0, 0, r2, arcWidthRad/2, -arcWidthRad/2, true);
-                            ctx.closePath();
-                            ctx.fill();
-                            // REMOVED ctx.stroke() - massive performance win
-                        }
-                        currentColor = color;
-                        startJ = j;
+                if (color !== currentColor) {
+                    if (currentColor !== null && startJ !== null) {
+                        const r1 = (firstGateActual + startJ * gateSizeKm) * pixelsPerKm;
+                        const r2 = (firstGateActual + j * gateSizeKm) * pixelsPerKm;
+                        ctx.fillStyle = currentColor;
+                        ctx.beginPath();
+                        ctx.arc(0, 0, r1, -arcWidthRad / 2, arcWidthRad / 2);
+                        ctx.arc(0, 0, r2, arcWidthRad / 2, -arcWidthRad / 2, true);
+                        ctx.closePath();
+                        ctx.fill();
                     }
+                    currentColor = color;
+                    startJ = j;
                 }
             }
         } finally {
