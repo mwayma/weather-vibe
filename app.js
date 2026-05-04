@@ -20,6 +20,12 @@ map.createPane('waterPane');
 map.getPane('waterPane').style.zIndex = 160;
 map.createPane('boundaryPane');
 map.getPane('boundaryPane').style.zIndex = 170;
+map.createPane('liveRadarPane');
+map.getPane('liveRadarPane').style.zIndex = 420;
+map.getPane('liveRadarPane').style.pointerEvents = 'none';
+map.createPane('liveSweepPane');
+map.getPane('liveSweepPane').style.zIndex = 460;
+map.getPane('liveSweepPane').style.pointerEvents = 'none';
 
 // 1. Base Map Setup (Local GeoJSON) 
 const landStyle = { fillColor: "#818181", fillOpacity: 1, color: "none", interactive: false };
@@ -31,6 +37,7 @@ const countyStyle = { color: "#444466", weight: 0.8, opacity: 0.5, fillOpacity: 
 const landRenderer = L.canvas({ pane: 'landPane', padding: 0.5 });
 const waterRenderer = L.canvas({ pane: 'waterPane', padding: 0.5 });
 const boundaryRenderer = L.canvas({ pane: 'boundaryPane', padding: 0.5 });
+const liveSweepRenderer = L.canvas({ pane: 'liveSweepPane', padding: 0.5 });
 
 let landLayer = null;
 let waterLayer = null;
@@ -521,24 +528,9 @@ function updateRadarSelector() {
     if (!select) return;
 
     const nearbyRadars = getNearbyRadars();
-    
-    // Clear existing options except composite
-    while (select.options.length > 1) {
-        select.remove(1);
-    }
-    
     let isCurrentSelectionAvailable = (selectedRadarId === 'composite');
-
-    // Add nearby radars
     nearbyRadars.forEach(radar => {
-        const option = document.createElement('option');
-        option.value = radar.id;
-        option.text = `${radar.name} (${Math.round(radar.distance)} mi)`;
-        select.appendChild(option);
-        
-        if (radar.id === selectedRadarId) {
-            isCurrentSelectionAvailable = true;
-        }
+        if (radar.id === selectedRadarId) isCurrentSelectionAvailable = true;
     });
     
     const needsSingleSite = currentRadarMode !== 'reflectivity';
@@ -552,6 +544,24 @@ function updateRadarSelector() {
         if (NEXRAD_STATIONS.length > 0) {
             updateRadarLayersBasedOnMode();
         }
+    }
+
+    const optionsKey = nearbyRadars
+        .map(radar => `${radar.id}:${Math.round(radar.distance)}`)
+        .join('|');
+    if (select.dataset.optionsKey !== optionsKey) {
+        while (select.options.length > 1) {
+            select.remove(1);
+        }
+
+        nearbyRadars.forEach(radar => {
+            const option = document.createElement('option');
+            option.value = radar.id;
+            option.text = `${radar.name} (${Math.round(radar.distance)} mi)`;
+            select.appendChild(option);
+        });
+
+        select.dataset.optionsKey = optionsKey;
     }
     
     select.value = selectedRadarId;
@@ -580,7 +590,7 @@ function formatIEMTime(date) {
 function setTimestampForMode(mode, text) {
     if (currentRadarMode !== mode) return;
     const timestampEl = document.getElementById('timestamp');
-    if (timestampEl) timestampEl.innerText = text;
+    if (timestampEl && timestampEl.textContent !== text) timestampEl.textContent = text;
 }
 
 function formatLag(ms) {
@@ -753,6 +763,7 @@ let targetAzimuth = 0;
 let currentAngle = 0;
 let sweepSpeed = 0.009; // Degrees per millisecond
 let lastSweepTime = performance.now();
+let lastSweepLineUpdate = 0;
 let lastAzimuthMetadataTime = 0;
 let liveCanvasDrawPending = false;
 let lastLiveStatusUpdate = 0;
@@ -773,6 +784,7 @@ const LIVE_DATA_STALE_MS = 25000;
 const LIVE_DATA_RESUBSCRIBE_MS = 60000;
 const LIVE_SOCKET_STALE_MS = 45000;
 const LIVE_BUFFER_DELAY_MS = 15000;
+const SWEEP_LINE_FRAME_MS = 33;
 const LIVE_BUFFER_MAX_EXTRA_LAG_MS = 600000; // 10 minutes history allowed in buffer
 const MAX_BUFFERED_RADIALS_PER_FRAME = 40;
 const MAX_BUFFERED_QUEUE_RADIALS = 5000;
@@ -1832,6 +1844,7 @@ function startLiveTracking() {
     targetAzimuth = 0;
     lastAzimuthMetadataTime = 0;
     lastLiveStatusUpdate = 0;
+    lastSweepLineUpdate = 0;
     lastSweepTime = performance.now();
 
     // Fix memory leak: Remove old layers from liveTrackingLayer
@@ -1843,11 +1856,22 @@ function startLiveTracking() {
     if (!station) return;
 
     radarStationMarker = L.circleMarker([station.lat, station.lon], {
-        radius: 10, fillColor: '#ffffff', color: '#000', weight: 2, opacity: 1, fillOpacity: 1
+        radius: 10,
+        fillColor: '#ffffff',
+        color: '#000',
+        weight: 2,
+        opacity: 1,
+        fillOpacity: 1,
+        pane: 'liveSweepPane',
+        renderer: liveSweepRenderer
     }).addTo(liveTrackingLayer);
 
     azimuthLine = L.polyline([[station.lat, station.lon], [station.lat, station.lon]], {
-        color: '#ffffff', weight: 2, opacity: liveLatencyMode === 'buffered' ? 0.8 : 0
+        color: '#ffffff',
+        weight: 2,
+        opacity: liveLatencyMode === 'buffered' ? 0.8 : 0,
+        pane: 'liveSweepPane',
+        renderer: liveSweepRenderer
     }).addTo(liveTrackingLayer);
 
     const liveModeLabel = liveLatencyMode === 'buffered'
@@ -1883,8 +1907,9 @@ function startLiveTracking() {
         const endLat = station.lat + dist * Math.sin(rad);
         const endLon = station.lon + dist * Math.cos(rad);
         
-        if (azimuthLine) {
+        if (azimuthLine && now - lastSweepLineUpdate >= SWEEP_LINE_FRAME_MS) {
             azimuthLine.setLatLngs([[station.lat, station.lon], [endLat, endLon]]);
+            lastSweepLineUpdate = now;
         }
 
         processBufferedRadials();
@@ -1917,7 +1942,7 @@ const RadarCanvasLayer = L.Layer.extend({
     onAdd: function(map) {
         this._container = L.DomUtil.create('canvas', 'leaflet-zoom-animated');
         this._container.style.pointerEvents = 'none';
-        map.getPanes().overlayPane.appendChild(this._container);
+        map.getPane('liveRadarPane').appendChild(this._container);
 
         this._offscreenCanvas = document.createElement('canvas');
         this._offscreenCtx = this._offscreenCanvas.getContext('2d');
