@@ -916,7 +916,12 @@ function initWebSocket() {
                 return { radial, roundedAz };
             });
 
-            if (liveLatencyMode === 'buffered') {
+            if (message.snapshot) {
+                radials.forEach(({ radial, roundedAz }) => applyLiveRadial(roundedAz, radial));
+                recordRenderedRadials(radials.map(item => item.radial), 'Snapshot');
+                renderLiveStatus(true);
+                requestLiveCanvasDraw();
+            } else if (liveLatencyMode === 'buffered') {
                 enqueueBufferedRadials(radials.map(item => item.radial));
             } else {
                 radials.forEach(({ radial, roundedAz }) => applyLiveRadial(roundedAz, radial));

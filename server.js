@@ -303,6 +303,36 @@ function broadcastRadialBatches(stationId, radials) {
     }
 }
 
+async function waitForClientBuffer(ws, maxBytes = MAX_CLIENT_BUFFERED_BYTES) {
+    while (ws.readyState === WebSocket.OPEN && ws.bufferedAmount > maxBytes) {
+        await sleep(25);
+    }
+}
+
+async function sendRadialBatchesToClient(ws, stationId, radials, snapshot = false) {
+    ws.snapshotSending = snapshot;
+    for (let i = 0; i < radials.length; i += RADIAL_BATCH_SIZE) {
+        if (ws.readyState !== WebSocket.OPEN) break;
+        await waitForClientBuffer(ws);
+        const batch = radials.slice(i, i + RADIAL_BATCH_SIZE);
+        ws.send(JSON.stringify({
+            type: 'radial_batch',
+            stationId,
+            radials: batch,
+            latestAzimuth: batch[batch.length - 1].azimuth,
+            snapshot
+        }));
+        await sleep(0);
+    }
+    if (snapshot) ws.snapshotSending = false;
+}
+
+function getCachedRadials(stationId) {
+    const state = stationCache.get(stationId);
+    if (!state) return [];
+    return Array.from(state.radials.values()).sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+}
+
 function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -657,6 +687,7 @@ function broadcast(stationId, data) {
         clients.forEach(client => {
             if (client.readyState === WebSocket.OPEN) {
                 if (data.type === 'radial_batch') {
+                    if (client.snapshotSending) return;
                     if (client.bufferedAmount > MAX_CLIENT_BUFFERED_BYTES_BEFORE_CLOSE) {
                         console.warn(`[${stationId}] Closing slow client with ${client.bufferedAmount} buffered bytes`);
                         client.terminate();
@@ -695,13 +726,11 @@ wss.on('connection', (ws) => {
                 if (!subscriptions.has(stationId)) subscriptions.set(stationId, new Set());
                 subscriptions.get(stationId).add(ws);
 
-                // Initial state can be very large; clients can opt out for live-only streaming.
+                // Initial cache can be very large; send it as small snapshot batches to avoid
+                // closing browser WebSockets on a single oversized message.
                 if (parsed.initial !== false && stationCache.has(stationId)) {
-                    ws.send(JSON.stringify({ 
-                        type: 'initial_state', 
-                        stationId: stationId,
-                        data: getConsolidatedData(stationId) 
-                    }));
+                    sendRadialBatchesToClient(ws, stationId, getCachedRadials(stationId), true)
+                        .catch(e => console.error(`[${stationId}] Snapshot send error:`, e.message));
                 }
 
                 // 2. Start or trigger the poller
