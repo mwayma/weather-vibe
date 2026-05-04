@@ -1968,12 +1968,6 @@ const RadarCanvasLayer = L.Layer.extend({
     _onZoomStart: function() {
         if (this._container) this._container.style.visibility = 'hidden';
     },
-    _getPixelsPerKm: function(stationLat, stationLon) {
-        const centerLayer = map.latLngToLayerPoint([stationLat, stationLon]);
-        const refPoint = L.latLng(stationLat + 0.00899, stationLon);
-        const refLayer = map.latLngToLayerPoint(refPoint);
-        return centerLayer.distanceTo(refLayer);
-    },
     _updateCachedCoords: function() {
         const station = NEXRAD_STATIONS.find(s => s.id === selectedRadarId);
         if (!station || !this._topLeft) return;
@@ -1984,7 +1978,8 @@ const RadarCanvasLayer = L.Layer.extend({
             x: (centerLayer.x - this._topLeft.x) * dpr, 
             y: (centerLayer.y - this._topLeft.y) * dpr 
         };
-        this._cachedPixelsPerKm = this._getPixelsPerKm(station.lat, station.lon) * dpr;
+        this._cachedStation = station;
+        this._cachedDpr = dpr;
     },
     _reset: function() {
         const size = map.getSize();
@@ -2012,12 +2007,12 @@ const RadarCanvasLayer = L.Layer.extend({
         
         const ctx = this._offscreenCtx;
         const center = this._cachedCenter;
-        const pixelsPerKm = this._cachedPixelsPerKm;
+        const station = this._cachedStation || findStation(getCurrentStationId());
         const momentKey = getLiveMomentKey();
         const scale = COLOR_SCALES[momentKey];
-        if (!scale) return;
+        if (!scale || !station || !this._topLeft) return;
 
-        const arcWidthRad = (LIVE_RADIAL_DISPLAY_RESOLUTION_DEG * Math.PI / 180) * 1.15;
+        const halfBeamWidthDeg = LIVE_RADIAL_DISPLAY_RESOLUTION_DEG * 0.575;
         const gateStep = 1;
         const azimuth = normalizeAzimuth(radial.azimuth);
         let moment = null;
@@ -2064,15 +2059,15 @@ const RadarCanvasLayer = L.Layer.extend({
         if (!moment?.moment_data) return;
 
         ctx.setTransform(1, 0, 0, 1, 0, 0);
-        ctx.save();
-        ctx.translate(center.x, center.y);
-        ctx.rotate((azimuth - 90) * Math.PI / 180);
 
         ctx.globalCompositeOperation = 'destination-out';
         ctx.fillStyle = 'rgba(0,0,0,1)';
         ctx.beginPath();
-        ctx.moveTo(0, 0);
-        ctx.arc(0, 0, 500 * pixelsPerKm, -arcWidthRad / 2, arcWidthRad / 2);
+        const clearLeft = this._rangeAzimuthToCanvasPoint(station.lat, station.lon, 500, azimuth - halfBeamWidthDeg);
+        const clearRight = this._rangeAzimuthToCanvasPoint(station.lat, station.lon, 500, azimuth + halfBeamWidthDeg);
+        ctx.moveTo(center.x, center.y);
+        ctx.lineTo(clearLeft.x, clearLeft.y);
+        ctx.lineTo(clearRight.x, clearRight.y);
         ctx.closePath();
         ctx.fill();
 
@@ -2091,24 +2086,61 @@ const RadarCanvasLayer = L.Layer.extend({
                 
                 if (color !== currentColor) {
                     if (currentColor !== null && startJ !== null) {
-                        const r1 = (firstGateActual + startJ * gateSizeKm) * pixelsPerKm;
-                        const r2 = (firstGateActual + j * gateSizeKm) * pixelsPerKm;
+                        const r1 = firstGateActual + startJ * gateSizeKm;
+                        const r2 = firstGateActual + j * gateSizeKm;
                         ctx.fillStyle = currentColor;
-                        ctx.beginPath();
-                        ctx.arc(0, 0, r1, -arcWidthRad / 2, arcWidthRad / 2);
-                        ctx.arc(0, 0, r2, arcWidthRad / 2, -arcWidthRad / 2, true);
-                        ctx.closePath();
-                        ctx.fill();
+                        this._fillGateWedge(ctx, station.lat, station.lon, azimuth, halfBeamWidthDeg, r1, r2);
                     }
                     currentColor = color;
                     startJ = j;
                 }
             }
         } finally {
-            ctx.restore();
             ctx.setTransform(1, 0, 0, 1, 0, 0);
             ctx.globalCompositeOperation = 'source-over';
         }
+    },
+    _rangeAzimuthToCanvasPoint: function(stationLat, stationLon, rangeKm, azimuthDeg) {
+        const earthRadiusKm = 6371.0088;
+        const angularDistance = rangeKm / earthRadiusKm;
+        const bearing = normalizeAzimuth(azimuthDeg) * Math.PI / 180;
+        const lat1 = stationLat * Math.PI / 180;
+        const lon1 = stationLon * Math.PI / 180;
+
+        const sinLat1 = Math.sin(lat1);
+        const cosLat1 = Math.cos(lat1);
+        const sinDistance = Math.sin(angularDistance);
+        const cosDistance = Math.cos(angularDistance);
+
+        const lat2 = Math.asin(
+            sinLat1 * cosDistance +
+            cosLat1 * sinDistance * Math.cos(bearing)
+        );
+        const lon2 = lon1 + Math.atan2(
+            Math.sin(bearing) * sinDistance * cosLat1,
+            cosDistance - sinLat1 * Math.sin(lat2)
+        );
+
+        const point = map.latLngToLayerPoint([lat2 * 180 / Math.PI, lon2 * 180 / Math.PI]);
+        const dpr = this._cachedDpr || window.devicePixelRatio || 1;
+        return {
+            x: (point.x - this._topLeft.x) * dpr,
+            y: (point.y - this._topLeft.y) * dpr
+        };
+    },
+    _fillGateWedge: function(ctx, stationLat, stationLon, azimuth, halfBeamWidthDeg, innerRangeKm, outerRangeKm) {
+        const innerLeft = this._rangeAzimuthToCanvasPoint(stationLat, stationLon, innerRangeKm, azimuth - halfBeamWidthDeg);
+        const outerLeft = this._rangeAzimuthToCanvasPoint(stationLat, stationLon, outerRangeKm, azimuth - halfBeamWidthDeg);
+        const outerRight = this._rangeAzimuthToCanvasPoint(stationLat, stationLon, outerRangeKm, azimuth + halfBeamWidthDeg);
+        const innerRight = this._rangeAzimuthToCanvasPoint(stationLat, stationLon, innerRangeKm, azimuth + halfBeamWidthDeg);
+
+        ctx.beginPath();
+        ctx.moveTo(innerLeft.x, innerLeft.y);
+        ctx.lineTo(outerLeft.x, outerLeft.y);
+        ctx.lineTo(outerRight.x, outerRight.y);
+        ctx.lineTo(innerRight.x, innerRight.y);
+        ctx.closePath();
+        ctx.fill();
     },
     _clearOffscreen: function() {
         if (!this._offscreenCanvas || !this._offscreenCtx) return;
