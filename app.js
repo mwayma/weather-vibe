@@ -2019,31 +2019,52 @@ const RadarCanvasLayer = L.Layer.extend({
         const scale = COLOR_SCALES[momentKey];
         if (!scale || !station || !this._topLeft) return;
 
-        const halfBeamWidthDeg = LIVE_RADIAL_DISPLAY_RESOLUTION_DEG * 0.62;
+        const halfBeamWidthDeg = 0.6;
         const gateStep = 1;
         const azimuth = normalizeAzimuth(radial.azimuth);
         let moment = null;
 
         if (selectedLiveElevation === 'auto') {
             if (currentLiveMode === 'reflectivity') {
-                let compositeData = null;
                 let bestMoment = null;
+                let masterElev = 1;
                 
                 for (let e = 1; e <= 22; e++) {
                     const m = radial.elevations[e]?.reflectivity;
                     if (m?.moment_data) {
-                        if (!compositeData) {
-                            compositeData = new Float32Array(m.moment_data.length).fill(-Infinity);
-                            bestMoment = m;
-                        }
-                        for (let i = 0; i < m.moment_data.length; i++) {
-                            if (m.moment_data[i] > compositeData[i]) {
-                                compositeData[i] = m.moment_data[i];
+                        bestMoment = m;
+                        masterElev = e;
+                        break;
+                    }
+                }
+
+                if (bestMoment) {
+                    const masterFirst = this._normalizeGateDistanceKm(bestMoment.first_gate);
+                    const masterSize = this._normalizeGateDistanceKm(bestMoment.gate_size);
+                    const compositeData = new Float32Array(bestMoment.moment_data);
+
+                    if (masterSize > 0) {
+                        for (let e = masterElev + 1; e <= 22; e++) {
+                            const m = radial.elevations[e]?.reflectivity;
+                            if (!m?.moment_data) continue;
+
+                            const mFirst = this._normalizeGateDistanceKm(m.first_gate);
+                            const mSize = this._normalizeGateDistanceKm(m.gate_size);
+                            if (!(mSize > 0)) continue;
+
+                            for (let i = 0; i < m.moment_data.length; i++) {
+                                const val = m.moment_data[i];
+                                if (val === null || val === undefined || Number.isNaN(Number(val))) continue;
+
+                                const rangeKm = mFirst + i * mSize;
+                                const masterIdx = Math.round((rangeKm - masterFirst) / masterSize);
+                                if (masterIdx >= 0 && masterIdx < compositeData.length && val > compositeData[masterIdx]) {
+                                    compositeData[masterIdx] = val;
+                                }
                             }
                         }
                     }
-                }
-                if (bestMoment) {
+
                     moment = { ...bestMoment, moment_data: compositeData };
                 }
             } else {
@@ -2069,9 +2090,10 @@ const RadarCanvasLayer = L.Layer.extend({
 
         try {
             // Scaling Fix: gate_size and first_gate
-            const firstGateActual = (moment.first_gate > 1000) ? moment.first_gate / 1000 : moment.first_gate;
-            const gateSizeKm = (moment.gate_size >= 1) ? moment.gate_size / 1000 : moment.gate_size;
+            const firstGateActual = this._normalizeGateDistanceKm(moment.first_gate);
+            const gateSizeKm = this._normalizeGateDistanceKm(moment.gate_size);
             const data = moment.moment_data;
+            if (!(gateSizeKm > 0)) return;
 
             ctx.globalCompositeOperation = 'destination-out';
             ctx.fillStyle = 'rgba(0,0,0,1)';
@@ -2108,6 +2130,11 @@ const RadarCanvasLayer = L.Layer.extend({
             ctx.setTransform(1, 0, 0, 1, 0, 0);
             ctx.globalCompositeOperation = 'source-over';
         }
+    },
+    _normalizeGateDistanceKm: function(value) {
+        const numeric = Number(value);
+        if (!Number.isFinite(numeric)) return 0;
+        return numeric > 10 ? numeric / 1000 : numeric;
     },
     _rangeAzimuthToCanvasPoint: function(stationLat, stationLon, rangeKm, azimuthDeg) {
         const earthRadiusKm = 6371.0088;
