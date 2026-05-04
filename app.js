@@ -1859,11 +1859,20 @@ const RadarCanvasLayer = L.Layer.extend({
         const gateStep = 1;
         const azimuth = normalizeAzimuth(radial.azimuth);
         ctx.setTransform(1, 0, 0, 1, 0, 0);
-        ctx.globalCompositeOperation = 'source-over';
         ctx.save();
         ctx.translate(center.x, center.y);
         ctx.rotate((azimuth - 90) * Math.PI / 180);
 
+        // CLEAR THE WEDGE FIRST to prevent smearing/accumulation
+        ctx.globalCompositeOperation = 'destination-out';
+        ctx.fillStyle = 'rgba(0,0,0,1)';
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.arc(0, 0, 500 * pixelsPerKm, -arcWidthRad/2, arcWidthRad/2);
+        ctx.closePath();
+        ctx.fill();
+
+        ctx.globalCompositeOperation = 'source-over';
         try {
             let moment = null;
             let elev = null;
