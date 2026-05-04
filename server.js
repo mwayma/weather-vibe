@@ -522,13 +522,14 @@ async function pollChunks(stationId) {
                             broadcastRadialBatches(stationId, radials);
                         }
 
-                        // Trigger immediate volume discovery if we reach a high elevation or see an end chunk
-                        // We use 20 as the threshold to catch most VCPs
-                        if (extracted?.maxElevation >= 20 || chunkId.includes('_E') || chunkId.includes('-E')) {
+                        // Trigger immediate volume discovery ONLY if we reach a very high elevation or see an explicit end chunk
+                        // Threshold set to 21 to ensure we don't jump early on common VCPs (which often end at 12 or 14)
+                        if (extracted?.maxElevation >= 21 || chunkId.includes('_E') || chunkId.includes('-E')) {
                             console.log(`[${stationId}] End of volume scan detected (Elev ${extracted?.maxElevation || '?'}). Priming for new volume discovery...`);
                             state.lastVolumeDiscovery = 0; // Reset discovery timer
                             stationState.set(lockKey, 0); // Allow immediate re-poll
                         }
+
                         } catch (e) {
                         state.processedChunks.add(chunk.Key);
                         trimProcessedChunks(state);
