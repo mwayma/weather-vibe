@@ -816,6 +816,7 @@ const LIVE_BUFFER_MAX_EXTRA_LAG_MS = LIVE_RADAR_CACHE_MAX_AGE_MS;
 const MAX_BUFFERED_RADIALS_PER_FRAME = 40;
 const MAX_BUFFERED_QUEUE_RADIALS = 5000;
 const LIVE_RADIAL_DISPLAY_RESOLUTION_DEG = 0.5;
+const LIVE_DUAL_POL_REFLECTIVITY_FLOOR_DBZ = 10;
 const LIVE_OPTIONAL_PRODUCTS = ['velocity', 'debris', 'zdr', 'width'];
 const LIVE_PRODUCT_SAMPLE_MIN_RADIALS = 80;
 
@@ -2189,6 +2190,7 @@ const RadarCanvasLayer = L.Layer.extend({
         const arcWidthRad = (LIVE_RADIAL_DISPLAY_RESOLUTION_DEG * Math.PI / 180) * 1.15;
         const gateStep = 1;
         let moment = null;
+        let selectedMomentElevation = null;
 
         if (selectedLiveElevation === 'auto') {
             if (currentLiveMode === 'reflectivity') {
@@ -2217,6 +2219,7 @@ const RadarCanvasLayer = L.Layer.extend({
                     const candidate = radial.elevations[e]?.[momentKey];
                     if (candidate?.moment_data) {
                         moment = candidate;
+                        selectedMomentElevation = e;
                         break;
                     }
                 }
@@ -2226,6 +2229,7 @@ const RadarCanvasLayer = L.Layer.extend({
             const candidate = radial.elevations[e]?.[momentKey];
             if (candidate?.moment_data) {
                 moment = candidate;
+                selectedMomentElevation = e;
             }
         }
 
@@ -2249,13 +2253,16 @@ const RadarCanvasLayer = L.Layer.extend({
             const gateSizeKm = this._normalizeGateDistanceKm(moment.gate_size);
             const data = moment.moment_data;
             if (!(gateSizeKm > 0)) { ctx.restore(); return; }
+            const reflectivityMask = this._getReflectivityMask(radial, selectedMomentElevation);
 
             let startJ = null;
             let currentColor = null;
 
             for (let j = 0; j <= data.length; j += gateStep) {
                 const val = j < data.length ? data[j] : null;
-                const color = val !== null && val !== undefined ? scale(val) : null;
+                const color = val !== null && val !== undefined && this._passesProductMask(momentKey, j, firstGateActual, gateSizeKm, reflectivityMask)
+                    ? scale(val)
+                    : null;
                 
                 if (color !== currentColor) {
                     if (currentColor !== null && startJ !== null) {
@@ -2275,6 +2282,34 @@ const RadarCanvasLayer = L.Layer.extend({
         } finally {
             ctx.restore();
         }
+    },
+    _getReflectivityMask: function(radial, preferredElevation) {
+        if (!radial?.elevations) return null;
+
+        const preferred = preferredElevation ? radial.elevations[preferredElevation]?.reflectivity : null;
+        if (preferred?.moment_data) return preferred;
+
+        for (let e = 1; e <= 22; e++) {
+            const candidate = radial.elevations[e]?.reflectivity;
+            if (candidate?.moment_data) return candidate;
+        }
+
+        return null;
+    },
+    _passesProductMask: function(momentKey, gateIndex, firstGateKm, gateSizeKm, reflectivityMask) {
+        if (momentKey === 'reflectivity' || momentKey === 'velocity') return true;
+        if (!reflectivityMask?.moment_data) return true;
+
+        const refFirstGateKm = this._normalizeGateDistanceKm(reflectivityMask.first_gate);
+        const refGateSizeKm = this._normalizeGateDistanceKm(reflectivityMask.gate_size);
+        if (!(refGateSizeKm > 0)) return true;
+
+        const rangeKm = firstGateKm + gateIndex * gateSizeKm;
+        const refIndex = Math.round((rangeKm - refFirstGateKm) / refGateSizeKm);
+        if (refIndex < 0 || refIndex >= reflectivityMask.moment_data.length) return false;
+
+        const reflectivity = Number(reflectivityMask.moment_data[refIndex]);
+        return Number.isFinite(reflectivity) && reflectivity >= LIVE_DUAL_POL_REFLECTIVITY_FLOOR_DBZ;
     },
     _clearOffscreen: function() {
         if (!this._offscreenCanvas || !this._offscreenCtx) return;
