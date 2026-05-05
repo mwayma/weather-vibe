@@ -807,6 +807,10 @@ let socketGeneration = 0;
 let liveLatencyMode = 'buffered';
 let bufferedRadialQueue = [];
 const LIVE_RENDER_IS_COARSE_POINTER = window.matchMedia?.('(pointer: coarse)').matches || false;
+let liveBatteryState = {
+    supported: false,
+    charging: null
+};
 const LIVE_STATUS_INTERVAL_MS = 1000;
 const LIVE_DATA_STALE_MS = 25000;
 const LIVE_DATA_RESUBSCRIBE_MS = 60000;
@@ -814,10 +818,8 @@ const LIVE_SOCKET_STALE_MS = 45000;
 const LIVE_BUFFER_DELAY_MS = 15000;
 const LIVE_RADAR_CACHE_MAX_AGE_MS = 10 * 60 * 1000;
 const LIVE_BUFFER_MAX_EXTRA_LAG_MS = LIVE_RADAR_CACHE_MAX_AGE_MS;
-const MAX_BUFFERED_RADIALS_PER_FRAME = LIVE_RENDER_IS_COARSE_POINTER ? 12 : 40;
 const MAX_BUFFERED_QUEUE_RADIALS = 5000;
 const LIVE_RADIAL_DISPLAY_RESOLUTION_DEG = 0.5;
-const LIVE_RADIAL_GATE_STEP = LIVE_RENDER_IS_COARSE_POINTER ? 2 : 1;
 const LIVE_DUAL_POL_REFLECTIVITY_FLOOR_DBZ = 10;
 const LIVE_OPTIONAL_PRODUCTS = ['velocity', 'debris', 'zdr', 'width'];
 const LIVE_PRODUCT_SAMPLE_MIN_RADIALS = 80;
@@ -1076,6 +1078,62 @@ function normalizeMomentData(moment) {
     }
 }
 
+function isLivePowerSaverMode() {
+    if (liveBatteryState.supported) return liveBatteryState.charging === false;
+    return LIVE_RENDER_IS_COARSE_POINTER;
+}
+
+function getMaxBufferedRadialsPerFrame() {
+    return isLivePowerSaverMode() ? 12 : 40;
+}
+
+function getLiveRadialGateStep() {
+    return isLivePowerSaverMode() ? 2 : 1;
+}
+
+function getLiveCanvasMaxBackingStoreSize() {
+    return isLivePowerSaverMode() ? 2048 : 8192;
+}
+
+function getLiveCanvasMaxRenderDpr(deviceDpr) {
+    return isLivePowerSaverMode() ? 1 : deviceDpr;
+}
+
+function applyLiveRenderProfileChange() {
+    if (!liveCanvasLayer) return;
+    liveCanvasLayer._needsFullRedraw = true;
+    liveCanvasLayer._reset();
+}
+
+function initLivePowerProfile() {
+    if (typeof navigator === 'undefined' || typeof navigator.getBattery !== 'function') return;
+
+    navigator.getBattery()
+        .then(battery => {
+            liveBatteryState = {
+                supported: true,
+                charging: battery.charging
+            };
+
+            const handleBatteryChange = () => {
+                const previousPowerSaverMode = isLivePowerSaverMode();
+                liveBatteryState.charging = battery.charging;
+                if (previousPowerSaverMode !== isLivePowerSaverMode()) {
+                    applyLiveRenderProfileChange();
+                }
+            };
+
+            battery.addEventListener('chargingchange', handleBatteryChange);
+            handleBatteryChange();
+        })
+        .catch(() => {
+            liveBatteryState = {
+                supported: false,
+                charging: null
+            };
+        });
+}
+
 function createLiveProductAvailability(stationId) {
     return {
         stationId,
@@ -1300,7 +1358,8 @@ function processBufferedRadials() {
     const cutoff = Date.now() - LIVE_BUFFER_DELAY_MS;
     const ready = [];
 
-    while (bufferedRadialQueue.length > 0 && ready.length < MAX_BUFFERED_RADIALS_PER_FRAME) {
+    const maxRadialsThisFrame = getMaxBufferedRadialsPerFrame();
+    while (bufferedRadialQueue.length > 0 && ready.length < maxRadialsThisFrame) {
         const next = bufferedRadialQueue[0];
         if (!Number.isFinite(Number(next.timestamp)) || next.timestamp > cutoff) break;
         ready.push(bufferedRadialQueue.shift());
@@ -1515,6 +1574,7 @@ function syncLiveRadarArrays() {
     });
 }
 
+initLivePowerProfile();
 initWebSocket();
 
 const COLOR_BINS = {
@@ -2116,9 +2176,9 @@ const RadarCanvasLayer = L.Layer.extend({
         const mapSize = this._map.getSize();
         const pixelWidth = Math.ceil(mapSize.x);
         const pixelHeight = Math.ceil(mapSize.y);
-        const MAX_BACKING_STORE_SIZE = LIVE_RENDER_IS_COARSE_POINTER ? 2048 : 8192;
+        const MAX_BACKING_STORE_SIZE = getLiveCanvasMaxBackingStoreSize();
         const maxCssDimension = Math.max(pixelWidth, pixelHeight, 1);
-        const maxRenderDpr = LIVE_RENDER_IS_COARSE_POINTER ? 1 : deviceDpr;
+        const maxRenderDpr = getLiveCanvasMaxRenderDpr(deviceDpr);
         this._renderDpr = Math.min(maxRenderDpr, MAX_BACKING_STORE_SIZE / maxCssDimension);
         const backingWidth = Math.max(1, Math.floor(pixelWidth * this._renderDpr));
         const backingHeight = Math.max(1, Math.floor(pixelHeight * this._renderDpr));
@@ -2192,7 +2252,7 @@ const RadarCanvasLayer = L.Layer.extend({
         if (!scale) return;
 
         const arcWidthRad = (LIVE_RADIAL_DISPLAY_RESOLUTION_DEG * Math.PI / 180) * 1.15;
-        const gateStep = LIVE_RADIAL_GATE_STEP;
+        const gateStep = getLiveRadialGateStep();
         let moment = null;
         let selectedMomentElevation = null;
 
