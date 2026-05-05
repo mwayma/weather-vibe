@@ -2108,24 +2108,27 @@ const RadarCanvasLayer = L.Layer.extend({
         const station = findStation(getCurrentStationId());
         if (!station) return;
 
-        const dpr = window.devicePixelRatio || 1;
+        const deviceDpr = window.devicePixelRatio || 1;
         this._geometryCache.clear();
         
         const geo = this._getRadialGeometry(station.lat, station.lon, 0);
         const geoDist = 1500; // Expanded km box coverage to minimize "void" on zoom out
         let pixelSize = Math.ceil(geoDist * geo.pixelsPerKm);
         
-        // Safety cap for browser canvas limits (expanded for modern browsers)
-        const MAX_SIZE = 8192;
-        if (pixelSize > MAX_SIZE) pixelSize = MAX_SIZE;
+        // Cap the actual backing store. Mobile browsers often blank canvases
+        // that exceed this, especially after devicePixelRatio is applied.
+        const MAX_BACKING_STORE_SIZE = window.matchMedia?.('(pointer: coarse)').matches ? 4096 : 8192;
+        if (pixelSize > MAX_BACKING_STORE_SIZE) pixelSize = MAX_BACKING_STORE_SIZE;
+        this._renderDpr = Math.min(deviceDpr, MAX_BACKING_STORE_SIZE / pixelSize);
+        const backingSize = Math.max(1, Math.floor(pixelSize * this._renderDpr));
         
-        this._container.width = pixelSize * dpr; 
-        this._container.height = pixelSize * dpr;
+        this._container.width = backingSize;
+        this._container.height = backingSize;
         this._container.style.width = pixelSize + 'px';
         this._container.style.height = pixelSize + 'px';
         
-        this._offscreenCanvas.width = pixelSize * dpr;
-        this._offscreenCanvas.height = pixelSize * dpr;
+        this._offscreenCanvas.width = backingSize;
+        this._offscreenCanvas.height = backingSize;
 
         const stationPoint = this._map.latLngToLayerPoint([station.lat, station.lon]);
         const topLeft = L.point(stationPoint.x - pixelSize/2, stationPoint.y - pixelSize/2);
@@ -2178,7 +2181,7 @@ const RadarCanvasLayer = L.Layer.extend({
         if (!station) return;
 
         const geo = this._getRadialGeometry(station.lat, station.lon, radial.azimuth);
-        const dpr = window.devicePixelRatio || 1;
+        const dpr = this._renderDpr || window.devicePixelRatio || 1;
         const pixelsPerKm = geo.pixelsPerKm * dpr;
         const centerX = this._centerOffset.x * dpr;
         const centerY = this._centerOffset.y * dpr;
