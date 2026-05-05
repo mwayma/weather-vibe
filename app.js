@@ -4,6 +4,7 @@ const map = L.map('map', {
     minZoom: 4,
     maxZoom: 12,
     zoomControl: false,
+    preferCanvas: true,
     zoomSnap: 0.1,
     zoomDelta: 0.1,
     wheelPxPerZoomLevel: 200
@@ -26,6 +27,11 @@ map.createPane('liveSweepPane');
 map.getPane('liveSweepPane').style.zIndex = 460;
 map.getPane('liveSweepPane').style.pointerEvents = 'none';
 
+// Canvas Renderers for better performance with large GeoJSON datasets
+const landRenderer = L.canvas({ pane: 'landPane', padding: 0.5 });
+const waterRenderer = L.canvas({ pane: 'waterPane', padding: 0.5 });
+const boundaryRenderer = L.canvas({ pane: 'boundaryPane', padding: 0.5 });
+
 // 1. Base Map Setup (Local GeoJSON) 
 const landStyle = { fillColor: "#818181", fillOpacity: 1, color: "none", interactive: false };
 const waterStyle = { fillColor: "#0000a8", fillOpacity: 1, color: "none", interactive: false };
@@ -36,36 +42,62 @@ const countyStyle = { color: "#444466", weight: 0.8, opacity: 0.5, fillOpacity: 
 let landLayer = null;
 let waterLayer = null;
 let riverLayer = null;
-
-// Load base land and water bodies
-fetch('data/land.json').then(res => res.json()).then(data => {
-    landLayer = L.geoJSON(data, { style: landStyle, pane: 'landPane' }).addTo(map);
-});
-fetch('data/lakes.json').then(res => res.json()).then(data => {
-    waterLayer = L.geoJSON(data, { style: waterStyle, pane: 'waterPane' });
-    if (document.getElementById('chk-water')?.checked !== false) waterLayer.addTo(map);
-});
-fetch('data/rivers.json').then(res => res.json()).then(data => {
-    riverLayer = L.geoJSON(data, { style: riverStyle, pane: 'waterPane' });
-    if (document.getElementById('chk-rivers')?.checked !== false) riverLayer.addTo(map);
-});
-
 let statesLayer = null;
 let countiesData = null;
 let countiesLayer = null;
 const countiesLookup = {};
 
-fetch('data/states.json').then(res => res.json()).then(data => {
-    statesLayer = L.geoJSON(data, { style: stateStyle, pane: 'boundaryPane' });
-    if (document.getElementById('chk-states')?.checked !== false) statesLayer.addTo(map);
-});
-fetch('data/counties.json').then(res => res.json()).then(data => {
-    countiesData = data;
-    data.features.forEach(c => { countiesLookup[c.properties.STATE + c.properties.COUNTY] = c; });
-    countiesLayer = L.geoJSON(data, { style: countyStyle, pane: 'boundaryPane' });
-    if (document.getElementById('chk-counties')?.checked !== false) countiesLayer.addTo(map);
-    if (typeof activeAlertData !== 'undefined' && activeAlertData) renderAlerts();
-});
+// Parallel Data Loading for "Compiled App" robustness
+async function loadBaseMapData() {
+    console.log('Starting parallel data fetch...');
+    const startTime = performance.now();
+    
+    const datasets = [
+        { id: 'land', url: 'data/land.json' },
+        { id: 'lakes', url: 'data/lakes.json' },
+        { id: 'rivers', url: 'data/rivers.json' },
+        { id: 'states', url: 'data/states.json' },
+        { id: 'counties', url: 'data/counties.json' },
+        { id: 'nexrad', url: 'data/nexrad_stations.json' },
+        { id: 'cities', url: 'data/cities.json' }
+    ];
+
+    try {
+        const results = await Promise.all(datasets.map(d => fetch(d.url).then(res => res.json())));
+        const data = Object.fromEntries(datasets.map((d, i) => [d.id, results[i]]));
+        
+        console.log(`Data loaded in ${Math.round(performance.now() - startTime)}ms`);
+
+        // Initialize layers
+        landLayer = L.geoJSON(data.land, { style: landStyle, pane: 'landPane', renderer: landRenderer }).addTo(map);
+        
+        waterLayer = L.geoJSON(data.lakes, { style: waterStyle, pane: 'waterPane', renderer: waterRenderer });
+        if (document.getElementById('chk-water')?.checked !== false) waterLayer.addTo(map);
+        
+        riverLayer = L.geoJSON(data.rivers, { style: riverStyle, pane: 'waterPane', renderer: waterRenderer });
+        if (document.getElementById('chk-rivers')?.checked !== false) riverLayer.addTo(map);
+        
+        statesLayer = L.geoJSON(data.states, { style: stateStyle, pane: 'boundaryPane', renderer: boundaryRenderer });
+        if (document.getElementById('chk-states')?.checked !== false) statesLayer.addTo(map);
+        
+        countiesData = data.counties;
+        data.counties.features.forEach(c => { countiesLookup[c.properties.STATE + c.properties.COUNTY] = c; });
+        countiesLayer = L.geoJSON(data.counties, { style: countyStyle, pane: 'boundaryPane', renderer: boundaryRenderer });
+        if (document.getElementById('chk-counties')?.checked !== false) countiesLayer.addTo(map);
+        
+        initializeAppWithStations(data.nexrad);
+        
+        allCities = data.cities;
+        updateVisibleCities();
+        
+        if (typeof activeAlertData !== 'undefined' && activeAlertData) renderAlerts();
+        
+    } catch (err) {
+        console.error('Error loading base map data:', err);
+    }
+}
+
+loadBaseMapData();
 
 // 2. Radar Overlay (IEM NEXRAD - Reflectivity and Velocity)
 // Create separate layers for reflectivity and velocity 
@@ -1882,7 +1914,7 @@ function startLiveTracking() {
 
         processBufferedRadials();
         
-        if (liveCanvasLayer && liveCanvasLayer._topLeft) {
+        if (liveCanvasLayer && liveCanvasLayer._centerOffset) {
             // Paint newly received radials immediately; the sweep is visual state, not a data gate.
             for (const [roundedAz, radial] of incomingRadialBuffer) {
                 applyLiveRadial(roundedAz, radial);
@@ -1909,6 +1941,7 @@ function startLiveTracking() {
 
 const RadarCanvasLayer = L.Layer.extend({
     onAdd: function(map) {
+        this._map = map;
         this._container = L.DomUtil.create('canvas', 'leaflet-layer leaflet-zoom-animated');
         this._container.style.pointerEvents = 'none';
         map.getPane('liveRadarPane').appendChild(this._container);
@@ -1918,25 +1951,32 @@ const RadarCanvasLayer = L.Layer.extend({
         this._needsFullRedraw = true;
         this._geometryCache = new Map();
 
-        map.on('viewreset', this._reset, this); 
-        map.on('move', this._onMove, this);
-        map.on('moveend', this._reset, this);
         this._reset();
     },
     onRemove: function(map) {
         if (this._container && this._container.parentNode) {
             this._container.parentNode.removeChild(this._container);
         }
-        map.off('viewreset', this._reset, this); 
-        map.off('move', this._onMove, this);
-        map.off('moveend', this._reset, this);
         this._offscreenCanvas = null;
         this._offscreenCtx = null;
     },
-    _onMove: function() {
-        this._draw(); 
+    getEvents: function() {
+        return {
+            viewreset: this._reset,
+            moveend: this._reset,
+            zoom: this._onZoom,
+            zoomend: this._onZoomEnd
+        };
+    },
+    _onZoom: function() {
+        // Hide during active zoom to prevent weird artifacts, will show on zoomend/moveend
+        this._container.style.visibility = 'hidden';
+    },
+    _onZoomEnd: function() {
+        this._container.style.visibility = 'visible';
     },
     _reset: function() {
+        if (!this._map) return;
         const station = findStation(getCurrentStationId());
         if (!station) return;
 
@@ -1944,11 +1984,11 @@ const RadarCanvasLayer = L.Layer.extend({
         this._geometryCache.clear();
         
         const geo = this._getRadialGeometry(station.lat, station.lon, 0);
-        const geoDist = 1200; // km box
+        const geoDist = 1200; // km box coverage
         let pixelSize = Math.ceil(geoDist * geo.pixelsPerKm);
         
-        // Cap to safe size
-        const MAX_SIZE = 4096;
+        // Safety cap for browser canvas limits
+        const MAX_SIZE = 5000;
         if (pixelSize > MAX_SIZE) pixelSize = MAX_SIZE;
         
         this._container.width = pixelSize * dpr; 
@@ -1959,7 +1999,7 @@ const RadarCanvasLayer = L.Layer.extend({
         this._offscreenCanvas.width = pixelSize * dpr;
         this._offscreenCanvas.height = pixelSize * dpr;
 
-        const stationPoint = map.latLngToLayerPoint([station.lat, station.lon]);
+        const stationPoint = this._map.latLngToLayerPoint([station.lat, station.lon]);
         const topLeft = L.point(stationPoint.x - pixelSize/2, stationPoint.y - pixelSize/2);
         L.DomUtil.setPosition(this._container, topLeft);
         
@@ -1976,7 +2016,7 @@ const RadarCanvasLayer = L.Layer.extend({
         const roundedAz = Math.round(normalizeAzimuth(azimuth) * 10) / 10;
         if (this._geometryCache.has(roundedAz)) return this._geometryCache.get(roundedAz);
 
-        const p0 = map.latLngToLayerPoint([stationLat, stationLon]);
+        const p0 = this._map.latLngToLayerPoint([stationLat, stationLon]);
         const earthRadiusKm = 6371.0088;
         const testRangeKm = 100;
         const angularDistance = testRangeKm / earthRadiusKm;
@@ -1989,7 +2029,7 @@ const RadarCanvasLayer = L.Layer.extend({
         const lon2 = lon1 + Math.atan2(Math.sin(bearing) * Math.sin(angularDistance) * Math.cos(lat1),
                                        Math.cos(angularDistance) - Math.sin(lat1) * Math.sin(lat2));
         
-        const p1 = map.latLngToLayerPoint([lat2 * 180 / Math.PI, lon2 * 180 / Math.PI]);
+        const p1 = this._map.latLngToLayerPoint([lat2 * 180 / Math.PI, lon2 * 180 / Math.PI]);
         
         const dx = p1.x - p0.x;
         const dy = p1.y - p0.y;
