@@ -1415,7 +1415,10 @@ const COLOR_SCALES = Object.fromEntries(Object.entries(COLOR_BINS).map(([product
 ]));
 
     let selectedLiveElevation = 'auto'; // 'auto' or 1-22
+let buttonsInitialized = false;
 function setupRadarButtons() {
+    if (buttonsInitialized) return;
+    buttonsInitialized = true;
     console.log('Initializing radar buttons...');
     const reflectivityBtn = document.getElementById('btn-reflectivity');
     const liveTrackingBtn = document.getElementById('btn-live-tracking');
@@ -2205,12 +2208,4 @@ function initializeAppWithStations(data) {
     setupRadarSelector();
     setupLegendToggles();
     setupRadarButtons();
-}
-
-if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', () => {
-        fetch('data/nexrad_stations.json').then(res => res.json()).then(initializeAppWithStations);
-    });
-} else {
-    fetch('data/nexrad_stations.json').then(res => res.json()).then(initializeAppWithStations);
 }
