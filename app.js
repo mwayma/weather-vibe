@@ -28,9 +28,9 @@ map.getPane('liveSweepPane').style.zIndex = 460;
 map.getPane('liveSweepPane').style.pointerEvents = 'none';
 
 // Canvas Renderers for better performance with large GeoJSON datasets
-const landRenderer = L.canvas({ pane: 'landPane', padding: 0.5 });
-const waterRenderer = L.canvas({ pane: 'waterPane', padding: 0.5 });
-const boundaryRenderer = L.canvas({ pane: 'boundaryPane', padding: 0.5 });
+const landRenderer = L.canvas({ pane: 'landPane', padding: 1.5 });
+const waterRenderer = L.canvas({ pane: 'waterPane', padding: 1.5 });
+const boundaryRenderer = L.canvas({ pane: 'boundaryPane', padding: 1.5 });
 
 // 1. Base Map Setup (Local GeoJSON) 
 const landStyle = { fillColor: "#818181", fillOpacity: 1, color: "none", interactive: false };
@@ -1967,16 +1967,8 @@ const RadarCanvasLayer = L.Layer.extend({
         return {
             viewreset: this._reset,
             moveend: this._reset,
-            zoom: this._onZoom,
-            zoomend: this._onZoomEnd
+            zoomend: this._reset
         };
-    },
-    _onZoom: function() {
-        // Hide during active zoom to prevent weird artifacts, will show on zoomend/moveend
-        this._container.style.visibility = 'hidden';
-    },
-    _onZoomEnd: function() {
-        this._container.style.visibility = 'visible';
     },
     _reset: function() {
         if (!this._map) return;
@@ -1987,11 +1979,11 @@ const RadarCanvasLayer = L.Layer.extend({
         this._geometryCache.clear();
         
         const geo = this._getRadialGeometry(station.lat, station.lon, 0);
-        const geoDist = 1200; // km box coverage
+        const geoDist = 1500; // Expanded km box coverage to minimize "void" on zoom out
         let pixelSize = Math.ceil(geoDist * geo.pixelsPerKm);
         
-        // Safety cap for browser canvas limits
-        const MAX_SIZE = 5000;
+        // Safety cap for browser canvas limits (expanded for modern browsers)
+        const MAX_SIZE = 8192;
         if (pixelSize > MAX_SIZE) pixelSize = MAX_SIZE;
         
         this._container.width = pixelSize * dpr; 
