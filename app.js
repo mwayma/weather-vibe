@@ -2110,31 +2110,29 @@ const RadarCanvasLayer = L.Layer.extend({
 
         const deviceDpr = window.devicePixelRatio || 1;
         this._geometryCache.clear();
-        
-        const geo = this._getRadialGeometry(station.lat, station.lon, 0);
-        const geoDist = 1500; // Expanded km box coverage to minimize "void" on zoom out
-        let pixelSize = Math.ceil(geoDist * geo.pixelsPerKm);
-        
-        // Cap the actual backing store. Mobile browsers often blank canvases
-        // that exceed this, especially after devicePixelRatio is applied.
+
+        const mapSize = this._map.getSize();
+        const pixelWidth = Math.ceil(mapSize.x);
+        const pixelHeight = Math.ceil(mapSize.y);
         const MAX_BACKING_STORE_SIZE = window.matchMedia?.('(pointer: coarse)').matches ? 4096 : 8192;
-        if (pixelSize > MAX_BACKING_STORE_SIZE) pixelSize = MAX_BACKING_STORE_SIZE;
-        this._renderDpr = Math.min(deviceDpr, MAX_BACKING_STORE_SIZE / pixelSize);
-        const backingSize = Math.max(1, Math.floor(pixelSize * this._renderDpr));
+        const maxCssDimension = Math.max(pixelWidth, pixelHeight, 1);
+        this._renderDpr = Math.min(deviceDpr, MAX_BACKING_STORE_SIZE / maxCssDimension);
+        const backingWidth = Math.max(1, Math.floor(pixelWidth * this._renderDpr));
+        const backingHeight = Math.max(1, Math.floor(pixelHeight * this._renderDpr));
         
-        this._container.width = backingSize;
-        this._container.height = backingSize;
-        this._container.style.width = pixelSize + 'px';
-        this._container.style.height = pixelSize + 'px';
+        this._container.width = backingWidth;
+        this._container.height = backingHeight;
+        this._container.style.width = pixelWidth + 'px';
+        this._container.style.height = pixelHeight + 'px';
         
-        this._offscreenCanvas.width = backingSize;
-        this._offscreenCanvas.height = backingSize;
+        this._offscreenCanvas.width = backingWidth;
+        this._offscreenCanvas.height = backingHeight;
 
         const stationPoint = this._map.latLngToLayerPoint([station.lat, station.lon]);
-        const topLeft = L.point(stationPoint.x - pixelSize/2, stationPoint.y - pixelSize/2);
+        const topLeft = this._map.containerPointToLayerPoint([0, 0]);
         L.DomUtil.setPosition(this._container, topLeft);
         
-        this._centerOffset = L.point(pixelSize/2, pixelSize/2);
+        this._centerOffset = stationPoint.subtract(topLeft);
         this._needsFullRedraw = true;
         this._draw();
     },
