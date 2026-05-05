@@ -811,6 +811,7 @@ let liveBatteryState = {
     supported: false,
     charging: null
 };
+let liveRenderProfileOverride = 'auto';
 const LIVE_STATUS_INTERVAL_MS = 1000;
 const LIVE_DATA_STALE_MS = 25000;
 const LIVE_DATA_RESUBSCRIBE_MS = 60000;
@@ -1079,6 +1080,8 @@ function normalizeMomentData(moment) {
 }
 
 function isLivePowerSaverMode() {
+    if (liveRenderProfileOverride === 'battery') return true;
+    if (liveRenderProfileOverride === 'quality') return false;
     if (liveBatteryState.supported) return liveBatteryState.charging === false;
     return LIVE_RENDER_IS_COARSE_POINTER;
 }
@@ -1100,6 +1103,7 @@ function getLiveCanvasMaxRenderDpr(deviceDpr) {
 }
 
 function applyLiveRenderProfileChange() {
+    updateRenderProfileButtons();
     updateLivePowerProfileIndicator();
     if (!liveCanvasLayer) return;
     liveCanvasLayer._needsFullRedraw = true;
@@ -1110,17 +1114,41 @@ function updateLivePowerProfileIndicator() {
     const el = document.getElementById('live-power-profile');
     if (!el) return;
 
-    const show = currentRadarMode === 'live-tracking' && isLivePowerSaverMode();
+    const powerSaver = isLivePowerSaverMode();
+    const show = currentRadarMode === 'live-tracking' && (powerSaver || liveRenderProfileOverride === 'quality');
     el.style.display = show ? 'block' : 'none';
     if (!show) {
         el.textContent = '';
         return;
     }
 
-    const reason = liveBatteryState.supported && liveBatteryState.charging === false
-        ? 'Battery detected'
-        : 'Mobile profile';
+    if (!powerSaver) {
+        el.textContent = 'Quality rendering';
+        return;
+    }
+
+    let reason = 'Mobile profile';
+    if (liveRenderProfileOverride === 'battery') reason = 'Manual';
+    else if (liveBatteryState.supported && liveBatteryState.charging === false) reason = 'Battery detected';
     el.textContent = `Battery safe rendering - ${reason}`;
+}
+
+function updateRenderProfileButtons() {
+    ['auto', 'battery', 'quality'].forEach(profile => {
+        const btn = document.getElementById(`btn-render-${profile}`);
+        if (btn) btn.classList.toggle('active', liveRenderProfileOverride === profile);
+    });
+}
+
+function setLiveRenderProfileOverride(profile) {
+    const nextProfile = ['auto', 'battery', 'quality'].includes(profile) ? profile : 'auto';
+    const previousPowerSaverMode = isLivePowerSaverMode();
+    liveRenderProfileOverride = nextProfile;
+    updateRenderProfileButtons();
+    updateLivePowerProfileIndicator();
+    if (previousPowerSaverMode !== isLivePowerSaverMode()) {
+        applyLiveRenderProfileChange();
+    }
 }
 
 function initLivePowerProfile() {
@@ -1656,6 +1684,9 @@ function setupRadarButtons() {
     const btnLiveDebris = document.getElementById('btn-live-debris');
     const btnLiveBuffered = document.getElementById('btn-live-buffered');
     const btnLiveLowLatency = document.getElementById('btn-live-low-latency');
+    const btnRenderAuto = document.getElementById('btn-render-auto');
+    const btnRenderBattery = document.getElementById('btn-render-battery');
+    const btnRenderQuality = document.getElementById('btn-render-quality');
 
     const reflectivityLegend = document.getElementById('reflectivity-legend');
     const velocityLegend = document.getElementById('velocity-legend');
@@ -1753,6 +1784,11 @@ function setupRadarButtons() {
             setTimestampForMode('live-tracking', 'Low Latency: waiting for live chunks...');
         });
     }
+
+    if (btnRenderAuto) btnRenderAuto.addEventListener('click', () => setLiveRenderProfileOverride('auto'));
+    if (btnRenderBattery) btnRenderBattery.addEventListener('click', () => setLiveRenderProfileOverride('battery'));
+    if (btnRenderQuality) btnRenderQuality.addEventListener('click', () => setLiveRenderProfileOverride('quality'));
+    updateRenderProfileButtons();
     
     if (velocityBtn) {
         velocityBtn.addEventListener('click', (e) => {
