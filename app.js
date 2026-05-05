@@ -806,6 +806,7 @@ let liveReconnectInProgress = false;
 let socketGeneration = 0;
 let liveLatencyMode = 'buffered';
 let bufferedRadialQueue = [];
+const LIVE_RENDER_IS_COARSE_POINTER = window.matchMedia?.('(pointer: coarse)').matches || false;
 const LIVE_STATUS_INTERVAL_MS = 1000;
 const LIVE_DATA_STALE_MS = 25000;
 const LIVE_DATA_RESUBSCRIBE_MS = 60000;
@@ -813,9 +814,10 @@ const LIVE_SOCKET_STALE_MS = 45000;
 const LIVE_BUFFER_DELAY_MS = 15000;
 const LIVE_RADAR_CACHE_MAX_AGE_MS = 10 * 60 * 1000;
 const LIVE_BUFFER_MAX_EXTRA_LAG_MS = LIVE_RADAR_CACHE_MAX_AGE_MS;
-const MAX_BUFFERED_RADIALS_PER_FRAME = 40;
+const MAX_BUFFERED_RADIALS_PER_FRAME = LIVE_RENDER_IS_COARSE_POINTER ? 12 : 40;
 const MAX_BUFFERED_QUEUE_RADIALS = 5000;
 const LIVE_RADIAL_DISPLAY_RESOLUTION_DEG = 0.5;
+const LIVE_RADIAL_GATE_STEP = LIVE_RENDER_IS_COARSE_POINTER ? 2 : 1;
 const LIVE_DUAL_POL_REFLECTIVITY_FLOOR_DBZ = 10;
 const LIVE_OPTIONAL_PRODUCTS = ['velocity', 'debris', 'zdr', 'width'];
 const LIVE_PRODUCT_SAMPLE_MIN_RADIALS = 80;
@@ -2114,9 +2116,10 @@ const RadarCanvasLayer = L.Layer.extend({
         const mapSize = this._map.getSize();
         const pixelWidth = Math.ceil(mapSize.x);
         const pixelHeight = Math.ceil(mapSize.y);
-        const MAX_BACKING_STORE_SIZE = window.matchMedia?.('(pointer: coarse)').matches ? 4096 : 8192;
+        const MAX_BACKING_STORE_SIZE = LIVE_RENDER_IS_COARSE_POINTER ? 2048 : 8192;
         const maxCssDimension = Math.max(pixelWidth, pixelHeight, 1);
-        this._renderDpr = Math.min(deviceDpr, MAX_BACKING_STORE_SIZE / maxCssDimension);
+        const maxRenderDpr = LIVE_RENDER_IS_COARSE_POINTER ? 1 : deviceDpr;
+        this._renderDpr = Math.min(maxRenderDpr, MAX_BACKING_STORE_SIZE / maxCssDimension);
         const backingWidth = Math.max(1, Math.floor(pixelWidth * this._renderDpr));
         const backingHeight = Math.max(1, Math.floor(pixelHeight * this._renderDpr));
         
@@ -2189,7 +2192,7 @@ const RadarCanvasLayer = L.Layer.extend({
         if (!scale) return;
 
         const arcWidthRad = (LIVE_RADIAL_DISPLAY_RESOLUTION_DEG * Math.PI / 180) * 1.15;
-        const gateStep = 1;
+        const gateStep = LIVE_RADIAL_GATE_STEP;
         let moment = null;
         let selectedMomentElevation = null;
 
