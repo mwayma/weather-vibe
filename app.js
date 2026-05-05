@@ -26,11 +26,17 @@ map.getPane('liveRadarPane').style.pointerEvents = 'none';
 map.createPane('liveSweepPane');
 map.getPane('liveSweepPane').style.zIndex = 460;
 map.getPane('liveSweepPane').style.pointerEvents = 'none';
+map.createPane('roadsPane');
+map.getPane('roadsPane').style.zIndex = 550;
+map.getPane('roadsPane').style.pointerEvents = 'none';
+map.createPane('alertsPane');
+map.getPane('alertsPane').style.zIndex = 650;
 
 // Canvas Renderers for better performance with large GeoJSON datasets
 const landRenderer = L.canvas({ pane: 'landPane', padding: 1.5 });
 const waterRenderer = L.canvas({ pane: 'waterPane', padding: 1.5 });
 const boundaryRenderer = L.canvas({ pane: 'boundaryPane', padding: 1.5 });
+const alertsRenderer = L.canvas({ pane: 'alertsPane', padding: 1.5 });
 
 // 1. Base Map Setup (Local GeoJSON) 
 const landStyle = { fillColor: "#818181", fillOpacity: 1, color: "none", interactive: false };
@@ -159,9 +165,16 @@ let lastScanTime = "";
 const roadsLayer = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}', {
     attribution: 'Roads &copy; Esri',
     opacity: 0.75,
-    zIndex: 500 // Ensure roads render above the radar layers
+    pane: 'roadsPane'
 }).addTo(map);
 let isRoadsVisible = true;
+let areRoadsAboveRadar = true;
+
+function updateRoadLayerOrder() {
+    const pane = map.getPane('roadsPane');
+    if (!pane) return;
+    pane.style.zIndex = areRoadsAboveRadar ? 550 : 180;
+}
 
 // 3. Warning Fences (NWS Alerts)
 const alertsLayer = L.layerGroup().addTo(map);
@@ -319,6 +332,8 @@ function renderAlerts() {
     });
 
     L.geoJSON({ type: 'FeatureCollection', features: sortedFeatures }, {
+        pane: 'alertsPane',
+        renderer: alertsRenderer,
         filter: (f) => {
             const type = getAlertType(f.properties.event);
             
@@ -796,10 +811,15 @@ const LIVE_DATA_STALE_MS = 25000;
 const LIVE_DATA_RESUBSCRIBE_MS = 60000;
 const LIVE_SOCKET_STALE_MS = 45000;
 const LIVE_BUFFER_DELAY_MS = 15000;
-const LIVE_BUFFER_MAX_EXTRA_LAG_MS = 600000; // 10 minutes history allowed in buffer
+const LIVE_RADAR_CACHE_MAX_AGE_MS = 10 * 60 * 1000;
+const LIVE_BUFFER_MAX_EXTRA_LAG_MS = LIVE_RADAR_CACHE_MAX_AGE_MS;
 const MAX_BUFFERED_RADIALS_PER_FRAME = 40;
 const MAX_BUFFERED_QUEUE_RADIALS = 5000;
 const LIVE_RADIAL_DISPLAY_RESOLUTION_DEG = 0.5;
+const LIVE_OPTIONAL_PRODUCTS = ['velocity', 'debris', 'zdr', 'width'];
+const LIVE_PRODUCT_SAMPLE_MIN_RADIALS = 80;
+
+let liveProductAvailability = null;
 
 let socket = null;
 function getCurrentStationId() {
@@ -925,6 +945,8 @@ function initWebSocket() {
                         }
                     }
                 });
+                pruneLiveRadarData();
+                updateLiveProductAvailability(getLiveRadialsFromMap(), true);
             }
             if (liveCanvasLayer) liveCanvasLayer._needsFullRedraw = true;
             renderLiveRadar();
@@ -953,6 +975,7 @@ function initWebSocket() {
                 radial.azimuth = normalizeAzimuth(radial.azimuth);
                 return { radial, roundedAz };
             });
+            updateLiveProductAvailability(radials.map(item => item.radial));
 
             if (message.snapshot) {
                 radials.forEach(({ radial, roundedAz }) => applyLiveRadial(roundedAz, radial));
@@ -1009,6 +1032,7 @@ function initWebSocket() {
 
 setInterval(() => {
     if (currentRadarMode !== 'live-tracking') return;
+    if (pruneLiveRadarData() > 0) requestLiveCanvasDraw();
     renderLiveStatus();
 
     if (!socket || socket.readyState !== WebSocket.OPEN) {
@@ -1047,6 +1071,114 @@ function normalizeMomentData(moment) {
     if (moment?.moment_data && Array.isArray(moment.moment_data)) {
         moment.moment_data = new Float32Array(moment.moment_data);
     }
+}
+
+function createLiveProductAvailability(stationId) {
+    return {
+        stationId,
+        sampleRadials: 0,
+        settled: false,
+        products: {
+            reflectivity: true,
+            velocity: false,
+            debris: false,
+            zdr: false,
+            width: false
+        }
+    };
+}
+
+function resetLiveProductAvailability(stationId = getCurrentStationId()) {
+    liveProductAvailability = createLiveProductAvailability(stationId);
+    updateLiveProductControls();
+}
+
+function updateLiveProductAvailability(radials, forceSettled = false) {
+    const stationId = getCurrentStationId();
+    if (!liveProductAvailability || liveProductAvailability.stationId !== stationId) {
+        liveProductAvailability = createLiveProductAvailability(stationId);
+    }
+
+    if (Array.isArray(radials) && radials.length > 0) {
+        liveProductAvailability.sampleRadials += radials.length;
+        radials.forEach(radial => {
+            for (const products of Object.values(radial.elevations || {})) {
+                ['reflectivity', ...LIVE_OPTIONAL_PRODUCTS].forEach(product => {
+                    const moment = products?.[product];
+                    if (moment?.moment_data?.length) {
+                        liveProductAvailability.products[product] = true;
+                    }
+                });
+            }
+        });
+    }
+
+    if (forceSettled || liveProductAvailability.sampleRadials >= LIVE_PRODUCT_SAMPLE_MIN_RADIALS) {
+        liveProductAvailability.settled = true;
+    }
+
+    updateLiveProductControls();
+}
+
+function updateLiveProductControls() {
+    const availability = liveProductAvailability || createLiveProductAvailability(getCurrentStationId());
+    const canHideUnavailable = availability.settled;
+
+    LIVE_OPTIONAL_PRODUCTS.forEach(product => {
+        const btn = document.getElementById(`btn-live-${product}`);
+        if (!btn) return;
+        const available = availability.products[product];
+        btn.hidden = canHideUnavailable && !available;
+        btn.disabled = canHideUnavailable && !available;
+    });
+
+    if (currentLiveMode !== 'reflectivity' && canHideUnavailable && !availability.products[currentLiveMode]) {
+        setLiveView('reflectivity');
+    } else {
+        updateLiveLegends();
+    }
+}
+
+function getLiveRadialsFromMap() {
+    return liveRadarData?.radialsMap ? Array.from(liveRadarData.radialsMap.values()) : [];
+}
+
+function setLiveView(mode) {
+    currentLiveMode = mode;
+    ['reflectivity', 'velocity', 'debris', 'zdr', 'width'].forEach(product => {
+        const btn = document.getElementById(`btn-live-${product}`);
+        if (btn) btn.classList.toggle('active', product === mode);
+    });
+
+    updateLiveLegends();
+
+    if (liveCanvasLayer) {
+        liveCanvasLayer._needsFullRedraw = true;
+        requestLiveCanvasDraw();
+    } else if (liveRadarData?.radialsMap?.size) {
+        renderLiveRadar();
+    }
+}
+
+function pruneLiveRadarData(now = Date.now()) {
+    if (!liveRadarData?.radialsMap) return 0;
+    const minTimestamp = now - LIVE_RADAR_CACHE_MAX_AGE_MS;
+    let removed = 0;
+
+    for (const [key, radial] of liveRadarData.radialsMap.entries()) {
+        const timestamp = Number(radial.timestamp);
+        if (!Number.isFinite(timestamp) || timestamp < minTimestamp) {
+            liveRadarData.radialsMap.delete(key);
+            removed++;
+        }
+    }
+
+    if (removed > 0) {
+        if (liveCanvasLayer) liveCanvasLayer._needsFullRedraw = true;
+        syncLiveRadarArrays();
+    }
+
+    return removed;
 }
 
 function requestLiveCanvasDraw() {
@@ -1242,6 +1374,8 @@ function applyLiveRadial(roundedAz, radial) {
     }
 
     radial.azimuth = normalizeAzimuth(radial.azimuth);
+    if (!Number.isFinite(Number(radial.timestamp))) radial.timestamp = Date.now();
+    if (Number(radial.timestamp) < Date.now() - LIVE_RADAR_CACHE_MAX_AGE_MS) return;
     const displayAzimuth = getDisplayAzimuth(radial.azimuth);
     radial.revealedUpdate = 1;
     
@@ -1275,6 +1409,8 @@ function applyLiveRadial(roundedAz, radial) {
         }
     }
 
+    pruneLiveRadarData();
+
     if (!liveCanvasLayer) {
         renderLiveRadar();
     } else {
@@ -1304,6 +1440,7 @@ function mergeRealTimeData(newData) {
     newData.azimuths.forEach((az, i) => {
         const roundedAz = Math.round(az * 10) / 10;
         const timestamp = (newData.timestamps && newData.timestamps[i]) ? newData.timestamps[i] : now;
+        if (timestamp < now - LIVE_RADAR_CACHE_MAX_AGE_MS) return;
 
         if (!liveRadarData.radialsMap.has(roundedAz)) {
             liveRadarData.radialsMap.set(roundedAz, {
@@ -1323,6 +1460,7 @@ function mergeRealTimeData(newData) {
             }
         }
     });
+    pruneLiveRadarData();
 
     // CRITICAL: Ensure the layer exists and is ready to render
     if (!liveCanvasLayer) {
@@ -1333,7 +1471,11 @@ function mergeRealTimeData(newData) {
 function syncLiveRadarArrays() {
     if (!liveRadarData || !liveRadarData.radialsMap) return;
 
-    const sortedAzKeys = Array.from(liveRadarData.radialsMap.keys()).sort((a, b) => a - b);
+    const sortedAzKeys = Array.from(liveRadarData.radialsMap.keys()).sort((a, b) => {
+        const azA = Number(String(a).split('_').pop());
+        const azB = Number(String(b).split('_').pop());
+        return azA - azB;
+    });
     const len = sortedAzKeys.length;
     
     liveRadarData.azimuths = new Array(len);
@@ -1439,6 +1581,7 @@ function setupRadarButtons() {
     
     const chkCities = document.getElementById('chk-cities');
     const chkRoads = document.getElementById('chk-roads');
+    const chkRoadsAbove = document.getElementById('chk-roads-above');
     const chkRivers = document.getElementById('chk-rivers');
     const chkWater = document.getElementById('chk-water');
     const chkCounties = document.getElementById('chk-counties');
@@ -1504,26 +1647,6 @@ function setupRadarButtons() {
             }
         });
     }
-
-    const setLiveView = (mode) => {
-        currentLiveMode = mode;
-        [btnLiveReflectivity, btnLiveVelocity, btnLiveDebris, btnLiveZdr, btnLiveWidth].forEach(btn => {
-            if (btn) btn.classList.toggle('active', btn.id === `btn-live-${mode}`);
-        });
-
-        // Toggle legends
-        ['reflectivity', 'velocity', 'debris', 'zdr', 'width'].forEach(l => {
-            const el = document.getElementById(`live-${l}-legend`);
-            if (el) el.style.display = l === mode ? 'block' : 'none';
-        });
-
-        if (liveCanvasLayer) {
-            liveCanvasLayer._needsFullRedraw = true;
-            requestLiveCanvasDraw();
-        } else if (liveRadarData?.radialsMap?.size) {
-            renderLiveRadar();
-        }
-    };
 
     if (btnLiveReflectivity) btnLiveReflectivity.onclick = () => setLiveView('reflectivity');
     if (btnLiveVelocity) btnLiveVelocity.onclick = () => setLiveView('velocity');
@@ -1610,6 +1733,14 @@ function setupRadarButtons() {
         chkRoads.addEventListener('change', (e) => {
             if (e.target.checked) map.addLayer(roadsLayer);
             else map.removeLayer(roadsLayer);
+        });
+    }
+    if (chkRoadsAbove) {
+        areRoadsAboveRadar = chkRoadsAbove.checked;
+        updateRoadLayerOrder();
+        chkRoadsAbove.addEventListener('change', (e) => {
+            areRoadsAboveRadar = e.target.checked;
+            updateRoadLayerOrder();
         });
     }
     if (chkRivers) {
@@ -1854,6 +1985,7 @@ function startLiveTracking() {
     // CRITICAL: Clear existing data to prevent geo-contamination
     liveRadarData = null;
     clearLivePlaybackState();
+    resetLiveProductAvailability(stationId);
     currentAngle = 0;
     targetAzimuth = 0;
     lastAzimuthMetadataTime = 0;

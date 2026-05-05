@@ -28,6 +28,7 @@ const stationCache = new Map(); // stationId -> liveRadarData object
 
 const parser = new XMLParser();
 const VOLUME_DISCOVERY_INTERVAL_MS = 15000;
+const LIVE_RADAR_CACHE_MAX_AGE_MS = Number(process.env.LIVE_RADAR_CACHE_MAX_AGE_MS) || 10 * 60 * 1000;
 const RADIAL_BATCH_SIZE = 10;
 const RADIAL_BATCH_SPACING_MS = 0;
 const MAX_CLIENT_BUFFERED_BYTES = 10 * 1024 * 1024;
@@ -71,6 +72,37 @@ function sendStatus(stationId, message) {
     broadcast(stationId, { type: 'status', message: `[Server] ${message}` });
 }
 
+function getRadialTimestamp(radial) {
+    const timestamp = Number(radial?.timestamp);
+    return Number.isFinite(timestamp) && timestamp > 0 ? timestamp : 0;
+}
+
+function pruneStationCache(stationId, now = Date.now()) {
+    const state = stationCache.get(stationId);
+    if (!state?.radials) return;
+
+    const minTimestamp = now - LIVE_RADAR_CACHE_MAX_AGE_MS;
+    for (const [azimuth, radial] of state.radials.entries()) {
+        const timestamp = getRadialTimestamp(radial);
+        if (!timestamp || timestamp < minTimestamp) {
+            state.radials.delete(azimuth);
+        }
+    }
+
+    if (state.radials.size === 0 && !subscriptions.get(stationId)?.size) {
+        stationCache.delete(stationId);
+    }
+}
+
+function cleanupStationIfUnused(stationId) {
+    if (subscriptions.get(stationId)?.size) return;
+    clearInterval(activePollers.get(stationId));
+    activePollers.delete(stationId);
+    subscriptions.delete(stationId);
+    stationCache.delete(stationId);
+    stationState.delete(stationId);
+}
+
 function mergeRealTimeData(stationId, newData) {
     if (!stationCache.has(stationId)) {
         // Initialize with fixed-size structure for O(1) access
@@ -106,10 +138,13 @@ function mergeRealTimeData(stationId, newData) {
             }
         }
     });
+
+    pruneStationCache(stationId);
 }
 
 // Helper to convert the Map-based cache to the flat format the client expects
 function getConsolidatedData(stationId) {
+    pruneStationCache(stationId);
     const state = stationCache.get(stationId);
     if (!state) return null;
 
@@ -328,6 +363,7 @@ async function sendRadialBatchesToClient(ws, stationId, radials, snapshot = fals
 }
 
 function getCachedRadials(stationId) {
+    pruneStationCache(stationId);
     const state = stationCache.get(stationId);
     if (!state) return [];
     return Array.from(state.radials.values()).sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
@@ -420,6 +456,8 @@ function mergeRadialsIntoCache(stationId, radials) {
             }
         }
     });
+
+    pruneStationCache(stationId);
 }
 
 function trimProcessedChunks(state) {
@@ -439,6 +477,7 @@ function trimHeaderChunks(state) {
 
 async function pollChunks(stationId) {
     stationId = normalizeStationId(stationId);
+    if (!subscriptions.get(stationId)?.size) return;
     
     const now = Date.now();
     const lockKey = `lock_${stationId}`;
@@ -503,6 +542,7 @@ async function pollChunks(stationId) {
         const radialBatcher = createRadialMicrobatcher(stationId);
 
         for (const volPrefix of volumesToPoll) {
+            if (!subscriptions.get(stationId)?.size) break;
             const listChunksUrl = `${BUCKET_URL}/?list-type=2&prefix=${volPrefix}`;
             const chunkRes = await fetchWithTimeout(listChunksUrl);
             const chunkJson = parser.parse(await chunkRes.text());
@@ -549,6 +589,7 @@ async function pollChunks(stationId) {
                 }
 
                 for (const chunk of unseen) {
+                    if (!subscriptions.get(stationId)?.size) break;
                     try {
                         const chunkId = chunk.Key.split('/').pop();
                         const dataRes = await fetchWithTimeout(`${BUCKET_URL}/${chunk.Key}`);
@@ -600,6 +641,7 @@ async function pollChunks(stationId) {
         console.error(`[${stationId}] Poll error:`, e.message);
     } finally {
         pollingLocks.delete(stationId);
+        cleanupStationIfUnused(stationId);
     }
 }
 
@@ -613,8 +655,8 @@ function extractRadialData(parsed, stationId, chunkId) {
         reflectivity: ['getHighresReflectivity', 'getReflectivity'],
         velocity: ['getHighresVelocity', 'getVelocity'],
         debris: ['getHighresCorrelationCoefficient', 'getCorrelationCoefficient'],
-        zdr: ['getHighresDifferentialReflectivity', 'getDifferentialReflectivity'],
-        width: ['getHighresSpectrumWidth', 'getSpectrumWidth']
+        zdr: ['getHighresDiffReflectivity'],
+        width: ['getHighresSpectrum']
     };
 
     let hasAnyData = false;
@@ -716,10 +758,7 @@ wss.on('connection', (ws) => {
                 
                 if (currentStation) {
                     subscriptions.get(currentStation)?.delete(ws);
-                    if (subscriptions.get(currentStation)?.size === 0) {
-                        clearInterval(activePollers.get(currentStation));
-                        activePollers.delete(currentStation);
-                    }
+                    cleanupStationIfUnused(currentStation);
                 }
 
                 currentStation = stationId;
@@ -744,10 +783,7 @@ wss.on('connection', (ws) => {
             } else if (parsed.action === 'unsubscribe') {
                 if (currentStation) {
                     subscriptions.get(currentStation)?.delete(ws);
-                    if (subscriptions.get(currentStation)?.size === 0) {
-                        clearInterval(activePollers.get(currentStation));
-                        activePollers.delete(currentStation);
-                    }
+                    cleanupStationIfUnused(currentStation);
                 }
             }
         } catch (e) {
@@ -758,10 +794,7 @@ wss.on('connection', (ws) => {
     ws.on('close', () => {
         if (currentStation) {
             subscriptions.get(currentStation)?.delete(ws);
-            if (subscriptions.get(currentStation)?.size === 0) {
-                clearInterval(activePollers.get(currentStation));
-                activePollers.delete(currentStation);
-            }
+            cleanupStationIfUnused(currentStation);
         }
     });
 });
