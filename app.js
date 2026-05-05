@@ -1909,18 +1909,18 @@ function startLiveTracking() {
 
 const RadarCanvasLayer = L.Layer.extend({
     onAdd: function(map) {
-        this._container = L.DomUtil.create('canvas', 'leaflet-layer');
+        this._container = L.DomUtil.create('canvas', 'leaflet-layer leaflet-zoom-animated');
         this._container.style.pointerEvents = 'none';
         map.getPane('liveRadarPane').appendChild(this._container);
 
         this._offscreenCanvas = document.createElement('canvas');
         this._offscreenCtx = this._offscreenCanvas.getContext('2d');
         this._needsFullRedraw = true;
+        this._geometryCache = new Map();
 
         map.on('viewreset', this._reset, this); 
         map.on('move', this._onMove, this);
-        map.on('moveend', this._onMoveEnd, this);
-        map.on('zoomstart', this._onZoomStart, this);
+        map.on('moveend', this._reset, this);
         this._reset();
     },
     onRemove: function(map) {
@@ -1929,41 +1929,41 @@ const RadarCanvasLayer = L.Layer.extend({
         }
         map.off('viewreset', this._reset, this); 
         map.off('move', this._onMove, this);
-        map.off('moveend', this._onMoveEnd, this);
-        map.off('zoomstart', this._onZoomStart, this);
+        map.off('moveend', this._reset, this);
         this._offscreenCanvas = null;
         this._offscreenCtx = null;
     },
-    _onZoomStart: function() {
-        this._isZooming = true;
-        if (this._container) this._container.style.visibility = 'hidden';
-    },
     _onMove: function() {
-        if (this._isZooming) return;
-        const pos = map.containerPointToLayerPoint([0, 0]);
-        L.DomUtil.setPosition(this._container, pos);
         this._draw(); 
     },
-    _onMoveEnd: function() {
-        this._isZooming = false;
-        if (this._container) this._container.style.visibility = 'visible';
-        this._reset();
-    },
     _reset: function() {
-        const size = map.getSize();
-        const dpr = window.devicePixelRatio || 1;
-        
-        this._container.width = size.x * dpr; 
-        this._container.height = size.y * dpr;
-        this._container.style.width = size.x + 'px';
-        this._container.style.height = size.y + 'px';
-        
-        this._offscreenCanvas.width = size.x * dpr;
-        this._offscreenCanvas.height = size.y * dpr;
+        const station = findStation(getCurrentStationId());
+        if (!station) return;
 
-        const pos = map.containerPointToLayerPoint([0, 0]);
-        L.DomUtil.setPosition(this._container, pos);
-        this._topLeft = pos;
+        const dpr = window.devicePixelRatio || 1;
+        this._geometryCache.clear();
+        
+        const geo = this._getRadialGeometry(station.lat, station.lon, 0);
+        const geoDist = 1200; // km box
+        let pixelSize = Math.ceil(geoDist * geo.pixelsPerKm);
+        
+        // Cap to safe size
+        const MAX_SIZE = 4096;
+        if (pixelSize > MAX_SIZE) pixelSize = MAX_SIZE;
+        
+        this._container.width = pixelSize * dpr; 
+        this._container.height = pixelSize * dpr;
+        this._container.style.width = pixelSize + 'px';
+        this._container.style.height = pixelSize + 'px';
+        
+        this._offscreenCanvas.width = pixelSize * dpr;
+        this._offscreenCanvas.height = pixelSize * dpr;
+
+        const stationPoint = map.latLngToLayerPoint([station.lat, station.lon]);
+        const topLeft = L.point(stationPoint.x - pixelSize/2, stationPoint.y - pixelSize/2);
+        L.DomUtil.setPosition(this._container, topLeft);
+        
+        this._centerOffset = L.point(pixelSize/2, pixelSize/2);
         this._needsFullRedraw = true;
         this._draw();
     },
@@ -1973,12 +1973,14 @@ const RadarCanvasLayer = L.Layer.extend({
         return numeric > 10 ? numeric / 1000 : numeric;
     },
     _getRadialGeometry: function(stationLat, stationLon, azimuth) {
+        const roundedAz = Math.round(normalizeAzimuth(azimuth) * 10) / 10;
+        if (this._geometryCache.has(roundedAz)) return this._geometryCache.get(roundedAz);
+
         const p0 = map.latLngToLayerPoint([stationLat, stationLon]);
-        
         const earthRadiusKm = 6371.0088;
         const testRangeKm = 100;
         const angularDistance = testRangeKm / earthRadiusKm;
-        const bearing = normalizeAzimuth(azimuth) * Math.PI / 180;
+        const bearing = roundedAz * Math.PI / 180;
         const lat1 = stationLat * Math.PI / 180;
         const lon1 = stationLon * Math.PI / 180;
 
@@ -1993,14 +1995,15 @@ const RadarCanvasLayer = L.Layer.extend({
         const dy = p1.y - p0.y;
         const pixelDist = Math.sqrt(dx * dx + dy * dy);
         
-        return {
-            center: p0,
+        const result = {
             pixelsPerKm: pixelDist / testRangeKm,
             angle: Math.atan2(dy, dx)
         };
+        this._geometryCache.set(roundedAz, result);
+        return result;
     },
     _drawRadialToOffscreen: function(radial) {
-        if (!this._offscreenCanvas || !this._offscreenCtx || !this._topLeft) return;
+        if (!this._offscreenCanvas || !this._offscreenCtx || !this._centerOffset) return;
         
         const ctx = this._offscreenCtx;
         const station = findStation(getCurrentStationId());
@@ -2009,8 +2012,8 @@ const RadarCanvasLayer = L.Layer.extend({
         const geo = this._getRadialGeometry(station.lat, station.lon, radial.azimuth);
         const dpr = window.devicePixelRatio || 1;
         const pixelsPerKm = geo.pixelsPerKm * dpr;
-        const centerX = (geo.center.x - this._topLeft.x) * dpr;
-        const centerY = (geo.center.y - this._topLeft.y) * dpr;
+        const centerX = this._centerOffset.x * dpr;
+        const centerY = this._centerOffset.y * dpr;
 
         const momentKey = getLiveMomentKey();
         const scale = COLOR_SCALES[momentKey];
@@ -2124,7 +2127,7 @@ const RadarCanvasLayer = L.Layer.extend({
         this._needsFullRedraw = false;
     },
     _draw: function() {
-        if (!this._topLeft || !this._container || !this._offscreenCanvas) return;
+        if (!this._container || !this._offscreenCanvas) return;
         const ctx = this._container.getContext('2d');
 
         if (this._needsFullRedraw) {
