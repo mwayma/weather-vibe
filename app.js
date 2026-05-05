@@ -1100,9 +1100,27 @@ function getLiveCanvasMaxRenderDpr(deviceDpr) {
 }
 
 function applyLiveRenderProfileChange() {
+    updateLivePowerProfileIndicator();
     if (!liveCanvasLayer) return;
     liveCanvasLayer._needsFullRedraw = true;
     liveCanvasLayer._reset();
+}
+
+function updateLivePowerProfileIndicator() {
+    const el = document.getElementById('live-power-profile');
+    if (!el) return;
+
+    const show = currentRadarMode === 'live-tracking' && isLivePowerSaverMode();
+    el.style.display = show ? 'block' : 'none';
+    if (!show) {
+        el.textContent = '';
+        return;
+    }
+
+    const reason = liveBatteryState.supported && liveBatteryState.charging === false
+        ? 'Battery detected'
+        : 'Mobile profile';
+    el.textContent = `Battery safe rendering - ${reason}`;
 }
 
 function initLivePowerProfile() {
@@ -1114,6 +1132,7 @@ function initLivePowerProfile() {
                 supported: true,
                 charging: battery.charging
             };
+            updateLivePowerProfileIndicator();
 
             const handleBatteryChange = () => {
                 const previousPowerSaverMode = isLivePowerSaverMode();
@@ -1990,6 +2009,7 @@ function updateRadarLayersBasedOnMode() {
     if (liveOptions) liveOptions.style.display = (currentRadarMode === 'live-tracking') ? 'block' : 'none';
     if (tempOptions) tempOptions.style.display = (currentRadarMode === 'temperature') ? 'block' : 'none';
     if (liveIndicator) liveIndicator.style.display = (currentRadarMode === 'live-tracking') ? 'block' : 'none';
+    updateLivePowerProfileIndicator();
 
     updateLiveLegends();
 
