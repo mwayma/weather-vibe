@@ -44,7 +44,7 @@ map.getPane('alertsPane').style.pointerEvents = 'none';
 const landRenderer = L.canvas({ pane: 'landPane', padding: 1.5 });
 const waterRenderer = L.canvas({ pane: 'waterPane', padding: 1.5 });
 const boundaryRenderer = L.canvas({ pane: 'boundaryPane', padding: 1.5 });
-const alertsRenderer = L.canvas({ pane: 'alertsPane', padding: 1.5 });
+const alertsRenderer = L.svg({ pane: 'alertsPane' });
 
 // 1. Base Map Setup (Local GeoJSON) 
 const landStyle = { fillColor: "#818181", fillOpacity: 1, color: "none", interactive: false };
@@ -341,6 +341,7 @@ function renderAlerts() {
     L.geoJSON({ type: 'FeatureCollection', features: sortedFeatures }, {
         pane: 'alertsPane',
         renderer: alertsRenderer,
+        interactive: true,
         filter: (f) => {
             const type = getAlertType(f.properties.event);
             
