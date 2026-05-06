@@ -938,86 +938,92 @@ function trimHeaderChunks(state) {
 
 async function primeStationHistory(stationId, state, commonPrefixes) {
     if (state.isPrimed) return;
+    state.isPrimed = true; // Mark as primed immediately to prevent concurrent prime tasks
     
-    const sortedPrefixes = [...commonPrefixes].sort((a, b) => {
-        const numA = parseInt(a.Prefix.split('/')[1]);
-        const numB = parseInt(b.Prefix.split('/')[1]);
-        return numA - numB;
-    });
+    // Move to background to avoid blocking the main live poller
+    (async () => {
+        const sortedPrefixes = [...commonPrefixes].sort((a, b) => {
+            const numA = parseInt(a.Prefix.split('/')[1]);
+            const numB = parseInt(b.Prefix.split('/')[1]);
+            return numA - numB;
+        });
 
-    const latestVolPrefix = state.latestVolPrefix;
-    const latestIdx = sortedPrefixes.findIndex(p => p.Prefix === latestVolPrefix);
-    if (latestIdx < 0) return;
+        const latestVolPrefix = state.latestVolPrefix;
+        const latestIdx = sortedPrefixes.findIndex(p => p.Prefix === latestVolPrefix);
+        if (latestIdx < 0) return;
 
-    const volumesToPrime = [];
-    for (let i = 3; i >= 1; i--) {
-        const idx = latestIdx - i;
-        if (idx >= 0) volumesToPrime.push(sortedPrefixes[idx].Prefix);
-    }
-
-    if (volumesToPrime.length === 0) {
-        state.isPrimed = true;
-        return;
-    }
-
-    console.log(`[${stationId}] Priming history from ${volumesToPrime.length} previous volumes...`);
-    sendStatus(stationId, `Priming motion tracking history from ${volumesToPrime.length} previous scans...`);
-    
-    for (let v = 0; v < volumesToPrime.length; v++) {
-        const volPrefix = volumesToPrime[v];
-        try {
-            sendStatus(stationId, `Processing historical scan ${v + 1}/${volumesToPrime.length}...`);
-            const listChunksUrl = `${BUCKET_URL}/?list-type=2&prefix=${volPrefix}`;
-            const chunkRes = await fetchWithTimeout(listChunksUrl);
-            const chunkJson = parser.parse(await chunkRes.text());
-            let contents = chunkJson.ListBucketResult.Contents;
-            if (!contents) continue;
-            if (!Array.isArray(contents)) contents = [contents];
-            
-            contents.sort((a, b) => {
-                const timeDiff = getKeyTimestamp(a.Key) - getKeyTimestamp(b.Key);
-                if (timeDiff !== 0) return timeDiff;
-                return getChunkOrder(a.Key) - getChunkOrder(b.Key);
-            });
-
-            const volTimestamp = getKeyTimestamp(contents[0].Key);
-            let headerChunk = null;
-            const headerKey = contents.find(c => isStartChunk(c.Key))?.Key;
-            if (headerKey) {
-                const hRes = await fetchWithTimeout(`${BUCKET_URL}/${headerKey}`);
-                headerChunk = await hRes.arrayBuffer();
-            }
-
-            for (const chunk of contents) {
-                try {
-                    const dataRes = await fetchWithTimeout(`${BUCKET_URL}/${chunk.Key}`);
-                    const chunkBuffer = await dataRes.arrayBuffer();
-                    let combinedBuffer;
-                    if (headerChunk && !isStartChunk(chunk.Key)) {
-                        combinedBuffer = Buffer.concat([Buffer.from(headerChunk), Buffer.from(chunkBuffer)]);
-                    } else {
-                        combinedBuffer = Buffer.from(chunkBuffer);
-                    }
-                    const parsed = new Level2Radar(combinedBuffer);
-                    const extracted = extractRadialData(parsed, stationId, chunk.Key.split('/').pop());
-                    const radials = extractedToRadials(extracted);
-                    if (radials.length > 0) {
-                        mergeRadialsIntoCache(stationId, radials, volTimestamp || Date.now());
-                    }
-                } catch (e) {}
-            }
-            
-            if (volTimestamp) {
-                deriveStormFeatures(stationId, volTimestamp);
-            }
-        } catch (e) {
-            console.error(`[${stationId}] Prime volume error:`, e.message);
+        const volumesToPrime = [];
+        for (let i = 3; i >= 1; i--) {
+            const idx = latestIdx - i;
+            if (idx >= 0) volumesToPrime.push(sortedPrefixes[idx].Prefix);
         }
-    }
-    
-    state.isPrimed = true;
-    console.log(`[${stationId}] Priming complete for ${stationId}`);
-    sendStatus(stationId, 'Motion tracking history primed. Tracking is now active.');
+
+        if (volumesToPrime.length === 0) return;
+
+        console.log(`[${stationId}] Priming history from ${volumesToPrime.length} previous volumes...`);
+        sendStatus(stationId, `Priming motion tracking history from ${volumesToPrime.length} previous scans...`);
+        
+        for (let v = 0; v < volumesToPrime.length; v++) {
+            if (!subscriptions.get(stationId)?.size) break;
+            const volPrefix = volumesToPrime[v];
+            try {
+                sendStatus(stationId, `Processing historical scan ${v + 1}/${volumesToPrime.length}...`);
+                const listChunksUrl = `${BUCKET_URL}/?list-type=2&prefix=${volPrefix}`;
+                const chunkRes = await fetchWithTimeout(listChunksUrl);
+                const chunkJson = parser.parse(await chunkRes.text());
+                let contents = chunkJson.ListBucketResult.Contents;
+                if (!contents) continue;
+                if (!Array.isArray(contents)) contents = [contents];
+                
+                contents.sort((a, b) => {
+                    const timeDiff = getKeyTimestamp(a.Key) - getKeyTimestamp(b.Key);
+                    if (timeDiff !== 0) return timeDiff;
+                    return getChunkOrder(a.Key) - getChunkOrder(b.Key);
+                });
+
+                const volTimestamp = getKeyTimestamp(contents[0].Key);
+                let headerChunk = null;
+                const headerKey = contents.find(c => isStartChunk(c.Key))?.Key;
+                if (headerKey) {
+                    const hRes = await fetchWithTimeout(`${BUCKET_URL}/${headerKey}`);
+                    headerChunk = await hRes.arrayBuffer();
+                }
+
+                for (const chunk of contents) {
+                    if (!subscriptions.get(stationId)?.size) break;
+                    try {
+                        const dataRes = await fetchWithTimeout(`${BUCKET_URL}/${chunk.Key}`);
+                        const chunkBuffer = await dataRes.arrayBuffer();
+                        let combinedBuffer;
+                        if (headerChunk && !isStartChunk(chunk.Key)) {
+                            combinedBuffer = Buffer.concat([Buffer.from(headerChunk), Buffer.from(chunkBuffer)]);
+                        } else {
+                            combinedBuffer = Buffer.from(chunkBuffer);
+                        }
+                        const parsed = new Level2Radar(combinedBuffer);
+                        // Faster: Only extract products needed for storm signals
+                        const extracted = extractRadialData(parsed, stationId, chunk.Key.split('/').pop(), ['reflectivity', 'velocity', 'debris', 'zdr']);
+                        const radials = extractedToRadials(extracted);
+                        if (radials.length > 0) {
+                            mergeRadialsIntoCache(stationId, radials, volTimestamp || Date.now());
+                        }
+                    } catch (e) {}
+                }
+                
+                if (volTimestamp) {
+                    deriveStormFeatures(stationId, volTimestamp);
+                    // Broadcast derived features for historical volumes to client
+                    const features = deriveStormFeatures(stationId, volTimestamp);
+                    broadcast(stationId, { type: 'storm_features', stationId, features, generatedAt: volTimestamp });
+                }
+            } catch (e) {
+                console.error(`[${stationId}] Prime volume error:`, e.message);
+            }
+        }
+        
+        console.log(`[${stationId}] Priming complete for ${stationId}`);
+        sendStatus(stationId, 'Motion tracking history primed. Tracking is now active.');
+    })();
 }
 
 async function pollChunks(stationId) {
@@ -1238,7 +1244,7 @@ async function pollChunks(stationId) {
     }
 }
 
-function extractRadialData(parsed, stationId, chunkId) {
+function extractRadialData(parsed, stationId, chunkId, productsOnly = null) {
     const elevations = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22];
     let azimuths = null;
     let timestamps = null;
@@ -1271,6 +1277,8 @@ function extractRadialData(parsed, stationId, chunkId) {
             let elevationHasData = false;
             
             for (const [productKey, methodList] of Object.entries(methodGroups)) {
+                if (productsOnly && !productsOnly.includes(productKey)) continue;
+
                 let moments = null;
                 // Try each method in the group until we find data
                 for (const methodName of methodList) {
