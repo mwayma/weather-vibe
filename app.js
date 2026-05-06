@@ -852,6 +852,7 @@ const LIVE_RADAR_CACHE_MAX_AGE_MS = 10 * 60 * 1000;
 const LIVE_BUFFER_MAX_EXTRA_LAG_MS = LIVE_RADAR_CACHE_MAX_AGE_MS;
 const MAX_BUFFERED_QUEUE_RADIALS = 5000;
 const LIVE_RADIAL_DISPLAY_RESOLUTION_DEG = 0.5;
+const LIVE_RAIN_RADIAL_ARC_OVERSCAN = 1.45;
 const LIVE_DUAL_POL_REFLECTIVITY_FLOOR_DBZ = 10;
 const LIVE_RAIN_REFLECTIVITY_FLOOR_DBZ = 18;
 const LIVE_OPTIONAL_PRODUCTS = ['velocity', 'debris', 'zdr', 'width'];
@@ -1737,6 +1738,27 @@ const COLOR_SCALES = Object.fromEntries(Object.entries(COLOR_BINS).map(([product
     }
 ]));
 
+const RAIN_ONLY_COLOR_BINS = [
+    [20, null],
+    [25, '#00ff00'],
+    [30, '#00cc00'],
+    [35, '#009900'],
+    [40, '#ffff00'],
+    [45, '#ffcc00'],
+    [50, '#ff9900'],
+    [55, '#ff0000'],
+    [60, '#cc0000'],
+    [65, '#ff00ff'],
+    [70, '#9900ff'],
+    [Infinity, '#ffffff']
+];
+
+function getRainOnlyColor(val) {
+    if (!Number.isFinite(val) || val < LIVE_RAIN_REFLECTIVITY_FLOOR_DBZ) return null;
+    const bin = RAIN_ONLY_COLOR_BINS.find(([upper]) => val < upper);
+    return bin ? bin[1] : null;
+}
+
     let selectedLiveElevation = 'auto'; // 'auto' or 1-22
 let buttonsInitialized = false;
 function setupRadarButtons() {
@@ -2372,6 +2394,58 @@ const RadarCanvasLayer = L.Layer.extend({
         this._geometryCache.set(roundedAz, result);
         return result;
     },
+    _getCompositeReflectivityMoment: function(radial) {
+        let compositeData = null;
+        let bestMoment = null;
+
+        for (let e = 1; e <= 22; e++) {
+            const m = radial.elevations[e]?.reflectivity;
+            if (m?.moment_data) {
+                if (!compositeData) {
+                    compositeData = new Float32Array(m.moment_data.length).fill(-Infinity);
+                    bestMoment = m;
+                }
+                for (let i = 0; i < m.moment_data.length; i++) {
+                    if (m.moment_data[i] > compositeData[i]) {
+                        compositeData[i] = m.moment_data[i];
+                    }
+                }
+            }
+        }
+
+        return bestMoment ? { ...bestMoment, moment_data: compositeData } : null;
+    },
+    _getLiveRadialByDisplayAzimuth: function(azimuth) {
+        if (!liveRadarData?.radialsMap) return null;
+        const stationId = getCurrentStationId();
+        const displayAzimuth = getDisplayAzimuth(azimuth);
+        return liveRadarData.radialsMap.get(`${stationId}_${displayAzimuth.toFixed(1)}`) || null;
+    },
+    _getRainOnlyNeighborMoments: function(radial) {
+        const offsets = [-1, -0.5, 0.5, 1];
+        const moments = [];
+
+        offsets.forEach(offset => {
+            const neighbor = this._getLiveRadialByDisplayAzimuth(radial.azimuth + offset);
+            if (!neighbor) return;
+            const moment = this._getCompositeReflectivityMoment(neighbor);
+            if (moment?.moment_data) moments.push(moment);
+        });
+
+        return moments;
+    },
+    _getMomentValueAtRange: function(moment, rangeKm) {
+        if (!moment?.moment_data) return null;
+        const firstGateKm = this._normalizeGateDistanceKm(moment.first_gate);
+        const gateSizeKm = this._normalizeGateDistanceKm(moment.gate_size);
+        if (!(gateSizeKm > 0)) return null;
+
+        const index = Math.round((rangeKm - firstGateKm) / gateSizeKm);
+        if (index < 0 || index >= moment.moment_data.length) return null;
+
+        const value = Number(moment.moment_data[index]);
+        return Number.isFinite(value) ? value : null;
+    },
     _drawRadialToOffscreen: function(radial) {
         if (!this._offscreenCanvas || !this._offscreenCtx || !this._centerOffset) return;
         
@@ -2389,33 +2463,16 @@ const RadarCanvasLayer = L.Layer.extend({
         const scale = COLOR_SCALES[momentKey];
         if (!scale) return;
 
-        const arcWidthRad = (LIVE_RADIAL_DISPLAY_RESOLUTION_DEG * Math.PI / 180) * 1.15;
+        const isRainOnlyReflectivity = momentKey === 'reflectivity' && liveRainOnlyMode;
+        const arcWidthRad = (LIVE_RADIAL_DISPLAY_RESOLUTION_DEG * Math.PI / 180)
+            * (isRainOnlyReflectivity ? LIVE_RAIN_RADIAL_ARC_OVERSCAN : 1.15);
         const gateStep = getLiveRadialGateStep();
         let moment = null;
         let selectedMomentElevation = null;
 
         if (selectedLiveElevation === 'auto') {
             if (currentLiveMode === 'reflectivity') {
-                let compositeData = null;
-                let bestMoment = null;
-                
-                for (let e = 1; e <= 22; e++) {
-                    const m = radial.elevations[e]?.reflectivity;
-                    if (m?.moment_data) {
-                        if (!compositeData) {
-                            compositeData = new Float32Array(m.moment_data.length).fill(-Infinity);
-                            bestMoment = m;
-                        }
-                        for (let i = 0; i < m.moment_data.length; i++) {
-                            if (m.moment_data[i] > compositeData[i]) {
-                                compositeData[i] = m.moment_data[i];
-                            }
-                        }
-                    }
-                }
-                if (bestMoment) {
-                    moment = { ...bestMoment, moment_data: compositeData };
-                }
+                moment = this._getCompositeReflectivityMoment(radial);
             } else {
                 for (let e = 1; e <= 22; e++) {
                     const candidate = radial.elevations[e]?.[momentKey];
@@ -2456,17 +2513,28 @@ const RadarCanvasLayer = L.Layer.extend({
             const data = moment.moment_data;
             if (!(gateSizeKm > 0)) { ctx.restore(); return; }
             const reflectivityMask = this._getReflectivityMask(radial, selectedMomentElevation);
+            const rainNeighborMoments = isRainOnlyReflectivity ? this._getRainOnlyNeighborMoments(radial) : [];
 
             let startJ = null;
             let currentColor = null;
 
             for (let j = 0; j <= data.length; j += gateStep) {
-                const val = j < data.length ? data[j] : null;
+                let val = j < data.length ? Number(data[j]) : null;
+                if (isRainOnlyReflectivity && j < data.length) {
+                    const rangeKm = firstGateActual + j * gateSizeKm;
+                    for (const neighborMoment of rainNeighborMoments) {
+                        const neighborVal = this._getMomentValueAtRange(neighborMoment, rangeKm);
+                        if (neighborVal !== null && (!Number.isFinite(val) || neighborVal > val)) {
+                            val = neighborVal;
+                        }
+                    }
+                }
+                const colorScale = momentKey === 'reflectivity' && liveRainOnlyMode ? getRainOnlyColor : scale;
                 const passesRainFloor = momentKey !== 'reflectivity'
                     || !liveRainOnlyMode
                     || (Number.isFinite(Number(val)) && Number(val) >= LIVE_RAIN_REFLECTIVITY_FLOOR_DBZ);
                 const color = val !== null && val !== undefined && passesRainFloor && this._passesProductMask(momentKey, j, firstGateActual, gateSizeKm, reflectivityMask)
-                    ? scale(val)
+                    ? colorScale(val)
                     : null;
                 
                 if (color !== currentColor) {
@@ -2521,6 +2589,7 @@ const RadarCanvasLayer = L.Layer.extend({
         const ctx = this._offscreenCtx;
         ctx.setTransform(1, 0, 0, 1, 0, 0);
         ctx.globalCompositeOperation = 'source-over';
+        ctx.filter = 'none';
         ctx.clearRect(0, 0, this._offscreenCanvas.width, this._offscreenCanvas.height);
         this._needsFullRedraw = false;
     },
@@ -2544,6 +2613,7 @@ const RadarCanvasLayer = L.Layer.extend({
         ctx.setTransform(1, 0, 0, 1, 0, 0);
         ctx.globalCompositeOperation = 'source-over';
         ctx.clearRect(0, 0, this._container.width, this._container.height);
+        ctx.filter = 'none';
         ctx.drawImage(this._offscreenCanvas, 0, 0);
     }
 });
