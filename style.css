@@ -124,6 +124,63 @@ body, html {
     color: #fff;
 }
 
+.storm-feature-marker {
+    align-items: center;
+    border: 2px solid #ffffff;
+    border-radius: 4px;
+    box-shadow: 0 2px 7px rgba(0, 0, 0, 0.55);
+    color: #07111a;
+    display: flex;
+    font-size: 10px;
+    font-weight: 800;
+    height: 20px;
+    justify-content: center;
+    letter-spacing: 0;
+    line-height: 1;
+    min-width: 38px;
+    padding: 0 3px;
+    text-shadow: none;
+    pointer-events: auto;
+    transition: opacity 120ms ease, transform 120ms ease;
+}
+
+.storm-feature-marker span {
+    display: block;
+    pointer-events: none;
+}
+
+.storm-feature-core {
+    background: #ffef3b;
+    border-color: #231f00;
+}
+
+.storm-feature-hail {
+    background: #f7f7f7;
+    border-color: #ffcc00;
+    color: #111;
+}
+
+.storm-feature-rotation {
+    background: #ff4d4d;
+    border-color: #ffffff;
+    color: #ffffff;
+}
+
+.storm-feature-marker.selected {
+    opacity: 1;
+    transform: scale(1.15);
+}
+
+.storm-feature-marker.dimmed {
+    opacity: 0.18;
+}
+
+.storm-feature-popup {
+    color: #101820;
+    font-size: 12px;
+    line-height: 1.45;
+}
+
 #controls-container-main {
     margin-top: 10px;
 }
@@ -550,6 +607,8 @@ body, html {
     text-shadow: 1px 1px 3px black, -1px -1px 3px black, 1px -1px 3px black, -1px 1px 3px black !important;
     font-size: 14px !important;
     white-space: nowrap;
+    pointer-events: auto !important;
+    cursor: pointer;
 }
 
 /* Alert Popup Styles */
