@@ -25,10 +25,16 @@ const activePollers = new Map();
 const pollingLocks = new Set(); // stationId set for locking
 const stationState = new Map(); // stationId -> { lastVolume, lastChunkKey, headerChunk }
 const stationCache = new Map(); // stationId -> liveRadarData object
+const stationHealth = new Map(); // stationId -> last feed_health payload
 
 const parser = new XMLParser();
 const VOLUME_DISCOVERY_INTERVAL_MS = 15000;
 const LIVE_RADAR_CACHE_MAX_AGE_MS = Number(process.env.LIVE_RADAR_CACHE_MAX_AGE_MS) || 10 * 60 * 1000;
+const FEED_HEALTH_VOLUME_DEGRADED_MS = Number(process.env.FEED_HEALTH_VOLUME_DEGRADED_MS) || 12 * 60 * 1000;
+const FEED_HEALTH_VOLUME_OUTAGE_MS = Number(process.env.FEED_HEALTH_VOLUME_OUTAGE_MS) || 25 * 60 * 1000;
+const FEED_HEALTH_NO_CHUNKS_DEGRADED_MS = Number(process.env.FEED_HEALTH_NO_CHUNKS_DEGRADED_MS) || 3 * 60 * 1000;
+const FEED_HEALTH_NO_CHUNKS_OUTAGE_MS = Number(process.env.FEED_HEALTH_NO_CHUNKS_OUTAGE_MS) || 10 * 60 * 1000;
+const FEED_HEALTH_REBROADCAST_MS = 60 * 1000;
 const RADIAL_BATCH_SIZE = 10;
 const RADIAL_BATCH_SPACING_MS = 0;
 const MAX_CLIENT_BUFFERED_BYTES = 10 * 1024 * 1024;
@@ -72,6 +78,76 @@ function sendStatus(stationId, message) {
     broadcast(stationId, { type: 'status', message: `[Server] ${message}` });
 }
 
+function classifyFetchError(error) {
+    if (error?.name === 'AbortError') return 'timeout';
+    const status = Number(error?.status);
+    if (status === 429) return 'rate_limited';
+    if (status === 403) return 'access_denied';
+    if (status >= 500) return 'upstream_error';
+    if (status >= 400) return 'request_error';
+    return 'network_error';
+}
+
+function formatDuration(ms) {
+    if (!Number.isFinite(ms) || ms < 0) return 'unknown';
+    if (ms < 60000) return `${Math.round(ms / 1000)}s`;
+    if (ms < 3600000) return `${Math.round(ms / 60000)}m`;
+    return `${(ms / 3600000).toFixed(1)}h`;
+}
+
+function setFeedHealth(stationId, status, reason, details = {}) {
+    const now = Date.now();
+    const prior = stationHealth.get(stationId);
+    const payload = {
+        type: 'feed_health',
+        stationId,
+        status,
+        reason,
+        checkedAt: now,
+        ...details
+    };
+
+    const changed = !prior || prior.status !== status || prior.reason !== reason;
+    const rebroadcast = !prior || (now - (prior.checkedAt || 0)) > FEED_HEALTH_REBROADCAST_MS;
+    stationHealth.set(stationId, payload);
+    if (changed || rebroadcast) broadcast(stationId, payload);
+}
+
+function assessFeedFreshness(stationId, state, now = Date.now()) {
+    if (!state) return;
+
+    if (state.latestVolTimestamp) {
+        const ageMs = now - state.latestVolTimestamp;
+        if (ageMs > FEED_HEALTH_VOLUME_OUTAGE_MS) {
+            setFeedHealth(stationId, 'outage', `Latest S3 volume is ${formatDuration(ageMs)} old`, { ageMs });
+            return;
+        }
+        if (ageMs > FEED_HEALTH_VOLUME_DEGRADED_MS) {
+            setFeedHealth(stationId, 'degraded', `Latest S3 volume is ${formatDuration(ageMs)} old`, { ageMs });
+            return;
+        }
+    }
+
+    if (state.lastChunkSeenAt) {
+        const noChunkMs = now - state.lastChunkSeenAt;
+        if (noChunkMs > FEED_HEALTH_NO_CHUNKS_OUTAGE_MS) {
+            setFeedHealth(stationId, 'outage', `No new chunks for ${formatDuration(noChunkMs)}`, { noChunkMs });
+            return;
+        }
+        if (noChunkMs > FEED_HEALTH_NO_CHUNKS_DEGRADED_MS) {
+            setFeedHealth(stationId, 'degraded', `No new chunks for ${formatDuration(noChunkMs)}`, { noChunkMs });
+            return;
+        }
+    }
+
+    if (state.consecutivePollErrors > 0) {
+        setFeedHealth(stationId, 'degraded', `Polling recovered after ${state.consecutivePollErrors} error(s)`);
+        return;
+    }
+
+    setFeedHealth(stationId, 'ok', 'Live chunks are current');
+}
+
 function getRadialTimestamp(radial) {
     const timestamp = Number(radial?.timestamp);
     return Number.isFinite(timestamp) && timestamp > 0 ? timestamp : 0;
@@ -101,6 +177,7 @@ function cleanupStationIfUnused(stationId) {
     subscriptions.delete(stationId);
     stationCache.delete(stationId);
     stationState.delete(stationId);
+    stationHealth.delete(stationId);
 }
 
 function mergeRealTimeData(stationId, newData) {
@@ -179,6 +256,13 @@ async function fetchWithTimeout(url, options = {}, timeout = 15000) {
     try {
         const response = await fetch(url, { ...options, signal: controller.signal });
         clearTimeout(id);
+        if (!response.ok) {
+            const error = new Error(`HTTP ${response.status} from ${url}`);
+            error.status = response.status;
+            error.statusText = response.statusText;
+            error.url = url;
+            throw error;
+        }
         return response;
     } catch (e) {
         clearTimeout(id);
@@ -495,11 +579,17 @@ async function pollChunks(stationId) {
         const volJson = parser.parse(await volRes.text());
         
         let commonPrefixes = volJson.ListBucketResult.CommonPrefixes;
-        if (!commonPrefixes) return;
+        if (!commonPrefixes) {
+            setFeedHealth(stationId, 'outage', 'No S3 volume folders returned for this station');
+            return;
+        }
         if (!Array.isArray(commonPrefixes)) commonPrefixes = [commonPrefixes];
 
         commonPrefixes = commonPrefixes.filter(p => /^[A-Z0-9]{4}\/\d+\/$/.test(p.Prefix));
-        if (commonPrefixes.length === 0) return;
+        if (commonPrefixes.length === 0) {
+            setFeedHealth(stationId, 'outage', 'No valid S3 volume folders returned for this station');
+            return;
+        }
 
         let state = stationState.get(stationId) || { 
             lastVolume: null, 
@@ -510,7 +600,9 @@ async function pollChunks(stationId) {
             previousVolPrefix: null,
             latestVolPrefix: null,
             latestVolTimestamp: 0,
-            lastVolumeDiscovery: 0
+            lastVolumeDiscovery: 0,
+            lastChunkSeenAt: 0,
+            consecutivePollErrors: 0
         };
 
         if (!state.processedChunks) state.processedChunks = new Set();
@@ -518,11 +610,15 @@ async function pollChunks(stationId) {
 
         const priorLatestVolPrefix = state.latestVolPrefix;
         const latestVolPrefix = await chooseLatestVolume(stationId, commonPrefixes, state, now);
-        if (!latestVolPrefix) return;
+        if (!latestVolPrefix) {
+            setFeedHealth(stationId, 'outage', 'Could not identify the latest S3 volume');
+            return;
+        }
         if (priorLatestVolPrefix && priorLatestVolPrefix !== latestVolPrefix) {
             state.previousVolPrefix = priorLatestVolPrefix;
         }
         stationState.set(stationId, state);
+        assessFeedFreshness(stationId, state, now);
 
         // Poll current and previous folders to keep volume handoffs continuous.
         const sortedPrefixes = [...commonPrefixes].sort((a, b) => {
@@ -576,6 +672,10 @@ async function pollChunks(stationId) {
                 const firstId = unseen[0].Key.split('/').pop();
                 const lastId = latestKey.split('/').pop();
                 console.log(`[${stationId}] Vol ${volPrefix}: Processing ${unseen.length} new chunks (${firstId} to ${lastId})`);
+                state.lastChunkSeenAt = now;
+                state.consecutivePollErrors = 0;
+                let parsedChunkCount = 0;
+                let failedChunkCount = 0;
                 
                 let headerChunk = state.headerChunks[volPrefix];
                 if (!headerChunk) {
@@ -610,6 +710,7 @@ async function pollChunks(stationId) {
                         trimProcessedChunks(state);
 
                         if (radials.length > 0) {
+                            parsedChunkCount++;
                             radials.sort((a, b) => a.timestamp - b.timestamp);
                             mergeRadialsIntoCache(stationId, radials);
                             broadcastRadialBatches(stationId, radials);
@@ -623,22 +724,46 @@ async function pollChunks(stationId) {
                     }
 
                         } catch (e) {
+                        failedChunkCount++;
                         state.processedChunks.add(chunk.Key);
                         trimProcessedChunks(state);
                         }
                         }
 
+                if (failedChunkCount > 0 && parsedChunkCount === 0) {
+                    setFeedHealth(stationId, 'degraded', `Received ${failedChunkCount} chunk(s), but none parsed into radar data`, {
+                        failedChunkCount,
+                        volume: volPrefix
+                    });
+                } else {
+                    assessFeedFreshness(stationId, state);
+                }
 
                 if (volPrefix === latestVolPrefix) {
                     state.lastChunkKey = latestKey;
                     stationState.set(stationId, state);
                 }
+            } else if (volPrefix === latestVolPrefix) {
+                assessFeedFreshness(stationId, state);
             }
         }
 
         await radialBatcher.flush();
     } catch (e) {
         console.error(`[${stationId}] Poll error:`, e.message);
+        const state = stationState.get(stationId) || {};
+        state.consecutivePollErrors = (state.consecutivePollErrors || 0) + 1;
+        stationState.set(stationId, state);
+        const errorKind = classifyFetchError(e);
+        const status = state.consecutivePollErrors >= 3 ? 'outage' : 'degraded';
+        const reason = errorKind === 'rate_limited'
+            ? 'S3 is rate limiting requests'
+            : `S3 polling ${errorKind.replace(/_/g, ' ')}`;
+        setFeedHealth(stationId, status, reason, {
+            errorKind,
+            httpStatus: e.status || null,
+            consecutivePollErrors: state.consecutivePollErrors
+        });
     } finally {
         pollingLocks.delete(stationId);
         cleanupStationIfUnused(stationId);
@@ -753,7 +878,7 @@ wss.on('connection', (ws) => {
         try {
             const parsed = JSON.parse(message);
             if (parsed.action === 'subscribe') {
-                const stationId = parsed.station;
+                const stationId = normalizeStationId(parsed.station);
                 console.log(`Client subscribing to ${stationId}`);
                 
                 if (currentStation) {
@@ -764,6 +889,8 @@ wss.on('connection', (ws) => {
                 currentStation = stationId;
                 if (!subscriptions.has(stationId)) subscriptions.set(stationId, new Set());
                 subscriptions.get(stationId).add(ws);
+                const health = stationHealth.get(stationId);
+                if (health) ws.send(JSON.stringify(health));
 
                 // Initial cache can be very large; send it as small snapshot batches to avoid
                 // closing browser WebSockets on a single oversized message.

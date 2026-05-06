@@ -53,6 +53,14 @@ let countiesData = null;
 let countiesLayer = null;
 const countiesLookup = {};
 
+function runWhenIdle(callback, timeout = 2500) {
+    if ('requestIdleCallback' in window) {
+        window.requestIdleCallback(callback, { timeout });
+    } else {
+        setTimeout(callback, Math.min(timeout, 1000));
+    }
+}
+
 // Parallel Data Loading for "Compiled App" robustness
 async function loadBaseMapData() {
     console.log('Starting parallel data fetch...');
@@ -63,9 +71,7 @@ async function loadBaseMapData() {
         { id: 'lakes', url: 'data/lakes.json' },
         { id: 'rivers', url: 'data/rivers.json' },
         { id: 'states', url: 'data/states.json' },
-        { id: 'counties', url: 'data/counties.json' },
-        { id: 'nexrad', url: 'data/nexrad_stations.json' },
-        { id: 'cities', url: 'data/cities.json' }
+        { id: 'nexrad', url: 'data/nexrad_stations.json' }
     ];
 
     try {
@@ -86,15 +92,8 @@ async function loadBaseMapData() {
         statesLayer = L.geoJSON(data.states, { style: stateStyle, pane: 'boundaryPane', renderer: boundaryRenderer });
         if (document.getElementById('chk-states')?.checked !== false) statesLayer.addTo(map);
         
-        countiesData = data.counties;
-        data.counties.features.forEach(c => { countiesLookup[c.properties.STATE + c.properties.COUNTY] = c; });
-        countiesLayer = L.geoJSON(data.counties, { style: countyStyle, pane: 'boundaryPane', renderer: boundaryRenderer });
-        if (document.getElementById('chk-counties')?.checked !== false) countiesLayer.addTo(map);
-        
         initializeAppWithStations(data.nexrad);
-        
-        allCities = data.cities;
-        updateVisibleCities();
+        runWhenIdle(loadDeferredMapData, 1500);
         
         if (typeof activeAlertData !== 'undefined' && activeAlertData) renderAlerts();
         
@@ -136,13 +135,13 @@ let radarLayer = radarReflectivity;
 // Track initial load for prioritization
 let initialRadarLoadComplete = false;
 let pendingLoopPreload = null;
+let loopPreloadTimer = null;
 
 radarReflectivity.once('load', () => {
     console.log('Initial radar precipitation tiles loaded.');
     initialRadarLoadComplete = true;
     if (pendingLoopPreload) {
-        console.log('Starting deferred loop pre-loading.');
-        preloadLoopLayers(pendingLoopPreload);
+        scheduleLoopPreload(pendingLoopPreload);
         pendingLoopPreload = null;
     }
 });
@@ -366,30 +365,44 @@ const cityLayer = L.layerGroup().addTo(map);
 let allCities = [];
 let isCitiesVisible = true;
 
-// Load local cities as baseline
-fetch('data/cities.json')
-    .then(res => res.json())
-    .then(cities => {
-        allCities = cities.map(c => ({
-            city: c.city,
-            state: c.state,
-            latitude: c.latitude,
-            longitude: c.longitude,
-            population: c.population,
-            pop: parseInt(c.population) || 5000,
-            station: c.station
-        }));
-        // Sort by population descending so we process larger cities first
-        allCities.sort((a, b) => b.pop - a.pop);
-        citiesWorker.postMessage({ type: 'init', data: allCities });
-        updateVisibleCities();
-    });
-
 const citiesWorker = new Worker('cities-worker.js');
 citiesWorker.onmessage = function(e) {
     const { visibleMarkers } = e.data;
     renderVisibleCities(visibleMarkers);
 };
+
+async function loadDeferredMapData() {
+    await Promise.allSettled([loadCountiesData(), loadCitiesData()]);
+}
+
+async function loadCountiesData() {
+    if (countiesData) return;
+    const res = await fetch('data/counties.json');
+    const data = await res.json();
+    countiesData = data;
+    data.features.forEach(c => { countiesLookup[c.properties.STATE + c.properties.COUNTY] = c; });
+    countiesLayer = L.geoJSON(data, { style: countyStyle, pane: 'boundaryPane', renderer: boundaryRenderer });
+    if (document.getElementById('chk-counties')?.checked !== false) countiesLayer.addTo(map);
+    if (typeof activeAlertData !== 'undefined' && activeAlertData) renderAlerts();
+}
+
+async function loadCitiesData() {
+    if (allCities.length > 0) return;
+    const res = await fetch('data/cities.json');
+    const cities = await res.json();
+    allCities = cities.map(c => ({
+        city: c.city,
+        state: c.state,
+        latitude: c.latitude,
+        longitude: c.longitude,
+        population: c.population,
+        pop: parseInt(c.population) || 5000,
+        station: c.station
+    }));
+    allCities.sort((a, b) => b.pop - a.pop);
+    citiesWorker.postMessage({ type: 'init', data: allCities });
+    updateVisibleCities();
+}
 
 function updateVisibleCities() {
     if (!isCitiesVisible) return;
@@ -571,7 +584,7 @@ function updateRadarSelector() {
     nearbyRadars.forEach(radar => {
         const option = document.createElement('option');
         option.value = radar.id;
-        option.text = `${radar.name} (${Math.round(radar.distance)} mi)`;
+        option.text = `${radar.name} (${radar.id}) - ${Math.round(radar.distance)} mi`;
         select.appendChild(option);
         
         if (radar.id === selectedRadarId) {
@@ -661,7 +674,7 @@ function checkRadarScan() {
             }
             
             if (initialRadarLoadComplete) {
-                preloadLoopLayers(loopTimestamps);
+                scheduleLoopPreload(loopTimestamps);
             } else {
                 pendingLoopPreload = loopTimestamps;
             }
@@ -687,21 +700,37 @@ function checkRadarScan() {
 
 checkRadarScan();
 setInterval(checkRadarScan, 30000);
-updateAlerts();
+
+function scheduleLoopPreload(timestamps) {
+    pendingLoopPreload = timestamps;
+    if (loopPreloadTimer) clearTimeout(loopPreloadTimer);
+    loopPreloadTimer = setTimeout(() => {
+        loopPreloadTimer = null;
+        const preload = pendingLoopPreload;
+        pendingLoopPreload = null;
+        runWhenIdle(() => preloadLoopLayers(preload), 5000);
+    }, 4000);
+}
 
 function preloadLoopLayers(timestamps) {
+    if (!Array.isArray(timestamps) || timestamps.length === 0) return;
     // Clear existing loop layers if they exist and we're not looping
     if (!isLooping) {
         loopLayers.forEach(l => map.removeLayer(l));
-        loopLayers = timestamps.map(ts => {
-            return L.tileLayer.wms('https://mesonet.agron.iastate.edu/cgi-bin/wms/nexrad/n0q-t.cgi', {
+        loopLayers = [];
+        timestamps.forEach((ts, index) => {
+            setTimeout(() => {
+                if (isLooping) return;
+                const layer = L.tileLayer.wms('https://mesonet.agron.iastate.edu/cgi-bin/wms/nexrad/n0q-t.cgi', {
                 layers: 'nexrad-n0q-wmst',
                 format: 'image/png',
                 transparent: true,
                 opacity: 0, 
                 time: ts,
                 attribution: 'Radar: IEM NEXRAD'
-            }).addTo(map);
+                }).addTo(map);
+                loopLayers.push(layer);
+            }, index * 250);
         });
     }
 }
@@ -801,10 +830,12 @@ let lastRenderedRadialTimestamp = 0;
 let lastRenderedRadialAzimuth = null;
 let lastReceivedRadialElevations = null;
 let lastLiveStatusLabel = 'Live';
+let liveFeedHealth = null;
 
 let liveReconnectInProgress = false;
 let socketGeneration = 0;
 let liveLatencyMode = 'buffered';
+let liveRainOnlyMode = true;
 let bufferedRadialQueue = [];
 const LIVE_RENDER_IS_COARSE_POINTER = window.matchMedia?.('(pointer: coarse)').matches || false;
 let liveBatteryState = {
@@ -822,6 +853,7 @@ const LIVE_BUFFER_MAX_EXTRA_LAG_MS = LIVE_RADAR_CACHE_MAX_AGE_MS;
 const MAX_BUFFERED_QUEUE_RADIALS = 5000;
 const LIVE_RADIAL_DISPLAY_RESOLUTION_DEG = 0.5;
 const LIVE_DUAL_POL_REFLECTIVITY_FLOOR_DBZ = 10;
+const LIVE_RAIN_REFLECTIVITY_FLOOR_DBZ = 18;
 const LIVE_OPTIONAL_PRODUCTS = ['velocity', 'debris', 'zdr', 'width'];
 const LIVE_PRODUCT_SAMPLE_MIN_RADIALS = 80;
 
@@ -837,9 +869,29 @@ function getCurrentStationId() {
 function subscribeToLiveStation(initial = false) {
     const stationId = getCurrentStationId();
     if (socket && socket.readyState === WebSocket.OPEN && currentRadarMode === 'live-tracking' && stationId && stationId !== 'composite') {
+        liveFeedHealth = null;
+        renderRadarStatusWarning();
         socket.send(JSON.stringify({ action: 'subscribe', station: stationId, initial }));
         lastLiveResubscribeAt = Date.now();
     }
+}
+
+function renderRadarStatusWarning() {
+    const warningEl = document.getElementById('radar-status-warning');
+    if (!warningEl) return;
+
+    if (currentRadarMode !== 'live-tracking' || !liveFeedHealth || liveFeedHealth.status === 'ok') {
+        warningEl.style.display = 'none';
+        warningEl.textContent = '';
+        warningEl.className = '';
+        return;
+    }
+
+    const station = liveFeedHealth.stationId || getCurrentStationId() || 'Radar';
+    const label = liveFeedHealth.status === 'outage' ? 'Radar feed outage' : 'Radar feed degraded';
+    warningEl.textContent = `${label} for ${station}: ${liveFeedHealth.reason}`;
+    warningEl.className = liveFeedHealth.status === 'outage' ? 'outage' : 'degraded';
+    warningEl.style.display = 'block';
 }
 
 function restartWebSocket(reason) {
@@ -1019,6 +1071,10 @@ function initWebSocket() {
             window._lastSweepAngle = currentAngle;
         } else if (message.type === 'status') {
             console.log('WebSocket Status:', message.message);
+        } else if (message.type === 'feed_health') {
+            if (message.stationId && message.stationId !== currentStationId) return;
+            liveFeedHealth = message;
+            renderRadarStatusWarning();
         } else if (message.type === 'heartbeat') {
             // Heartbeat received, server is alive
         }
@@ -1346,6 +1402,7 @@ function renderLiveStatus(force = false) {
     if (currentRadarMode !== 'live-tracking') return;
     const now = Date.now();
     if (!force && now - lastLiveStatusUpdate < LIVE_STATUS_INTERVAL_MS) return;
+    renderRadarStatusWarning();
 
     const socketState = socket ? socket.readyState : WebSocket.CLOSED;
     const socketText = socketState === WebSocket.OPEN ? '' : ' | reconnecting';
@@ -1369,7 +1426,8 @@ function renderLiveStatus(force = false) {
     const staleText = (now - lastLiveDataMessageAt) > LIVE_DATA_STALE_MS
         ? ` | no chunks ${formatLag(now - lastLiveDataMessageAt).replace(' lag', '')}`
         : '';
-    setTimestampForMode('live-tracking', `${lastLiveStatusLabel}: ${chunkDate.toLocaleTimeString()} | ${formatLag(lagMs)}${azText}${scanText}${viewText}${staleText}${socketText}`);
+    const feedText = liveFeedHealth && liveFeedHealth.status !== 'ok' ? ` | feed ${liveFeedHealth.status}` : '';
+    setTimestampForMode('live-tracking', `${lastLiveStatusLabel}: ${chunkDate.toLocaleTimeString()} | ${formatLag(lagMs)}${azText}${scanText}${viewText}${staleText}${socketText}${feedText}`);
     lastLiveStatusUpdate = now;
 }
 
@@ -1458,6 +1516,19 @@ function setLiveLatencyMode(mode) {
         azimuthLine.setStyle({ opacity: liveLatencyMode === 'buffered' ? 0.8 : 0 });
     }
     requestLiveCanvasDraw();
+}
+
+function setLiveRainOnlyMode(enabled) {
+    liveRainOnlyMode = Boolean(enabled);
+    const rainOnlyBtn = document.getElementById('btn-live-rain-only');
+    const fullDbzBtn = document.getElementById('btn-live-full-dbz');
+    if (rainOnlyBtn) rainOnlyBtn.classList.toggle('active', liveRainOnlyMode);
+    if (fullDbzBtn) fullDbzBtn.classList.toggle('active', !liveRainOnlyMode);
+
+    if (liveCanvasLayer) {
+        liveCanvasLayer._needsFullRedraw = true;
+        requestLiveCanvasDraw();
+    }
 }
 
 function applyLiveRadial(roundedAz, radial) {
@@ -1684,6 +1755,8 @@ function setupRadarButtons() {
     const btnLiveDebris = document.getElementById('btn-live-debris');
     const btnLiveBuffered = document.getElementById('btn-live-buffered');
     const btnLiveLowLatency = document.getElementById('btn-live-low-latency');
+    const btnLiveRainOnly = document.getElementById('btn-live-rain-only');
+    const btnLiveFullDbz = document.getElementById('btn-live-full-dbz');
     const btnRenderAuto = document.getElementById('btn-render-auto');
     const btnRenderBattery = document.getElementById('btn-render-battery');
     const btnRenderQuality = document.getElementById('btn-render-quality');
@@ -1766,6 +1839,8 @@ function setupRadarButtons() {
     if (btnLiveDebris) btnLiveDebris.onclick = () => setLiveView('debris');
     if (btnLiveZdr) btnLiveZdr.onclick = () => setLiveView('zdr');
     if (btnLiveWidth) btnLiveWidth.onclick = () => setLiveView('width');
+    if (btnLiveRainOnly) btnLiveRainOnly.onclick = () => setLiveRainOnlyMode(true);
+    if (btnLiveFullDbz) btnLiveFullDbz.onclick = () => setLiveRainOnlyMode(false);
 
     if (btnLiveBuffered) {
         btnLiveBuffered.addEventListener('click', () => {
@@ -1839,6 +1914,7 @@ function setupRadarButtons() {
             isCitiesVisible = e.target.checked;
             if (isCitiesVisible) { 
                 map.addLayer(cityLayer); 
+                if (!allCities.length) loadCitiesData().catch(err => console.error('City load error:', err));
                 updateVisibleCities(); 
                 if (map.attributionControl) map.attributionControl.addAttribution(cityAttribution);
             } else {
@@ -1879,6 +1955,10 @@ function setupRadarButtons() {
     }
     if (chkCounties) {
         chkCounties.addEventListener('change', (e) => {
+            if (e.target.checked && !countiesLayer) {
+                loadCountiesData().catch(err => console.error('County load error:', err));
+                return;
+            }
             if (countiesLayer) {
                 if (e.target.checked) map.addLayer(countiesLayer);
                 else map.removeLayer(countiesLayer);
@@ -2055,6 +2135,8 @@ function updateRadarLayersBasedOnMode() {
     
     if (currentRadarMode !== 'live-tracking') {
         liveRadarData = null;
+        liveFeedHealth = null;
+        renderRadarStatusWarning();
         destroyLiveCanvasLayer();
         if (socket && socket.readyState === WebSocket.OPEN) {
             socket.send(JSON.stringify({ action: 'unsubscribe' }));
@@ -2380,7 +2462,10 @@ const RadarCanvasLayer = L.Layer.extend({
 
             for (let j = 0; j <= data.length; j += gateStep) {
                 const val = j < data.length ? data[j] : null;
-                const color = val !== null && val !== undefined && this._passesProductMask(momentKey, j, firstGateActual, gateSizeKm, reflectivityMask)
+                const passesRainFloor = momentKey !== 'reflectivity'
+                    || !liveRainOnlyMode
+                    || (Number.isFinite(Number(val)) && Number(val) >= LIVE_RAIN_REFLECTIVITY_FLOOR_DBZ);
+                const color = val !== null && val !== undefined && passesRainFloor && this._passesProductMask(momentKey, j, firstGateActual, gateSizeKm, reflectivityMask)
                     ? scale(val)
                     : null;
                 
