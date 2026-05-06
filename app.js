@@ -847,6 +847,10 @@ let socketGeneration = 0;
 let liveLatencyMode = 'buffered';
 let liveRainOnlyMode = true;
 let liveStormSignalsVisible = true;
+let isCoreSignalVisible = true;
+let isHailSignalVisible = true;
+let isRotationSignalVisible = true;
+let lastReceivedStormFeatures = null;
 let bufferedRadialQueue = [];
 const LIVE_RENDER_IS_COARSE_POINTER = window.matchMedia?.('(pointer: coarse)').matches || false;
 let liveBatteryState = {
@@ -1089,7 +1093,8 @@ function initWebSocket() {
             renderRadarStatusWarning();
         } else if (message.type === 'storm_features') {
             if (message.stationId && message.stationId !== currentStationId) return;
-            renderStormFeatures(message.features || []);
+            lastReceivedStormFeatures = message.features || [];
+            renderStormFeatures(lastReceivedStormFeatures);
         } else if (message.type === 'heartbeat') {
             // Heartbeat received, server is alive
         }
@@ -1472,6 +1477,12 @@ function renderStormFeatures(features) {
     features.forEach(feature => {
         if (!Number.isFinite(Number(feature.lat)) || !Number.isFinite(Number(feature.lon))) return;
         const kind = feature.kind || 'core';
+
+        // Respect individual signal toggles
+        if (kind === 'core' && !isCoreSignalVisible) return;
+        if (kind === 'hail' && !isHailSignalVisible) return;
+        if (kind === 'rotation' && !isRotationSignalVisible) return;
+
         const marker = L.marker([feature.lat, feature.lon], {
             pane: 'stormFeaturesPane',
             icon: L.divIcon({
@@ -2134,6 +2145,44 @@ function setupRadarButtons() {
     }
     if (chkTempGradient) {
         chkTempGradient.addEventListener('change', () => updateRadarLayersBasedOnMode());
+    }
+
+    const stormSignalsToggle = document.getElementById('storm-signals-toggle');
+    const stormSignalsContent = document.getElementById('storm-signals-content');
+    if (stormSignalsToggle && stormSignalsContent) {
+        stormSignalsToggle.addEventListener('click', () => {
+            const icon = stormSignalsToggle.querySelector('span');
+            if (stormSignalsContent.style.display === 'none') {
+                stormSignalsContent.style.display = 'grid';
+                if (icon) icon.innerText = '▼';
+            } else {
+                stormSignalsContent.style.display = 'none';
+                if (icon) icon.innerText = '▶';
+            }
+        });
+    }
+
+    const chkSignalCores = document.getElementById('chk-signal-cores');
+    const chkSignalHail = document.getElementById('chk-signal-hail');
+    const chkSignalRotation = document.getElementById('chk-signal-rotation');
+    
+    if (chkSignalCores) {
+        chkSignalCores.addEventListener('change', (e) => {
+            isCoreSignalVisible = e.target.checked;
+            if (lastReceivedStormFeatures) renderStormFeatures(lastReceivedStormFeatures);
+        });
+    }
+    if (chkSignalHail) {
+        chkSignalHail.addEventListener('change', (e) => {
+            isHailSignalVisible = e.target.checked;
+            if (lastReceivedStormFeatures) renderStormFeatures(lastReceivedStormFeatures);
+        });
+    }
+    if (chkSignalRotation) {
+        chkSignalRotation.addEventListener('change', (e) => {
+            isRotationSignalVisible = e.target.checked;
+            if (lastReceivedStormFeatures) renderStormFeatures(lastReceivedStormFeatures);
+        });
     }
 
     if (mapLayersToggle && mapLayersContent) {
