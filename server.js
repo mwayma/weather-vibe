@@ -431,6 +431,49 @@ function attachFeatureMotion(stationId, features, now) {
     });
 }
 
+function mergeProximalFeatures(features) {
+    if (features.length < 2) return features;
+    
+    const merged = [];
+    const used = new Set();
+    
+    // Sort by confidence/intensity so we merge weaker/redundant signals into the strongest ones
+    const sorted = [...features].sort((a, b) => (b.confidence || 0) - (a.confidence || 0));
+    
+    for (let i = 0; i < sorted.length; i++) {
+        if (used.has(i)) continue;
+        const base = sorted[i];
+        used.add(i);
+        
+        // Find all other features of the same kind within 15km
+        for (let j = i + 1; j < sorted.length; j++) {
+            if (used.has(j)) continue;
+            const other = sorted[j];
+            if (other.kind !== base.kind) continue;
+            
+            const dist = distanceKm(base, other);
+            if (dist < 15) { // 15km threshold for merging clusters
+                used.add(j);
+                // Aggregate properties into the base feature
+                base.sampleCount += other.sampleCount;
+                if (other.evidence?.maxDbz > (base.evidence?.maxDbz || 0)) {
+                    base.evidence.maxDbz = other.evidence.maxDbz;
+                    // Slightly shift centroid towards the higher intensity part
+                    base.lat = base.lat * 0.7 + other.lat * 0.3;
+                    base.lon = base.lon * 0.7 + other.lon * 0.3;
+                }
+                if (other.evidence?.velocityDelta > (base.evidence?.velocityDelta || 0)) {
+                    base.evidence.velocityDelta = other.evidence.velocityDelta;
+                }
+                base.confidence = Math.min(0.98, base.confidence + 0.05);
+            }
+        }
+        merged.push(base);
+    }
+    
+    return merged;
+}
+
 function deriveStormFeatures(stationId, now = Date.now()) {
     const station = findServerStation(stationId);
     const cache = stationCache.get(stationId);
@@ -508,14 +551,16 @@ function deriveStormFeatures(stationId, now = Date.now()) {
         }
     }
 
-    const features = Array.from(buckets.entries())
+    const rawFeatures = Array.from(buckets.entries())
         .map(([key, bucket]) => bucketToFeature(key, bucket))
-        .filter(feature => feature.sampleCount >= (feature.kind === 'rotation' ? 2 : 2))
+        .filter(feature => feature.sampleCount >= (feature.kind === 'rotation' ? 2 : 2));
+
+    const features = mergeProximalFeatures(rawFeatures)
         .sort((a, b) => {
             const priority = { rotation: 3, hail: 2, core: 1 };
             return (priority[b.kind] - priority[a.kind]) || (b.confidence - a.confidence);
         })
-        .slice(0, 12);
+        .slice(0, 15);
 
     attachFeatureMotion(stationId, features, now);
     return features;
