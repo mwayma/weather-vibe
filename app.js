@@ -216,14 +216,19 @@ function getAlertStyle(event) {
 function getAlertSeverity(event) {
     const ev = event.toLowerCase();
     const isWatch = ev.includes('watch') || ev.includes('advisory') || ev.includes('statement');
-    if (ev.includes('tornado')) return isWatch ? 90 : 100;
-    if (ev.includes('hurricane') || ev.includes('tropical storm')) return isWatch ? 85 : 95;
-    if (ev.includes('snow squall') || ev.includes('blizzard') || ev.includes('winter storm warning')) return 80;
-    if (ev.includes('winter') || ev.includes('freeze') || ev.includes('chill') || ev.includes('ice')) return isWatch ? 50 : 70;
-    if (ev.includes('thunderstorm')) return isWatch ? 55 : 60;
-    if (ev.includes('marine') || ev.includes('gale')) return 60;
-    if (ev.includes('flood')) return 40;
-    return isWatch ? 10 : 20;
+    
+    let score = 0;
+    if (ev.includes('tornado')) score = 90;
+    else if (ev.includes('hurricane') || ev.includes('tropical storm')) score = 85;
+    else if (ev.includes('snow squall') || ev.includes('blizzard') || ev.includes('winter storm warning')) score = 80;
+    else if (ev.includes('winter') || ev.includes('freeze') || ev.includes('chill') || ev.includes('ice')) score = 50;
+    else if (ev.includes('thunderstorm')) score = 60;
+    else if (ev.includes('marine') || ev.includes('gale')) score = 60;
+    else if (ev.includes('flood')) score = 40;
+    else score = 10;
+
+    // Add a massive offset to warnings to ensure they always beat any watch
+    return isWatch ? score : (score + 200);
 }
 
 let activeAlertData = null;
