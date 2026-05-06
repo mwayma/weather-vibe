@@ -52,6 +52,14 @@ const ROTATION_VELOCITY_DELTA = 60;
 const ROTATION_MIN_SIDE_VELOCITY = 25;
 const ROTATION_SUPPORT_GATES = 2;
 
+// County-based auto-priming configuration
+const PRIORITY_COUNTIES = [
+    { name: 'Pulaski, AR', fips: '005119', station: 'KLZK' },
+    { name: 'Lonoke, AR', fips: '005085', station: 'KLZK' }
+];
+const ALERT_POLL_INTERVAL_MS = 60 * 1000;
+const serverSubscriptions = new Set(); // Internal "virtual" subscriptions for auto-priming
+
 function normalizeStationId(stationId) {
     if (!stationId) return stationId;
     stationId = stationId.toUpperCase();
@@ -594,7 +602,10 @@ function pruneStationCache(stationId, now = Date.now()) {
 }
 
 function cleanupStationIfUnused(stationId) {
-    if (subscriptions.get(stationId)?.size) return;
+    const hasClients = subscriptions.get(stationId)?.size > 0;
+    const hasServerSub = serverSubscriptions.has(stationId);
+    if (hasClients || hasServerSub) return;
+    
     clearInterval(activePollers.get(stationId));
     activePollers.delete(stationId);
     subscriptions.delete(stationId);
@@ -691,6 +702,68 @@ async function fetchWithTimeout(url, options = {}, timeout = 15000) {
         clearTimeout(id);
         throw e;
     }
+}
+
+async function startAlertPoller() {
+    console.log('Initializing server-side NWS alert poller for priority counties...');
+    
+    const poll = async () => {
+        try {
+            // Fetch active alerts for Pulaski and Lonoke AR
+            const res = await fetchWithTimeout('https://api.weather.gov/alerts/active?status=actual&message_type=alert');
+            const data = await res.json();
+            
+            if (!data.features) return;
+
+            const activeStations = new Set();
+            data.features.forEach(f => {
+                const props = f.properties;
+                const event = (props.event || '').toLowerCase();
+                const isThreat = event.includes('tornado') || event.includes('thunderstorm') || event.includes('flood');
+                if (!isThreat) return;
+
+                const sameCodes = props.geocode?.SAME || [];
+                const ugcCodes = props.geocode?.UGC || [];
+
+                PRIORITY_COUNTIES.forEach(county => {
+                    const matched = sameCodes.some(c => c.includes(county.fips.slice(1))) || 
+                                    ugcCodes.some(c => c.includes(county.fips));
+                    
+                    if (matched) {
+                        activeStations.add(county.station);
+                    }
+                });
+            });
+
+            // Update internal server subscriptions
+            PRIORITY_COUNTIES.forEach(county => {
+                const stationId = county.station;
+                if (activeStations.has(stationId)) {
+                    if (!serverSubscriptions.has(stationId)) {
+                        console.log(`[Auto-Prime] Activating background poller for ${stationId} due to NWS alert in target counties.`);
+                        serverSubscriptions.add(stationId);
+                        if (!activePollers.has(stationId)) {
+                            const poller = setInterval(() => pollChunks(stationId), 1000);
+                            activePollers.set(stationId, poller);
+                            pollChunks(stationId);
+                        }
+                    }
+                } else {
+                    if (serverSubscriptions.has(stationId)) {
+                        console.log(`[Auto-Prime] Deactivating background poller for ${stationId} as target alerts have cleared.`);
+                        serverSubscriptions.delete(stationId);
+                        cleanupStationIfUnused(stationId);
+                    }
+                }
+            });
+
+        } catch (e) {
+            console.error('[Alert Poller] Error fetching NWS alerts:', e.message);
+        }
+    };
+
+    setInterval(poll, ALERT_POLL_INTERVAL_MS);
+    poll();
 }
 
 async function findTrulyLatestVolume(stationId, commonPrefixes) {
@@ -1073,7 +1146,9 @@ async function primeStationHistory(stationId, state, commonPrefixes) {
 
 async function pollChunks(stationId) {
     stationId = normalizeStationId(stationId);
-    if (!subscriptions.get(stationId)?.size) return;
+    const hasClients = subscriptions.get(stationId)?.size > 0;
+    const hasServerSub = serverSubscriptions.has(stationId);
+    if (!hasClients && !hasServerSub) return;
     
     const now = Date.now();
     const lockKey = `lock_${stationId}`;
@@ -1467,4 +1542,5 @@ setInterval(() => {
 
 server.listen(PORT, () => {
     console.log(`Server listening on port ${PORT}`);
+    startAlertPoller();
 });
