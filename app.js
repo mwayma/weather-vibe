@@ -26,6 +26,12 @@ map.getPane('liveRadarPane').style.pointerEvents = 'none';
 map.createPane('liveSweepPane');
 map.getPane('liveSweepPane').style.zIndex = 460;
 map.getPane('liveSweepPane').style.pointerEvents = 'none';
+map.createPane('stormFeaturesPane');
+map.getPane('stormFeaturesPane').style.zIndex = 680;
+map.getPane('stormFeaturesPane').style.pointerEvents = 'none';
+map.createPane('cityLabelPane');
+map.getPane('cityLabelPane').style.zIndex = 620;
+map.getPane('cityLabelPane').style.pointerEvents = 'auto';
 map.createPane('roadsPane');
 map.getPane('roadsPane').style.zIndex = 550;
 map.getPane('roadsPane').style.pointerEvents = 'none';
@@ -445,6 +451,7 @@ function renderVisibleCities(visibleMarkers) {
         }
 
         const marker = L.marker(L.latLng(city.latitude, city.longitude), {
+            pane: 'cityLabelPane',
             icon: L.divIcon({
                 className: 'city-label',
                 html: `<div style="text-align: center;"><span>${city.city}</span>${tempHtml}</div>`,
@@ -808,6 +815,7 @@ function advanceLoop() {
 
 // Live Tracking State
 let liveTrackingLayer = L.layerGroup().addTo(map);
+let stormFeaturesLayer = L.layerGroup().addTo(map);
 let radarStationMarker = null;
 let azimuthLine = null;
 let currentLiveMode = 'reflectivity'; // 'reflectivity', 'velocity', 'debris'
@@ -836,6 +844,7 @@ let liveReconnectInProgress = false;
 let socketGeneration = 0;
 let liveLatencyMode = 'buffered';
 let liveRainOnlyMode = true;
+let liveStormSignalsVisible = true;
 let bufferedRadialQueue = [];
 const LIVE_RENDER_IS_COARSE_POINTER = window.matchMedia?.('(pointer: coarse)').matches || false;
 let liveBatteryState = {
@@ -1076,6 +1085,9 @@ function initWebSocket() {
             if (message.stationId && message.stationId !== currentStationId) return;
             liveFeedHealth = message;
             renderRadarStatusWarning();
+        } else if (message.type === 'storm_features') {
+            if (message.stationId && message.stationId !== currentStationId) return;
+            renderStormFeatures(message.features || []);
         } else if (message.type === 'heartbeat') {
             // Heartbeat received, server is alive
         }
@@ -1432,6 +1444,127 @@ function renderLiveStatus(force = false) {
     lastLiveStatusUpdate = now;
 }
 
+function formatStormFeatureMotion(feature) {
+    if (!Number.isFinite(Number(feature.motionDeg)) || !Number.isFinite(Number(feature.speedMph))) {
+        return 'Motion: not enough history yet';
+    }
+    return `Motion: ${Math.round(feature.motionDeg)} deg at ${Math.round(feature.speedMph)} mph`;
+}
+
+function getStormFeatureClass(kind) {
+    if (kind === 'rotation') return 'storm-feature-rotation';
+    if (kind === 'hail') return 'storm-feature-hail';
+    return 'storm-feature-core';
+}
+
+function getStormFeatureText(kind) {
+    if (kind === 'rotation') return 'ROT';
+    if (kind === 'hail') return 'HAIL';
+    return 'CORE';
+}
+
+function renderStormFeatures(features) {
+    stormFeaturesLayer.clearLayers();
+    if (currentRadarMode !== 'live-tracking' || !liveStormSignalsVisible || !Array.isArray(features)) return;
+
+    features.forEach(feature => {
+        if (!Number.isFinite(Number(feature.lat)) || !Number.isFinite(Number(feature.lon))) return;
+        const kind = feature.kind || 'core';
+        const marker = L.marker([feature.lat, feature.lon], {
+            pane: 'stormFeaturesPane',
+            icon: L.divIcon({
+                className: `storm-feature-marker ${getStormFeatureClass(kind)}`,
+                html: `<span>${getStormFeatureText(kind)}</span>`,
+                iconSize: [42, 24],
+                iconAnchor: [21, 12]
+            })
+        }).addTo(stormFeaturesLayer);
+
+        const evidence = feature.evidence || {};
+        const lines = [
+            `<strong>${feature.label || 'Radar-derived signal'}</strong>`,
+            `Confidence: ${Math.round((feature.confidence || 0) * 100)}%`,
+            formatStormFeatureMotion(feature)
+        ];
+        if (Number.isFinite(Number(evidence.maxDbz))) lines.push(`Max reflectivity: ${Math.round(evidence.maxDbz)} dBZ`);
+        if (Number.isFinite(Number(evidence.velocityDelta))) lines.push(`Velocity couplet delta: ${Math.round(evidence.velocityDelta)}`);
+        if (Number.isFinite(Number(evidence.rangeKm))) lines.push(`Range from radar: ${Math.round(evidence.rangeKm)} km`);
+        if (evidence.reliability) lines.push(`Reliability: ${evidence.reliability}`);
+        if (Number.isFinite(Number(evidence.minCc))) lines.push(`Min CC: ${Number(evidence.minCc).toFixed(2)}`);
+        if (Number.isFinite(Number(evidence.maxZdr))) lines.push(`Max ZDR: ${Number(evidence.maxZdr).toFixed(1)}`);
+        lines.push('<em>Radar-derived guidance, not an official warning.</em>');
+
+        marker.bindPopup(`<div class="storm-feature-popup">${lines.join('<br>')}</div>`, {
+            maxWidth: 260
+        });
+        marker.on('click', () => selectStormFeatureMarker(marker));
+        marker.on('popupclose', () => clearStormFeatureSelection());
+
+        if (Number.isFinite(Number(feature.motionDeg)) && Number.isFinite(Number(feature.speedMph)) && Number(feature.speedMph) > 5) {
+            const cone = buildStormMotionCone(feature.lat, feature.lon, feature.motionDeg, Math.min(35, feature.speedMph * 0.35));
+            L.polygon(cone, {
+                pane: 'stormFeaturesPane',
+                color: kind === 'rotation' ? '#ff4d4d' : kind === 'hail' ? '#ffcc00' : '#ffffff',
+                weight: 2,
+                opacity: 0.9,
+                fill: false,
+                interactive: false
+            }).addTo(stormFeaturesLayer);
+        }
+    });
+}
+
+function selectStormFeatureMarker(selectedMarker) {
+    stormFeaturesLayer.eachLayer(layer => {
+        const el = layer.getElement?.();
+        if (!el) return;
+        const isSelected = layer === selectedMarker;
+        el.classList.toggle('selected', isSelected);
+        el.classList.toggle('dimmed', !isSelected);
+        if (isSelected && typeof layer.setZIndexOffset === 'function') layer.setZIndexOffset(1000);
+        if (!isSelected && typeof layer.setZIndexOffset === 'function') layer.setZIndexOffset(0);
+    });
+}
+
+function clearStormFeatureSelection() {
+    stormFeaturesLayer.eachLayer(layer => {
+        const el = layer.getElement?.();
+        if (!el) return;
+        el.classList.remove('selected', 'dimmed');
+        if (typeof layer.setZIndexOffset === 'function') layer.setZIndexOffset(0);
+    });
+}
+
+function setStormSignalsVisible(visible) {
+    liveStormSignalsVisible = Boolean(visible);
+    const btn = document.getElementById('btn-live-signals');
+    if (btn) btn.classList.toggle('active', liveStormSignalsVisible);
+    if (!liveStormSignalsVisible) {
+        stormFeaturesLayer.clearLayers();
+    }
+}
+
+function buildStormMotionCone(lat, lon, bearingDeg, distanceMiles) {
+    const spreadDeg = 18;
+    const apex = [lat, lon];
+    const left = projectStormMotion(lat, lon, Number(bearingDeg) - spreadDeg, distanceMiles);
+    const right = projectStormMotion(lat, lon, Number(bearingDeg) + spreadDeg, distanceMiles);
+    return [apex, [left.lat, left.lon], [right.lat, right.lon]];
+}
+
+function projectStormMotion(lat, lon, bearingDeg, distanceMiles) {
+    const earthRadiusMiles = 3958.8;
+    const angularDistance = distanceMiles / earthRadiusMiles;
+    const bearing = Number(bearingDeg) * Math.PI / 180;
+    const lat1 = Number(lat) * Math.PI / 180;
+    const lon1 = Number(lon) * Math.PI / 180;
+    const lat2 = Math.asin(Math.sin(lat1) * Math.cos(angularDistance) +
+        Math.cos(lat1) * Math.sin(angularDistance) * Math.cos(bearing));
+    const lon2 = lon1 + Math.atan2(Math.sin(bearing) * Math.sin(angularDistance) * Math.cos(lat1),
+        Math.cos(angularDistance) - Math.sin(lat1) * Math.sin(lat2));
+    return { lat: lat2 * 180 / Math.PI, lon: lon2 * 180 / Math.PI };
+}
+
 function updateLiveDataTimestamp(data) {
     if (!data || !Array.isArray(data.timestamps)) return;
     const radials = data.timestamps.map((timestamp, i) => ({
@@ -1779,6 +1912,7 @@ function setupRadarButtons() {
     const btnLiveLowLatency = document.getElementById('btn-live-low-latency');
     const btnLiveRainOnly = document.getElementById('btn-live-rain-only');
     const btnLiveFullDbz = document.getElementById('btn-live-full-dbz');
+    const btnLiveSignals = document.getElementById('btn-live-signals');
     const btnRenderAuto = document.getElementById('btn-render-auto');
     const btnRenderBattery = document.getElementById('btn-render-battery');
     const btnRenderQuality = document.getElementById('btn-render-quality');
@@ -1863,6 +1997,7 @@ function setupRadarButtons() {
     if (btnLiveWidth) btnLiveWidth.onclick = () => setLiveView('width');
     if (btnLiveRainOnly) btnLiveRainOnly.onclick = () => setLiveRainOnlyMode(true);
     if (btnLiveFullDbz) btnLiveFullDbz.onclick = () => setLiveRainOnlyMode(false);
+    if (btnLiveSignals) btnLiveSignals.onclick = () => setStormSignalsVisible(!liveStormSignalsVisible);
 
     if (btnLiveBuffered) {
         btnLiveBuffered.addEventListener('click', () => {
@@ -2164,6 +2299,7 @@ function updateRadarLayersBasedOnMode() {
             socket.send(JSON.stringify({ action: 'unsubscribe' }));
         }
         liveTrackingLayer.clearLayers();
+        stormFeaturesLayer.clearLayers();
         if (liveScanInterval) { cancelAnimationFrame(liveScanInterval); liveScanInterval = null; }
         if (liveDataRefreshInterval) { clearInterval(liveDataRefreshInterval); liveDataRefreshInterval = null; }
     }
@@ -2218,6 +2354,7 @@ function startLiveTracking() {
     // Fix memory leak: Remove old layers from liveTrackingLayer
     if (radarStationMarker) { liveTrackingLayer.removeLayer(radarStationMarker); radarStationMarker = null; }
     if (azimuthLine) { liveTrackingLayer.removeLayer(azimuthLine); azimuthLine = null; }
+    stormFeaturesLayer.clearLayers();
     destroyLiveCanvasLayer();
 
     const station = NEXRAD_STATIONS.find(s => s.id === selectedRadarId);

@@ -7,6 +7,7 @@ const compression = require('compression');
 const cors = require('cors');
 const { Level2Radar } = require('nexrad-level-2-data');
 const { XMLParser } = require('fast-xml-parser');
+const NEXRAD_STATIONS = require('./data/nexrad_stations.json');
 const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
 
 const app = express();
@@ -39,6 +40,17 @@ const RADIAL_BATCH_SIZE = 10;
 const RADIAL_BATCH_SPACING_MS = 0;
 const MAX_CLIENT_BUFFERED_BYTES = 10 * 1024 * 1024;
 const MAX_CLIENT_BUFFERED_BYTES_BEFORE_CLOSE = 50 * 1024 * 1024;
+const DERIVED_FEATURE_INTERVAL_MS = 8000;
+const DERIVED_FEATURE_MAX_RANGE_KM = 180;
+const DERIVED_FEATURE_MIN_RANGE_KM = 12;
+const ROTATION_MAX_RANGE_KM = 120;
+const ROTATION_LOW_CONFIDENCE_RANGE_KM = 90;
+const DERIVED_FEATURE_GRID_DEG = 0.12;
+const REFLECTIVITY_CORE_DBZ = 50;
+const HAIL_SIGNAL_DBZ = 60;
+const ROTATION_VELOCITY_DELTA = 60;
+const ROTATION_MIN_SIDE_VELOCITY = 25;
+const ROTATION_SUPPORT_GATES = 2;
 
 function normalizeStationId(stationId) {
     if (!stationId) return stationId;
@@ -151,6 +163,373 @@ function assessFeedFreshness(stationId, state, now = Date.now()) {
 function getRadialTimestamp(radial) {
     const timestamp = Number(radial?.timestamp);
     return Number.isFinite(timestamp) && timestamp > 0 ? timestamp : 0;
+}
+
+function findServerStation(stationId) {
+    const normalized = normalizeStationId(stationId);
+    return NEXRAD_STATIONS.find(station => station.id === normalized);
+}
+
+function normalizeGateDistanceKm(value) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return 0;
+    return numeric > 10 ? numeric / 1000 : numeric;
+}
+
+function destinationPoint(lat, lon, bearingDeg, distanceKm) {
+    const earthRadiusKm = 6371.0088;
+    const angularDistance = distanceKm / earthRadiusKm;
+    const bearing = bearingDeg * Math.PI / 180;
+    const lat1 = lat * Math.PI / 180;
+    const lon1 = lon * Math.PI / 180;
+
+    const lat2 = Math.asin(Math.sin(lat1) * Math.cos(angularDistance) +
+        Math.cos(lat1) * Math.sin(angularDistance) * Math.cos(bearing));
+    const lon2 = lon1 + Math.atan2(Math.sin(bearing) * Math.sin(angularDistance) * Math.cos(lat1),
+        Math.cos(angularDistance) - Math.sin(lat1) * Math.sin(lat2));
+
+    return {
+        lat: lat2 * 180 / Math.PI,
+        lon: lon2 * 180 / Math.PI
+    };
+}
+
+function distanceKm(a, b) {
+    const earthRadiusKm = 6371.0088;
+    const dLat = (b.lat - a.lat) * Math.PI / 180;
+    const dLon = (b.lon - a.lon) * Math.PI / 180;
+    const lat1 = a.lat * Math.PI / 180;
+    const lat2 = b.lat * Math.PI / 180;
+    const h = Math.sin(dLat / 2) ** 2 +
+        Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
+    return 2 * earthRadiusKm * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
+}
+
+function bearingDeg(a, b) {
+    const lat1 = a.lat * Math.PI / 180;
+    const lat2 = b.lat * Math.PI / 180;
+    const dLon = (b.lon - a.lon) * Math.PI / 180;
+    const y = Math.sin(dLon) * Math.cos(lat2);
+    const x = Math.cos(lat1) * Math.sin(lat2) -
+        Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLon);
+    return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+}
+
+function lerpBearing(a, b, alpha) {
+    let diff = (b - a + 180) % 360 - 180;
+    return (a + diff * alpha + 360) % 360;
+}
+
+function getCompositeReflectivityMoment(radial) {
+    let best = null;
+    let data = null;
+
+    for (let e = 1; e <= 22; e++) {
+        const moment = radial.elevations?.[e]?.reflectivity;
+        if (!moment?.moment_data) continue;
+        if (!data) {
+            data = new Float32Array(moment.moment_data.length).fill(-Infinity);
+            best = moment;
+        }
+        for (let i = 0; i < moment.moment_data.length; i++) {
+            const value = Number(moment.moment_data[i]);
+            if (Number.isFinite(value) && value > data[i]) data[i] = value;
+        }
+    }
+
+    return best ? { ...best, moment_data: data } : null;
+}
+
+function getBaseMoment(radial, product) {
+    for (let e = 1; e <= 4; e++) {
+        const moment = radial.elevations?.[e]?.[product];
+        if (moment?.moment_data) return moment;
+    }
+    return null;
+}
+
+function getMomentValueAtRange(moment, rangeKm) {
+    if (!moment?.moment_data) return null;
+    const firstGateKm = normalizeGateDistanceKm(moment.first_gate);
+    const gateSizeKm = normalizeGateDistanceKm(moment.gate_size);
+    if (!(gateSizeKm > 0)) return null;
+    const index = Math.round((rangeKm - firstGateKm) / gateSizeKm);
+    if (index < 0 || index >= moment.moment_data.length) return null;
+    const value = Number(moment.moment_data[index]);
+    return Number.isFinite(value) ? value : null;
+}
+
+function getMomentIndexAtRange(moment, rangeKm) {
+    if (!moment?.moment_data) return -1;
+    const firstGateKm = normalizeGateDistanceKm(moment.first_gate);
+    const gateSizeKm = normalizeGateDistanceKm(moment.gate_size);
+    if (!(gateSizeKm > 0)) return -1;
+    return Math.round((rangeKm - firstGateKm) / gateSizeKm);
+}
+
+function hasVelocitySideSupport(moment, centerIndex, sign, minMagnitude = ROTATION_MIN_SIDE_VELOCITY) {
+    if (!moment?.moment_data || centerIndex < 0) return false;
+    let support = 0;
+    for (let offset = -ROTATION_SUPPORT_GATES; offset <= ROTATION_SUPPORT_GATES; offset++) {
+        const value = Number(moment.moment_data[centerIndex + offset]);
+        if (!Number.isFinite(value)) continue;
+        if (Math.sign(value) === sign && Math.abs(value) >= minMagnitude) support++;
+    }
+    return support >= 2;
+}
+
+function hasCoupletContext(leftMoment, rightMoment, rangeKm, leftVelocity, rightVelocity) {
+    const leftSign = Math.sign(leftVelocity);
+    const rightSign = Math.sign(rightVelocity);
+    if (!leftSign || !rightSign || leftSign === rightSign) return false;
+    if (Math.abs(leftVelocity) < ROTATION_MIN_SIDE_VELOCITY || Math.abs(rightVelocity) < ROTATION_MIN_SIDE_VELOCITY) return false;
+
+    const leftIndex = getMomentIndexAtRange(leftMoment, rangeKm);
+    const rightIndex = getMomentIndexAtRange(rightMoment, rangeKm);
+    return hasVelocitySideSupport(leftMoment, leftIndex, leftSign) &&
+        hasVelocitySideSupport(rightMoment, rightIndex, rightSign);
+}
+
+function createFeatureBucket(kind, point, evidence, now) {
+    return {
+        kind,
+        latSum: point.lat,
+        lonSum: point.lon,
+        count: 1,
+        maxDbz: evidence.maxDbz || null,
+        maxVelocityDelta: evidence.velocityDelta || null,
+        minCc: evidence.cc ?? null,
+        maxZdr: evidence.zdr ?? null,
+        evidence,
+        lastUpdated: now
+    };
+}
+
+function addToBucket(bucket, point, evidence) {
+    bucket.latSum += point.lat;
+    bucket.lonSum += point.lon;
+    bucket.count++;
+    if (Number.isFinite(evidence.maxDbz)) bucket.maxDbz = Math.max(bucket.maxDbz || -Infinity, evidence.maxDbz);
+    if (Number.isFinite(evidence.velocityDelta)) bucket.maxVelocityDelta = Math.max(bucket.maxVelocityDelta || -Infinity, evidence.velocityDelta);
+    if (Number.isFinite(evidence.cc)) bucket.minCc = bucket.minCc === null ? evidence.cc : Math.min(bucket.minCc, evidence.cc);
+    if (Number.isFinite(evidence.zdr)) bucket.maxZdr = bucket.maxZdr === null ? evidence.zdr : Math.max(bucket.maxZdr, evidence.zdr);
+}
+
+function bucketToFeature(key, bucket) {
+    const lat = bucket.latSum / bucket.count;
+    const lon = bucket.lonSum / bucket.count;
+    const confidence = Math.min(0.95, 0.35 + bucket.count * 0.08);
+    const base = {
+        id: `${bucket.kind}:${key}`,
+        kind: bucket.kind,
+        lat,
+        lon,
+        confidence,
+        sampleCount: bucket.count,
+        evidence: {
+            maxDbz: bucket.maxDbz,
+            velocityDelta: bucket.maxVelocityDelta,
+            minCc: bucket.minCc,
+            maxZdr: bucket.maxZdr,
+            rangeKm: bucket.evidence?.rangeKm,
+            reliability: bucket.evidence?.reliability
+        }
+    };
+
+    if (bucket.kind === 'hail') {
+        base.label = 'Hail signal';
+        base.confidence = Math.min(0.98, confidence + 0.12);
+    } else if (bucket.kind === 'rotation') {
+        base.label = 'Rotation signal';
+        base.confidence = Math.min(0.98, confidence + 0.18);
+    } else {
+        base.label = 'Strong storm core';
+    }
+
+    return base;
+}
+
+function attachFeatureMotion(stationId, features, now) {
+    const state = stationState.get(stationId) || {};
+    const previous = state.derivedFeatures || [];
+    const previousByKind = new Map();
+
+    previous.forEach(feature => {
+        if (!previousByKind.has(feature.kind)) previousByKind.set(feature.kind, []);
+        previousByKind.get(feature.kind).push(feature);
+    });
+
+    const usedCandidates = new Set();
+
+    features.forEach(feature => {
+        const candidates = previousByKind.get(feature.kind) || [];
+        let best = null;
+        let bestDistance = Infinity;
+        
+        candidates.forEach(candidate => {
+            if (usedCandidates.has(candidate)) return;
+            const km = distanceKm(feature, candidate);
+            if (km < bestDistance) {
+                best = candidate;
+                bestDistance = km;
+            }
+        });
+
+        if (best && bestDistance < 45) {
+            usedCandidates.add(best);
+            
+            // Persist track metadata
+            feature.trackId = best.trackId || `tr-${Math.random().toString(36).substr(2, 9)}`;
+            feature.history = (best.history || []).slice();
+            
+            // Add previous position to history if not redundant
+            if (best.detectedAt && (!feature.history.length || feature.history[feature.history.length - 1].detectedAt !== best.detectedAt)) {
+                feature.history.push({ lat: best.lat, lon: best.lon, detectedAt: best.detectedAt });
+            }
+            
+            // Prune history (keep 30 mins, max 15 points)
+            const thirtyMinsAgo = now - 30 * 60 * 1000;
+            feature.history = feature.history.filter(h => h.detectedAt > thirtyMinsAgo);
+            if (feature.history.length > 15) feature.history.shift();
+
+            if (feature.history.length > 0) {
+                // Use the oldest point as baseline for long-term vector stability
+                const baseline = feature.history[0];
+                const hours = (now - baseline.detectedAt) / 3600000;
+                
+                if (hours > 0.01) { // At least 36 seconds
+                    const distKm = distanceKm(baseline, feature);
+                    const rawMotionDeg = bearingDeg(baseline, feature);
+                    const rawSpeedMph = (distKm / hours) * 0.621371;
+
+                    if (best.motionDeg !== undefined && best.speedMph !== undefined) {
+                        // Blend with previous smoothed estimates
+                        // Alpha increases with baseline length to allow adaptation but keep stability
+                        const alpha = Math.min(0.6, Math.max(0.15, hours * 2)); 
+                        feature.speedMph = Math.round(best.speedMph * (1 - alpha) + rawSpeedMph * alpha);
+                        feature.motionDeg = Math.round(lerpBearing(best.motionDeg, rawMotionDeg, alpha));
+                    } else {
+                        feature.motionDeg = Math.round(rawMotionDeg);
+                        feature.speedMph = Math.round(rawSpeedMph);
+                    }
+                } else {
+                    // Too soon to calculate new vector, carry over
+                    feature.motionDeg = best.motionDeg;
+                    feature.speedMph = best.speedMph;
+                }
+            }
+        }
+    });
+
+    // Save state with history for next iteration
+    state.derivedFeatures = features.map(f => ({ ...f, detectedAt: now }));
+    stationState.set(stationId, state);
+
+    // Clean features for broadcast (strip history to save bandwidth)
+    features.forEach(f => {
+        delete f.history;
+    });
+}
+
+function deriveStormFeatures(stationId) {
+    const station = findServerStation(stationId);
+    const cache = stationCache.get(stationId);
+    if (!station || !cache?.radials?.size) return [];
+
+    const now = Date.now();
+    const radials = Array.from(cache.radials.values())
+        .filter(radial => now - getRadialTimestamp(radial) < 12 * 60 * 1000)
+        .sort((a, b) => a.azimuth - b.azimuth);
+    const buckets = new Map();
+
+    function addFeature(kind, point, evidence) {
+        const latKey = Math.round(point.lat / DERIVED_FEATURE_GRID_DEG);
+        const lonKey = Math.round(point.lon / DERIVED_FEATURE_GRID_DEG);
+        const key = `${kind}:${latKey}:${lonKey}`;
+        if (!buckets.has(key)) {
+            buckets.set(key, createFeatureBucket(kind, point, evidence, now));
+        } else {
+            addToBucket(buckets.get(key), point, evidence);
+        }
+    }
+
+    radials.forEach(radial => {
+        const ref = getCompositeReflectivityMoment(radial);
+        if (!ref?.moment_data) return;
+        const firstGateKm = normalizeGateDistanceKm(ref.first_gate);
+        const gateSizeKm = normalizeGateDistanceKm(ref.gate_size);
+        if (!(gateSizeKm > 0)) return;
+        const cc = getBaseMoment(radial, 'debris');
+        const zdr = getBaseMoment(radial, 'zdr');
+
+        for (let i = 0; i < ref.moment_data.length; i += 4) {
+            const rangeKm = firstGateKm + i * gateSizeKm;
+            if (rangeKm < DERIVED_FEATURE_MIN_RANGE_KM || rangeKm > DERIVED_FEATURE_MAX_RANGE_KM) continue;
+            const dbz = Number(ref.moment_data[i]);
+            if (!Number.isFinite(dbz) || dbz < REFLECTIVITY_CORE_DBZ) continue;
+            const point = destinationPoint(station.lat, station.lon, radial.azimuth, rangeKm);
+            const ccVal = getMomentValueAtRange(cc, rangeKm);
+            const zdrVal = getMomentValueAtRange(zdr, rangeKm);
+            const evidence = { maxDbz: dbz, cc: ccVal, zdr: zdrVal, rangeKm: Math.round(rangeKm) };
+            addFeature('core', point, evidence);
+            if (dbz >= HAIL_SIGNAL_DBZ || (dbz >= 55 && Number.isFinite(zdrVal) && zdrVal < 1.2)) {
+                addFeature('hail', point, evidence);
+            }
+        }
+    });
+
+    for (let r = 0; r < radials.length; r++) {
+        const radial = radials[r];
+        const velocity = getBaseMoment(radial, 'velocity');
+        if (!velocity?.moment_data) continue;
+        const next = radials[(r + 1) % radials.length];
+        if (!next) continue;
+        const azDiff = Math.abs(((next.azimuth - radial.azimuth + 540) % 360) - 180);
+        if (azDiff > 2) continue;
+        const nextVelocity = getBaseMoment(next, 'velocity');
+        if (!nextVelocity?.moment_data) continue;
+        const firstGateKm = normalizeGateDistanceKm(velocity.first_gate);
+        const gateSizeKm = normalizeGateDistanceKm(velocity.gate_size);
+        if (!(gateSizeKm > 0)) continue;
+
+        for (let i = 0; i < velocity.moment_data.length; i += 3) {
+            const rangeKm = firstGateKm + i * gateSizeKm;
+            if (rangeKm < DERIVED_FEATURE_MIN_RANGE_KM || rangeKm > ROTATION_MAX_RANGE_KM) continue;
+            const v1 = Number(velocity.moment_data[i]);
+            const v2 = getMomentValueAtRange(nextVelocity, rangeKm);
+            if (!Number.isFinite(v1) || !Number.isFinite(v2)) continue;
+            if (Math.sign(v1) === Math.sign(v2)) continue;
+            if (!hasCoupletContext(velocity, nextVelocity, rangeKm, v1, v2)) continue;
+            const delta = Math.abs(v1 - v2);
+            if (delta < ROTATION_VELOCITY_DELTA) continue;
+            if (rangeKm > ROTATION_LOW_CONFIDENCE_RANGE_KM && delta < ROTATION_VELOCITY_DELTA + 20) continue;
+            const point = destinationPoint(station.lat, station.lon, (radial.azimuth + next.azimuth) / 2, rangeKm);
+            const reliability = rangeKm > ROTATION_LOW_CONFIDENCE_RANGE_KM ? 'reduced range reliability' : 'normal';
+            addFeature('rotation', point, { velocityDelta: Math.round(delta), rangeKm: Math.round(rangeKm), reliability });
+        }
+    }
+
+    const features = Array.from(buckets.entries())
+        .map(([key, bucket]) => bucketToFeature(key, bucket))
+        .filter(feature => feature.sampleCount >= (feature.kind === 'rotation' ? 2 : 2))
+        .sort((a, b) => {
+            const priority = { rotation: 3, hail: 2, core: 1 };
+            return (priority[b.kind] - priority[a.kind]) || (b.confidence - a.confidence);
+        })
+        .slice(0, 12);
+
+    attachFeatureMotion(stationId, features, now);
+    return features;
+}
+
+function maybeBroadcastDerivedFeatures(stationId) {
+    const state = stationState.get(stationId) || {};
+    const now = Date.now();
+    if (state.lastDerivedFeatureAt && now - state.lastDerivedFeatureAt < DERIVED_FEATURE_INTERVAL_MS) return;
+    state.lastDerivedFeatureAt = now;
+    stationState.set(stationId, state);
+    const features = deriveStormFeatures(stationId);
+    broadcast(stationId, { type: 'storm_features', stationId, features, generatedAt: now });
 }
 
 function pruneStationCache(stationId, now = Date.now()) {
@@ -714,6 +1093,7 @@ async function pollChunks(stationId) {
                             radials.sort((a, b) => a.timestamp - b.timestamp);
                             mergeRadialsIntoCache(stationId, radials);
                             broadcastRadialBatches(stationId, radials);
+                            maybeBroadcastDerivedFeatures(stationId);
                         }
 
                     // Trigger immediate volume discovery ONLY if we see an explicit end chunk
@@ -891,6 +1271,16 @@ wss.on('connection', (ws) => {
                 subscriptions.get(stationId).add(ws);
                 const health = stationHealth.get(stationId);
                 if (health) ws.send(JSON.stringify(health));
+                const currentState = stationState.get(stationId);
+                if (currentState?.derivedFeatures) {
+                    ws.send(JSON.stringify({
+                        type: 'storm_features',
+                        stationId,
+                        features: currentState.derivedFeatures,
+                        generatedAt: currentState.lastDerivedFeatureAt || Date.now(),
+                        snapshot: true
+                    }));
+                }
 
                 // Initial cache can be very large; send it as small snapshot batches to avoid
                 // closing browser WebSockets on a single oversized message.
