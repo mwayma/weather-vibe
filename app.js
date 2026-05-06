@@ -1509,6 +1509,24 @@ function renderStormFeatures(features) {
         marker.coneLayer = coneLayer;
 
         const evidence = feature.evidence || {};
+        const lines = [
+            `<strong>${feature.label || 'Radar-derived signal'}</strong>`,
+            `Confidence: ${Math.round((feature.confidence || 0) * 100)}%`,
+            formatStormFeatureMotion(feature)
+        ];
+        if (Number.isFinite(Number(evidence.maxDbz))) lines.push(`Max reflectivity: ${Math.round(evidence.maxDbz)} dBZ`);
+        if (Number.isFinite(Number(evidence.velocityDelta))) lines.push(`Velocity couplet delta: ${Math.round(evidence.velocityDelta)}`);
+        if (Number.isFinite(Number(evidence.rangeKm))) lines.push(`Range from radar: ${Math.round(evidence.rangeKm)} km`);
+        if (evidence.reliability) lines.push(`Reliability: ${evidence.reliability}`);
+        if (Number.isFinite(Number(evidence.minCc))) lines.push(`Min CC: ${Number(evidence.minCc).toFixed(2)}`);
+        if (Number.isFinite(Number(evidence.maxZdr))) lines.push(`Max ZDR: ${Number(evidence.maxZdr).toFixed(1)}`);
+        lines.push('<em>Radar-derived guidance, not an official warning.</em>');
+
+        marker.bindPopup(`<div class="storm-feature-popup">${lines.join('<br>')}</div>`, {
+            maxWidth: 260
+        });
+        marker.on('click', () => selectStormFeatureMarker(marker));
+        marker.on('popupclose', () => clearStormFeatureSelection());
     });
 }
 
