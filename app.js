@@ -1493,29 +1493,10 @@ function renderStormFeatures(features) {
             })
         }).addTo(stormFeaturesLayer);
 
-        const evidence = feature.evidence || {};
-        const lines = [
-            `<strong>${feature.label || 'Radar-derived signal'}</strong>`,
-            `Confidence: ${Math.round((feature.confidence || 0) * 100)}%`,
-            formatStormFeatureMotion(feature)
-        ];
-        if (Number.isFinite(Number(evidence.maxDbz))) lines.push(`Max reflectivity: ${Math.round(evidence.maxDbz)} dBZ`);
-        if (Number.isFinite(Number(evidence.velocityDelta))) lines.push(`Velocity couplet delta: ${Math.round(evidence.velocityDelta)}`);
-        if (Number.isFinite(Number(evidence.rangeKm))) lines.push(`Range from radar: ${Math.round(evidence.rangeKm)} km`);
-        if (evidence.reliability) lines.push(`Reliability: ${evidence.reliability}`);
-        if (Number.isFinite(Number(evidence.minCc))) lines.push(`Min CC: ${Number(evidence.minCc).toFixed(2)}`);
-        if (Number.isFinite(Number(evidence.maxZdr))) lines.push(`Max ZDR: ${Number(evidence.maxZdr).toFixed(1)}`);
-        lines.push('<em>Radar-derived guidance, not an official warning.</em>');
-
-        marker.bindPopup(`<div class="storm-feature-popup">${lines.join('<br>')}</div>`, {
-            maxWidth: 260
-        });
-        marker.on('click', () => selectStormFeatureMarker(marker));
-        marker.on('popupclose', () => clearStormFeatureSelection());
-
+        let coneLayer = null;
         if (Number.isFinite(Number(feature.motionDeg)) && Number.isFinite(Number(feature.speedMph)) && Number(feature.speedMph) > 5) {
             const cone = buildStormMotionCone(feature.lat, feature.lon, feature.motionDeg, Math.min(35, feature.speedMph * 0.35));
-            L.polygon(cone, {
+            coneLayer = L.polygon(cone, {
                 pane: 'stormFeaturesPane',
                 color: kind === 'rotation' ? '#ff4d4d' : kind === 'hail' ? '#ffcc00' : '#ffffff',
                 weight: 2,
@@ -1524,27 +1505,51 @@ function renderStormFeatures(features) {
                 interactive: false
             }).addTo(stormFeaturesLayer);
         }
+
+        marker.coneLayer = coneLayer;
+
+        const evidence = feature.evidence || {};
     });
 }
 
 function selectStormFeatureMarker(selectedMarker) {
     stormFeaturesLayer.eachLayer(layer => {
+        const isSelected = (layer === selectedMarker) || (selectedMarker.coneLayer === layer);
+        
+        // Handle Markers (DivIcons)
         const el = layer.getElement?.();
-        if (!el) return;
-        const isSelected = layer === selectedMarker;
-        el.classList.toggle('selected', isSelected);
-        el.classList.toggle('dimmed', !isSelected);
-        if (isSelected && typeof layer.setZIndexOffset === 'function') layer.setZIndexOffset(1000);
-        if (!isSelected && typeof layer.setZIndexOffset === 'function') layer.setZIndexOffset(0);
+        if (el) {
+            el.classList.toggle('selected', isSelected);
+            el.classList.toggle('dimmed', !isSelected);
+            if (typeof layer.setZIndexOffset === 'function') {
+                layer.setZIndexOffset(isSelected ? 1000 : 0);
+            }
+        }
+
+        // Handle Polygons (Motion Cones)
+        if (layer instanceof L.Polygon) {
+            layer.setStyle({
+                opacity: isSelected ? 0.9 : 0.15,
+                weight: isSelected ? 3 : 1
+            });
+        }
     });
 }
 
 function clearStormFeatureSelection() {
     stormFeaturesLayer.eachLayer(layer => {
         const el = layer.getElement?.();
-        if (!el) return;
-        el.classList.remove('selected', 'dimmed');
-        if (typeof layer.setZIndexOffset === 'function') layer.setZIndexOffset(0);
+        if (el) {
+            el.classList.remove('selected', 'dimmed');
+            if (typeof layer.setZIndexOffset === 'function') layer.setZIndexOffset(0);
+        }
+
+        if (layer instanceof L.Polygon) {
+            layer.setStyle({
+                opacity: 0.9,
+                weight: 2
+            });
+        }
     });
 }
 
