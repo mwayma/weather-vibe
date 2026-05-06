@@ -30,13 +30,15 @@ map.createPane('stormFeaturesPane');
 map.getPane('stormFeaturesPane').style.zIndex = 680;
 map.getPane('stormFeaturesPane').style.pointerEvents = 'none';
 map.createPane('cityLabelPane');
-map.getPane('cityLabelPane').style.zIndex = 620;
-map.getPane('cityLabelPane').style.pointerEvents = 'auto';
+map.getPane('cityLabelPane').style.zIndex = 699;
+map.getPane('cityLabelPane').style.pointerEvents = 'none';
+map.getPane('popupPane').style.zIndex = 800;
 map.createPane('roadsPane');
 map.getPane('roadsPane').style.zIndex = 550;
 map.getPane('roadsPane').style.pointerEvents = 'none';
 map.createPane('alertsPane');
 map.getPane('alertsPane').style.zIndex = 650;
+map.getPane('alertsPane').style.pointerEvents = 'none';
 
 // Canvas Renderers for better performance with large GeoJSON datasets
 const landRenderer = L.canvas({ pane: 'landPane', padding: 1.5 });
@@ -454,7 +456,7 @@ function renderVisibleCities(visibleMarkers) {
             pane: 'cityLabelPane',
             icon: L.divIcon({
                 className: 'city-label',
-                html: `<div style="text-align: center;"><span>${city.city}</span>${tempHtml}</div>`,
+                html: `<div style="text-align: center; pointer-events: auto;"><span>${city.city}</span>${tempHtml}</div>`,
                 iconAnchor: [0, 0]
             }),
             interactive: true
