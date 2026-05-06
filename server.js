@@ -431,14 +431,13 @@ function attachFeatureMotion(stationId, features, now) {
     });
 }
 
-function deriveStormFeatures(stationId) {
+function deriveStormFeatures(stationId, now = Date.now()) {
     const station = findServerStation(stationId);
     const cache = stationCache.get(stationId);
     if (!station || !cache?.radials?.size) return [];
 
-    const now = Date.now();
     const radials = Array.from(cache.radials.values())
-        .filter(radial => now - getRadialTimestamp(radial) < 12 * 60 * 1000)
+        .filter(radial => Math.abs(now - getRadialTimestamp(radial)) < 12 * 60 * 1000)
         .sort((a, b) => a.azimuth - b.azimuth);
     const buckets = new Map();
 
@@ -889,7 +888,7 @@ function extractedToRadials(extracted) {
     });
 }
 
-function mergeRadialsIntoCache(stationId, radials) {
+function mergeRadialsIntoCache(stationId, radials, now = Date.now()) {
     if (!radials || radials.length === 0) return;
 
     if (!stationCache.has(stationId)) {
@@ -900,7 +899,7 @@ function mergeRadialsIntoCache(stationId, radials) {
 
     radials.forEach(radial => {
         const roundedAz = Math.round(radial.azimuth * 10) / 10;
-        
+
         if (!cache.radials.has(roundedAz)) {
             cache.radials.set(roundedAz, {
                 azimuth: radial.azimuth,
@@ -908,7 +907,7 @@ function mergeRadialsIntoCache(stationId, radials) {
                 elevations: {}
             });
         }
-        
+
         const cachedRadial = cache.radials.get(roundedAz);
         cachedRadial.timestamp = radial.timestamp;
 
@@ -920,9 +919,8 @@ function mergeRadialsIntoCache(stationId, radials) {
         }
     });
 
-    pruneStationCache(stationId);
+    pruneStationCache(stationId, now);
 }
-
 function trimProcessedChunks(state) {
     while (state.processedChunks.size > 1000) {
         const firstKey = state.processedChunks.values().next().value;
@@ -936,6 +934,90 @@ function trimHeaderChunks(state) {
         const key = keys.shift();
         delete state.headerChunks[key];
     }
+}
+
+async function primeStationHistory(stationId, state, commonPrefixes) {
+    if (state.isPrimed) return;
+    
+    const sortedPrefixes = [...commonPrefixes].sort((a, b) => {
+        const numA = parseInt(a.Prefix.split('/')[1]);
+        const numB = parseInt(b.Prefix.split('/')[1]);
+        return numA - numB;
+    });
+
+    const latestVolPrefix = state.latestVolPrefix;
+    const latestIdx = sortedPrefixes.findIndex(p => p.Prefix === latestVolPrefix);
+    if (latestIdx < 0) return;
+
+    const volumesToPrime = [];
+    for (let i = 3; i >= 1; i--) {
+        const idx = latestIdx - i;
+        if (idx >= 0) volumesToPrime.push(sortedPrefixes[idx].Prefix);
+    }
+
+    if (volumesToPrime.length === 0) {
+        state.isPrimed = true;
+        return;
+    }
+
+    console.log(`[${stationId}] Priming history from ${volumesToPrime.length} previous volumes...`);
+    sendStatus(stationId, `Priming motion tracking history from ${volumesToPrime.length} previous scans...`);
+    
+    for (let v = 0; v < volumesToPrime.length; v++) {
+        const volPrefix = volumesToPrime[v];
+        try {
+            sendStatus(stationId, `Processing historical scan ${v + 1}/${volumesToPrime.length}...`);
+            const listChunksUrl = `${BUCKET_URL}/?list-type=2&prefix=${volPrefix}`;
+            const chunkRes = await fetchWithTimeout(listChunksUrl);
+            const chunkJson = parser.parse(await chunkRes.text());
+            let contents = chunkJson.ListBucketResult.Contents;
+            if (!contents) continue;
+            if (!Array.isArray(contents)) contents = [contents];
+            
+            contents.sort((a, b) => {
+                const timeDiff = getKeyTimestamp(a.Key) - getKeyTimestamp(b.Key);
+                if (timeDiff !== 0) return timeDiff;
+                return getChunkOrder(a.Key) - getChunkOrder(b.Key);
+            });
+
+            const volTimestamp = getKeyTimestamp(contents[0].Key);
+            let headerChunk = null;
+            const headerKey = contents.find(c => isStartChunk(c.Key))?.Key;
+            if (headerKey) {
+                const hRes = await fetchWithTimeout(`${BUCKET_URL}/${headerKey}`);
+                headerChunk = await hRes.arrayBuffer();
+            }
+
+            for (const chunk of contents) {
+                try {
+                    const dataRes = await fetchWithTimeout(`${BUCKET_URL}/${chunk.Key}`);
+                    const chunkBuffer = await dataRes.arrayBuffer();
+                    let combinedBuffer;
+                    if (headerChunk && !isStartChunk(chunk.Key)) {
+                        combinedBuffer = Buffer.concat([Buffer.from(headerChunk), Buffer.from(chunkBuffer)]);
+                    } else {
+                        combinedBuffer = Buffer.from(chunkBuffer);
+                    }
+                    const parsed = new Level2Radar(combinedBuffer);
+                    const extracted = extractRadialData(parsed, stationId, chunk.Key.split('/').pop());
+                    const radials = extractedToRadials(extracted);
+                    if (radials.length > 0) {
+                        mergeRadialsIntoCache(stationId, radials, volTimestamp || Date.now());
+                    }
+                } catch (e) {}
+            }
+            
+            if (volTimestamp) {
+                deriveStormFeatures(stationId, volTimestamp);
+            }
+        } catch (e) {
+            console.error(`[${stationId}] Prime volume error:`, e.message);
+        }
+    }
+    
+    state.isPrimed = true;
+    console.log(`[${stationId}] Priming complete for ${stationId}`);
+    sendStatus(stationId, 'Motion tracking history primed. Tracking is now active.');
 }
 
 async function pollChunks(stationId) {
@@ -981,7 +1063,8 @@ async function pollChunks(stationId) {
             latestVolTimestamp: 0,
             lastVolumeDiscovery: 0,
             lastChunkSeenAt: 0,
-            consecutivePollErrors: 0
+            consecutivePollErrors: 0,
+            isPrimed: false
         };
 
         if (!state.processedChunks) state.processedChunks = new Set();
@@ -993,6 +1076,11 @@ async function pollChunks(stationId) {
             setFeedHealth(stationId, 'outage', 'Could not identify the latest S3 volume');
             return;
         }
+
+        if (!state.isPrimed) {
+            await primeStationHistory(stationId, state, commonPrefixes);
+        }
+
         if (priorLatestVolPrefix && priorLatestVolPrefix !== latestVolPrefix) {
             state.previousVolPrefix = priorLatestVolPrefix;
         }
@@ -1091,7 +1179,7 @@ async function pollChunks(stationId) {
                         if (radials.length > 0) {
                             parsedChunkCount++;
                             radials.sort((a, b) => a.timestamp - b.timestamp);
-                            mergeRadialsIntoCache(stationId, radials);
+                            mergeRadialsIntoCache(stationId, radials, now);
                             broadcastRadialBatches(stationId, radials);
                             maybeBroadcastDerivedFeatures(stationId);
                         }
