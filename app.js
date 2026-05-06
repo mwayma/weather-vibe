@@ -847,6 +847,7 @@ let liveReconnectInProgress = false;
 let socketGeneration = 0;
 let liveLatencyMode = 'buffered';
 let liveRainOnlyMode = true;
+let liveBlendedRendering = true;
 let liveStormSignalsVisible = true;
 let isCoreSignalVisible = true;
 let isHailSignalVisible = true;
@@ -2036,6 +2037,22 @@ function setupRadarButtons() {
     if (btnLiveFullDbz) btnLiveFullDbz.onclick = () => setLiveRainOnlyMode(false);
     if (btnLiveSignals) btnLiveSignals.onclick = () => setStormSignalsVisible(!liveStormSignalsVisible);
 
+    const btnLiveBlended = document.getElementById('btn-live-blended');
+    const btnLiveRaw = document.getElementById('btn-live-raw');
+
+    function setLiveBlendedRendering(blended) {
+        liveBlendedRendering = blended;
+        if (btnLiveBlended) btnLiveBlended.classList.toggle('active', blended);
+        if (btnLiveRaw) btnLiveRaw.classList.toggle('active', !blended);
+        if (liveCanvasLayer) {
+            liveCanvasLayer._needsFullRedraw = true;
+            requestLiveCanvasDraw();
+        }
+    }
+
+    if (btnLiveBlended) btnLiveBlended.onclick = () => setLiveBlendedRendering(true);
+    if (btnLiveRaw) btnLiveRaw.onclick = () => setLiveBlendedRendering(false);
+
     if (btnLiveBuffered) {
         btnLiveBuffered.addEventListener('click', () => {
             setLiveLatencyMode('buffered');
@@ -2676,8 +2693,16 @@ const RadarCanvasLayer = L.Layer.extend({
         if (!scale) return;
 
         const isRainOnlyReflectivity = momentKey === 'reflectivity' && liveRainOnlyMode;
-        const arcWidthRad = (LIVE_RADIAL_DISPLAY_RESOLUTION_DEG * Math.PI / 180)
-            * (isRainOnlyReflectivity ? LIVE_RAIN_RADIAL_ARC_OVERSCAN : 1.15);
+
+        let arcMultiplier = 1.0;
+        if (liveBlendedRendering) {
+            arcMultiplier = isRainOnlyReflectivity ? LIVE_RAIN_RADIAL_ARC_OVERSCAN : 1.15;
+        } else {
+            // In raw mode, we use a tiny overscan to prevent sub-pixel gaps between radials
+            arcMultiplier = 1.02; 
+        }
+
+        const arcWidthRad = (LIVE_RADIAL_DISPLAY_RESOLUTION_DEG * Math.PI / 180) * arcMultiplier;
         const gateStep = getLiveRadialGateStep();
         let moment = null;
         let selectedMomentElevation = null;
@@ -2725,7 +2750,7 @@ const RadarCanvasLayer = L.Layer.extend({
             const data = moment.moment_data;
             if (!(gateSizeKm > 0)) { ctx.restore(); return; }
             const reflectivityMask = this._getReflectivityMask(radial, selectedMomentElevation);
-            const rainNeighborMoments = isRainOnlyReflectivity ? this._getRainOnlyNeighborMoments(radial) : [];
+            const rainNeighborMoments = (isRainOnlyReflectivity && liveBlendedRendering) ? this._getRainOnlyNeighborMoments(radial) : [];
 
             let startJ = null;
             let currentColor = null;
