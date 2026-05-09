@@ -15,7 +15,7 @@ const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
-const PORT = process.env.PORT || 80;
+const PORT = process.env.PORT || 3000;
 const BUCKET_URL = 'https://unidata-nexrad-level2-chunks.s3.amazonaws.com';
 
 app.use(cors());
@@ -31,6 +31,13 @@ const stationCache = new Map(); // stationId -> liveRadarData object
 const stationHealth = new Map(); // stationId -> last feed_health payload
 const gridTemperatureCache = new Map(); // rounded lat/lon -> latest NDFD point sample
 const gridTemperatureInflight = new Map(); // rounded lat/lon -> Promise
+
+let temperatureMapCache = {
+    buffer: null,
+    fetchedAt: 0,
+    bbox: [[22, -127], [51, -65]], // [[latMin, lonMin], [latMax, lonMax]] for Leaflet ImageOverlay
+    esriBbox: '-127,22,-65,51'  // [minLon, minLat, maxLon, maxLat] for ESRI export
+};
 
 const parser = new XMLParser();
 const VOLUME_DISCOVERY_INTERVAL_MS = 15000;
@@ -56,10 +63,12 @@ const ROTATION_VELOCITY_DELTA = 60;
 const ROTATION_MIN_SIDE_VELOCITY = 25;
 const ROTATION_SUPPORT_GATES = 2;
 const GRID_TEMPERATURE_TTL_MS = Number(process.env.GRID_TEMPERATURE_TTL_MS) || 20 * 60 * 1000;
+const TEMPERATURE_MAP_REFRESH_MS = 30 * 60 * 1000; // 30 mins
 const MAX_WEATHER_BATCH_SIZE = 50;
 const GRID_TEMPERATURE_CONCURRENCY = Number(process.env.GRID_TEMPERATURE_CONCURRENCY) || 4;
 const GRID_TEMPERATURE_CELL_DEG = Number(process.env.GRID_TEMPERATURE_CELL_DEG) || 0.05;
 const NDFD_TEMP_IDENTIFY_URL = 'https://mapservices.weather.noaa.gov/raster/rest/services/NDFD/NDFD_temp/MapServer/identify';
+const NDFD_TEMP_EXPORT_URL = 'https://mapservices.weather.noaa.gov/raster/rest/services/NDFD/NDFD_temp/MapServer/export';
 const NDFD_TEMP_IMAGE_LAYER_IDS = [8, 12, 16, 20, 24, 28, 32, 36, 40];
 
 // Auto-prime KLZK when tornado/severe thunderstorm watches or warnings affect its radar area.
@@ -954,6 +963,49 @@ async function startAlertPoller() {
     poll();
 }
 
+async function updateTemperatureMap() {
+    console.log('[Temperature] Refreshing global CONUS map from NDFD...');
+    const params = new URLSearchParams({
+        f: 'image',
+        bbox: temperatureMapCache.esriBbox,
+        bboxSR: '4326',
+        size: '2048,1024',
+        format: 'png32',
+        transparent: 'true',
+        layers: 'show:0,1,5,8' // Explicitly show current temperature raster and its parents
+    });
+
+    try {
+        const response = await fetchWithTimeout(`${NDFD_TEMP_EXPORT_URL}?${params}`, {
+            headers: { 'User-Agent': 'weathertest NDFD cache' }
+        }, 30000);
+        const buffer = await response.arrayBuffer();
+        temperatureMapCache.buffer = Buffer.from(buffer);
+        temperatureMapCache.fetchedAt = Date.now();
+        console.log(`[Temperature] Global map refreshed (${Math.round(temperatureMapCache.buffer.length / 1024)}KB)`);
+    } catch (e) {
+        console.error('[Temperature] Failed to refresh map:', e.message);
+    }
+}
+
+app.get('/api/temperature/map', (req, res) => {
+    if (!temperatureMapCache.buffer) {
+        res.status(404).send('Temperature map not yet cached');
+        return;
+    }
+    res.set('Content-Type', 'image/png');
+    res.set('Cache-Control', 'public, max-age=1800');
+    res.send(temperatureMapCache.buffer);
+});
+
+app.get('/api/temperature/meta', (req, res) => {
+    res.json({
+        fetchedAt: temperatureMapCache.fetchedAt,
+        bbox: temperatureMapCache.bbox,
+        refreshIntervalMs: TEMPERATURE_MAP_REFRESH_MS
+    });
+});
+
 app.post('/api/temperature-grid/batch', async (req, res) => {
     const items = Array.isArray(req.body?.locations) ? req.body.locations : [];
     const locations = items
@@ -1751,4 +1803,6 @@ setInterval(() => {
 server.listen(PORT, () => {
     console.log(`Server listening on port ${PORT}`);
     startAlertPoller();
+    updateTemperatureMap();
+    setInterval(updateTemperatureMap, TEMPERATURE_MAP_REFRESH_MS);
 });

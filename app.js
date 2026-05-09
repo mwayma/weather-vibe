@@ -125,14 +125,14 @@ let radarReflectivity = L.tileLayer.wms('https://mesonet.agron.iastate.edu/cgi-b
 // Initialize radarVelocity as an empty layer group to prevent WMS errors before a station is selected
 let radarVelocity = L.layerGroup();
 
-// Initialize Temperature layer (NWS NDFD)
-let radarTemperature = L.tileLayer.wms('https://mapservices.weather.noaa.gov/raster/services/NDFD/NDFD_temp/MapServer/WMSServer', {
-    layers: '5', // '5' corresponds to the 'Temp_00Hr' layer in the new NOAA MapServer
-    format: 'image/png',
-    transparent: true,
+// Initialize Temperature layer (Cached NDFD Map)
+let temperatureOverlay = L.imageOverlay('', [[22, -127], [51, -65]], {
     opacity: 0.5,
-    attribution: 'Temperature: NOAA NDFD'
+    attribution: 'Temperature: NOAA NDFD (Cached)',
+    interactive: false,
+    zIndex: 200
 });
+let temperatureMeta = null;
 
 // Cache NDFD grid-temperature lookups globally so panning and relabeling do not repeat API work.
 const cityGridTemperatureCache = {};
@@ -141,18 +141,29 @@ const queuedCityGridTemperatureRequests = new Map();
 let cityGridTemperatureTimer = null;
 let cityGridTemperatureQueueActive = false;
 let temperatureOverlayLoaded = false;
-const TEMP_LABEL_FETCH_DEFER_MS = 900;
+const TEMP_LABEL_FETCH_DEFER_MS = 300; // Reduced defer since image overlay is faster
 const TEMP_LABEL_BATCH_SIZE = 8;
 const TEMP_LABEL_BATCH_SPACING_MS = 120;
 
-radarTemperature.on('loading', () => {
-    temperatureOverlayLoaded = false;
-});
-
-radarTemperature.on('load', () => {
-    temperatureOverlayLoaded = true;
-    flushQueuedCityGridTemperatures();
-});
+async function refreshTemperatureOverlay() {
+    try {
+        const res = await fetch('/api/temperature/meta');
+        if (!res.ok) throw new Error('Failed to load temperature meta');
+        temperatureMeta = await res.json();
+        
+        // Update overlay with new image and bbox
+        const imageUrl = `/api/temperature/map?t=${temperatureMeta.fetchedAt}`;
+        temperatureOverlay.setUrl(imageUrl);
+        if (temperatureMeta.bbox) {
+            temperatureOverlay.setBounds(temperatureMeta.bbox);
+        }
+        
+        temperatureOverlayLoaded = true;
+        flushQueuedCityGridTemperatures();
+    } catch (err) {
+        console.error('Temperature overlay refresh failed:', err);
+    }
+}
 
 // Track the currently active radar layer to allow redraws
 let radarLayer = radarReflectivity;
@@ -665,7 +676,7 @@ function scheduleCityGridTemperatureBatch(cities) {
     });
 
     if (cityGridTemperatureTimer) clearTimeout(cityGridTemperatureTimer);
-    const overlayActive = currentRadarMode === 'temperature' && map.hasLayer(radarTemperature);
+    const overlayActive = currentRadarMode === 'temperature' && map.hasLayer(temperatureOverlay);
     const delay = overlayActive && !temperatureOverlayLoaded ? TEMP_LABEL_FETCH_DEFER_MS : 120;
     cityGridTemperatureTimer = setTimeout(flushQueuedCityGridTemperatures, delay);
 }
@@ -2750,7 +2761,7 @@ function updateRadarLayersBasedOnMode() {
 
     if (map.hasLayer(radarReflectivity)) map.removeLayer(radarReflectivity);
     if (map.hasLayer(radarVelocity)) map.removeLayer(radarVelocity);
-    if (map.hasLayer(radarTemperature)) map.removeLayer(radarTemperature);
+    if (map.hasLayer(temperatureOverlay)) map.removeLayer(temperatureOverlay);
     
     if (currentRadarMode !== 'live-tracking') {
         liveRadarData = null;
@@ -2777,7 +2788,10 @@ function updateRadarLayersBasedOnMode() {
         updateVelocityLayer(); map.addLayer(radarVelocity);
     } else if (currentRadarMode === 'temperature') {
         const chkTempGradient = document.getElementById('chk-temp-gradient');
-        if (chkTempGradient && chkTempGradient.checked) map.addLayer(radarTemperature);
+        if (chkTempGradient && chkTempGradient.checked) {
+            refreshTemperatureOverlay();
+            map.addLayer(temperatureOverlay);
+        }
     }
     if (isCitiesVisible) updateVisibleCities();
 }
