@@ -628,7 +628,8 @@ function normalizeCurrentObservation(obsData, stationId) {
         visibilityMiles: metersToMiles(props.visibility?.value),
         description: props.textDescription || 'Unknown conditions',
         windText: windParts.length ? windParts.join(' ') : 'Calm/unknown',
-        observedAt: props.timestamp || null
+        observedAt: props.timestamp || null,
+        icon: props.icon || null
     };
 }
 
@@ -900,9 +901,20 @@ function getMoonPhase(date) {
 
 function renderWeatherDetailModal(details) {
     const { city, stationId, current, dailyPeriods, hourlyPeriods, almanac } = details;
+    const leadPeriod = hourlyPeriods[0] || dailyPeriods[0] || {};
     
+    // Fill in missing metrics from lead forecast if observation is incomplete
+    if (current.humidity === null || current.humidity === undefined) {
+        current.humidity = leadPeriod.probabilityOfPrecipitation?.value || null;
+    }
+    if (current.dewpointF === null || current.dewpointF === undefined) {
+        // NWS Forecast doesn't usually give dewpoint directly in periods, but we can try to estimate
+        // or just leave as is if we have no better source. 
+    }
+
+    const currentIcon = current.icon || leadPeriod.icon;
+
     if (activeWeatherTab === 'current') {
-        const leadPeriod = hourlyPeriods[0] || dailyPeriods[0] || {};
         return `
             <div class="weather-broadcast-header">
                 <div>
@@ -913,7 +925,7 @@ function renderWeatherDetailModal(details) {
             </div>
             <div class="weather-current-panel">
                 <div class="current-main">
-                    ${renderForecastIcon(leadPeriod.icon, current.description, 'current-weather-icon')}
+                    ${renderForecastIcon(currentIcon, current.description, 'current-weather-icon')}
                     <div>
                         <div class="current-temp">${formatTemperature(current.temperatureF)}</div>
                         <div class="current-condition">${escapeHtml(current.description)}</div>
