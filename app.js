@@ -767,7 +767,8 @@ function setupWeatherDetailModal() {
     const modal = document.getElementById('weather-detail-modal');
     if (!modal) return;
 
-    modal.addEventListener('click', (event) => {
+    // Use document listener for buttons that might be in Leaflet popups (outside modal)
+    document.addEventListener('click', (event) => {
         const detailButton = event.target.closest('.city-detail-button');
         if (detailButton) {
             const city = cityDetailLookup.get(detailButton.dataset.cityDetailKey);
@@ -775,13 +776,16 @@ function setupWeatherDetailModal() {
             return;
         }
 
-        if (event.target.classList.contains('modal-tab')) {
-            switchWeatherTab(event.target.getAttribute('data-tab'));
-            return;
-        }
+        // Within modal logic
+        if (modal.classList.contains('open')) {
+            if (event.target.classList.contains('modal-tab')) {
+                switchWeatherTab(event.target.getAttribute('data-tab'));
+                return;
+            }
 
-        if (event.target.closest('[data-close-weather-modal]') || event.target.closest('#weather-modal-close')) {
-            closeWeatherDetailModal();
+            if (event.target.closest('[data-close-weather-modal]') || event.target.closest('#weather-modal-close')) {
+                closeWeatherDetailModal();
+            }
         }
     });
 
