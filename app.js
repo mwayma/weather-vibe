@@ -134,8 +134,25 @@ let radarTemperature = L.tileLayer.wms('https://mapservices.weather.noaa.gov/ras
     attribution: 'Temperature: NOAA NDFD'
 });
 
-// Cache temperature lookups globally so we don't spam the NWS API when panning
-const stationTempsCache = {};
+// Cache NDFD grid-temperature lookups globally so panning and relabeling do not repeat API work.
+const cityGridTemperatureCache = {};
+const pendingCityGridTemperatureKeys = new Set();
+const queuedCityGridTemperatureRequests = new Map();
+let cityGridTemperatureTimer = null;
+let cityGridTemperatureQueueActive = false;
+let temperatureOverlayLoaded = false;
+const TEMP_LABEL_FETCH_DEFER_MS = 900;
+const TEMP_LABEL_BATCH_SIZE = 8;
+const TEMP_LABEL_BATCH_SPACING_MS = 120;
+
+radarTemperature.on('loading', () => {
+    temperatureOverlayLoaded = false;
+});
+
+radarTemperature.on('load', () => {
+    temperatureOverlayLoaded = true;
+    flushQueuedCityGridTemperatures();
+});
 
 // Track the currently active radar layer to allow redraws
 let radarLayer = radarReflectivity;
@@ -378,6 +395,7 @@ function renderAlerts() {
 const cityLayer = L.layerGroup().addTo(map);
 let allCities = [];
 let isCitiesVisible = true;
+const cityDetailLookup = new Map();
 
 const citiesWorker = new Worker('cities-worker.js');
 citiesWorker.onmessage = function(e) {
@@ -443,18 +461,21 @@ function updateVisibleCities() {
 
 function renderVisibleCities(visibleMarkers) {
     cityLayer.clearLayers();
+    const weatherRequests = [];
     
     visibleMarkers.forEach(city => {
         let tempHtml = '';
-        const safeCityId = (city.city + city.state).replace(/[^a-zA-Z0-9]/g, '');
+        const weatherKey = getCityWeatherKey(city);
 
-        if (currentRadarMode === 'temperature' && city.station) {
-            const stationId = city.station;
-            if (stationTempsCache[stationId] && stationTempsCache[stationId] !== 'fetching') {
-                tempHtml = `<div id="temp-${safeCityId}" class="station-${stationId}" style="color: #ffcc00; font-size: 1.1em; font-weight: bold; text-shadow: 1px 1px 2px #000;">${stationTempsCache[stationId]}&deg;</div>`;
+        if (currentRadarMode === 'temperature') {
+            const cached = cityGridTemperatureCache[weatherKey];
+            if (cached && cached.temperatureF !== null && cached.temperatureF !== undefined) {
+                tempHtml = `<div class="city-temp-label" data-weather-key="${weatherKey}">${cached.temperatureF}&deg;</div>`;
+            } else if (cached?.error) {
+                tempHtml = `<div class="city-temp-label city-temp-unavailable" data-weather-key="${weatherKey}">--&deg;</div>`;
             } else {
-                tempHtml = `<div id="temp-${safeCityId}" class="station-${stationId}" style="color: #ffcc00; font-size: 1.1em; font-weight: bold; text-shadow: 1px 1px 2px #000;">...</div>`;
-                fetchCityTempDisplay(city, safeCityId);
+                tempHtml = `<div class="city-temp-label" data-weather-key="${weatherKey}">...</div>`;
+                weatherRequests.push(city);
             }
         }
 
@@ -474,39 +495,34 @@ function renderVisibleCities(visibleMarkers) {
 
         marker.addTo(cityLayer);
     });
+
+    if (currentRadarMode === 'temperature' && weatherRequests.length) {
+        scheduleCityGridTemperatureBatch(weatherRequests);
+    }
 }
 
 async function fetchCityWeather(city, marker) {
     try {
         marker.bindPopup(`<div style="text-align:center;">Fetching weather...</div>`).openPopup();
 
-        let stationId = city.station;
-
-        if (!stationId) {
-            // 1. Get the NWS grid point to find the nearest observation stations
-            const pointRes = await fetch(`https://api.weather.gov/points/${city.latitude},${city.longitude}`);
-            const pointData = await pointRes.json();
-            
-            // 2. Fetch the list of stations for this grid point and grab the closest one
-            const stationsRes = await fetch(pointData.properties.observationStations);
-            const stationsData = await stationsRes.json();
-            stationId = stationsData.features[0].properties.stationIdentifier;
-            city.station = stationId; // Cache it locally to save API calls in the future
-        }
-
-        // 3. Fetch the latest observation for the closest station using the NWS endpoint
-        const obsRes = await fetch(`https://api.weather.gov/stations/${stationId}/observations/latest`);
-        const obsData = await obsRes.json();
-        
-        const tempC = obsData.properties.temperature.value;
-        const tempF = tempC !== null ? Math.round((tempC * 9/5) + 32) : '--';
-        const desc = obsData.properties.textDescription || 'Unknown conditions';
+        const pointData = await fetchCityPointData(city);
+        const stationId = await getNearestObservationStation(city, pointData);
+        const obsData = await fetchLatestStationObservation(stationId);
+        const current = normalizeCurrentObservation(obsData, stationId);
+        const detailKey = getCityWeatherKey(city);
+        cityDetailLookup.set(detailKey, { ...city, station: stationId, pointData, current });
         
         marker.setPopupContent(`
-            <div style="text-align: center; min-width: 120px;">
-                <strong>${city.city}</strong><br>
-                <span style="font-size: 1.5em; font-weight: bold;">${tempF}&deg;F</span><br>
-                ${desc}<br>
+            <div class="city-weather-popup">
+                <strong>${escapeHtml(city.city)}</strong>
+                <span class="popup-temp">${formatTemperature(current.temperatureF)}</span>
+                ${escapeHtml(current.description)}<br>
+                <div class="popup-metrics">
+                    <div>Feels like: <strong>${formatTemperature(current.feelsLikeF)}</strong></div>
+                    <div>Humidity: <strong>${formatPercent(current.humidity)}</strong></div>
+                    <div>Wind: <strong>${escapeHtml(current.windText)}</strong></div>
+                </div>
+                <button class="city-detail-button" type="button" data-city-detail-key="${escapeHtml(detailKey)}">Detailed forecast</button>
                 <small style="color: #666; margin-top: 5px; display: block;">Station: ${stationId}</small>
             </div>
         `);
@@ -516,39 +532,388 @@ async function fetchCityWeather(city, marker) {
     }
 }
 
-async function fetchCityTempDisplay(city, safeCityId) {
-    if (!city.station) return; // Only fetch if there is a known reporting station
+async function fetchJson(url) {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`HTTP ${res.status} from ${url}`);
+    return res.json();
+}
 
-    const stationId = city.station;
+async function fetchCityPointData(city) {
+    if (city.pointData) return city.pointData;
+    city.pointData = await fetchJson(`https://api.weather.gov/points/${city.latitude},${city.longitude}`);
+    return city.pointData;
+}
 
-    if (stationTempsCache[stationId] === 'fetching') return; // Already fetching
-    if (stationTempsCache[stationId]) {
-        const tempDiv = document.getElementById(`temp-${safeCityId}`);
-        if (tempDiv) tempDiv.innerHTML = `${stationTempsCache[stationId]}&deg;`;
-        return;
-    }
-    
-    stationTempsCache[stationId] = 'fetching';
+async function getNearestObservationStation(city, pointData) {
+    if (city.station) return city.station;
+    const stationsData = await fetchJson(pointData.properties.observationStations);
+    const stationId = stationsData.features?.[0]?.properties?.stationIdentifier;
+    if (!stationId) throw new Error('No observation station returned');
+    city.station = stationId;
+    return stationId;
+}
 
-    try {
-        const obsRes = await fetch(`https://api.weather.gov/stations/${stationId}/observations/latest`);
-        const obsData = await obsRes.json();
-        
-        const tempC = obsData.properties.temperature.value;
-        if (tempC !== null) {
-            const tempF = Math.round((tempC * 9/5) + 32);
-            stationTempsCache[stationId] = tempF;
-            // Bulk update all visible cities that share this station
-            document.querySelectorAll(`.station-${stationId}`).forEach(el => el.innerHTML = `${tempF}&deg;`);
-        } else {
-            throw new Error("No temp data");
+function fetchLatestStationObservation(stationId) {
+    return fetchJson(`https://api.weather.gov/stations/${stationId}/observations/latest`);
+}
+
+function cToF(value) {
+    return Number.isFinite(value) ? Math.round((value * 9 / 5) + 32) : null;
+}
+
+function metersPerSecondToMph(value) {
+    return Number.isFinite(value) ? Math.round(value * 2.236936) : null;
+}
+
+function metersToMiles(value) {
+    return Number.isFinite(value) ? Math.round(value * 0.000621371 * 10) / 10 : null;
+}
+
+function pascalsToInHg(value) {
+    return Number.isFinite(value) ? (value * 0.0002953).toFixed(2) : null;
+}
+
+function getFeelsLikeF(props, tempF) {
+    const heatIndexF = cToF(props.heatIndex?.value);
+    if (heatIndexF !== null) return heatIndexF;
+    const windChillF = cToF(props.windChill?.value);
+    if (windChillF !== null) return windChillF;
+    return tempF;
+}
+
+function calculateRelativeHumidity(tempC, dewpointC) {
+    if (!Number.isFinite(tempC) || !Number.isFinite(dewpointC)) return null;
+    const saturation = 6.112 * Math.exp((17.67 * tempC) / (tempC + 243.5));
+    const actual = 6.112 * Math.exp((17.67 * dewpointC) / (dewpointC + 243.5));
+    return Math.max(0, Math.min(100, Math.round((actual / saturation) * 100)));
+}
+
+function normalizeCurrentObservation(obsData, stationId) {
+    const props = obsData.properties || {};
+    const tempC = props.temperature?.value;
+    const dewpointC = props.dewpoint?.value;
+    const tempF = cToF(tempC);
+    const dewpointF = cToF(dewpointC);
+    const humidity = Number.isFinite(props.relativeHumidity?.value)
+        ? Math.round(props.relativeHumidity.value)
+        : calculateRelativeHumidity(tempC, dewpointC);
+    const windMph = metersPerSecondToMph(props.windSpeed?.value);
+    const gustMph = metersPerSecondToMph(props.windGust?.value);
+    const windDirection = Number.isFinite(props.windDirection?.value) ? `${Math.round(props.windDirection.value)} deg` : null;
+    const windParts = [];
+    if (windDirection) windParts.push(windDirection);
+    if (windMph !== null) windParts.push(`${windMph} mph`);
+    if (gustMph !== null) windParts.push(`gust ${gustMph}`);
+
+    return {
+        stationId,
+        temperatureF: tempF,
+        feelsLikeF: getFeelsLikeF(props, tempF),
+        humidity,
+        dewpointF,
+        pressureInHg: pascalsToInHg(props.barometricPressure?.value),
+        visibilityMiles: metersToMiles(props.visibility?.value),
+        description: props.textDescription || 'Unknown conditions',
+        windText: windParts.length ? windParts.join(' ') : 'Calm/unknown',
+        observedAt: props.timestamp || null
+    };
+}
+
+function formatTemperature(value) {
+    return value !== null && value !== undefined ? `${value}&deg;F` : '--&deg;F';
+}
+
+function formatPercent(value) {
+    return value !== null && value !== undefined ? `${value}%` : '--';
+}
+
+function formatPlain(value, suffix = '') {
+    return value !== null && value !== undefined ? `${value}${suffix}` : '--';
+}
+
+function escapeHtml(value) {
+    return String(value ?? '').replace(/[&<>"']/g, char => ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;'
+    }[char]));
+}
+
+function getCityWeatherKey(city) {
+    return `${Number(city.latitude).toFixed(3)},${Number(city.longitude).toFixed(3)}`;
+}
+
+function cityToWeatherRequest(city) {
+    return {
+        key: getCityWeatherKey(city),
+        city: city.city,
+        state: city.state,
+        lat: city.latitude,
+        lon: city.longitude,
+        priority: Number(city.pop || city.population) || 0
+    };
+}
+
+function scheduleCityGridTemperatureBatch(cities) {
+    cities.forEach(city => {
+        const request = cityToWeatherRequest(city);
+        if (!cityGridTemperatureCache[request.key] && !pendingCityGridTemperatureKeys.has(request.key)) {
+            queuedCityGridTemperatureRequests.set(request.key, request);
         }
-    } catch (err) {
-        console.debug('Failed to load temp for', city.city);
-        stationTempsCache[stationId] = '--';
-        document.querySelectorAll(`.station-${stationId}`).forEach(el => el.innerHTML = '--&deg;');
+    });
+
+    if (cityGridTemperatureTimer) clearTimeout(cityGridTemperatureTimer);
+    const overlayActive = currentRadarMode === 'temperature' && map.hasLayer(radarTemperature);
+    const delay = overlayActive && !temperatureOverlayLoaded ? TEMP_LABEL_FETCH_DEFER_MS : 120;
+    cityGridTemperatureTimer = setTimeout(flushQueuedCityGridTemperatures, delay);
+}
+
+function flushQueuedCityGridTemperatures() {
+    if (cityGridTemperatureTimer) {
+        clearTimeout(cityGridTemperatureTimer);
+        cityGridTemperatureTimer = null;
+    }
+    if (currentRadarMode !== 'temperature' || !queuedCityGridTemperatureRequests.size || cityGridTemperatureQueueActive) return;
+
+    processQueuedCityGridTemperatures();
+}
+
+async function processQueuedCityGridTemperatures() {
+    cityGridTemperatureQueueActive = true;
+    try {
+        while (currentRadarMode === 'temperature' && queuedCityGridTemperatureRequests.size) {
+            const requests = Array.from(queuedCityGridTemperatureRequests.values())
+                .sort((a, b) => b.priority - a.priority)
+                .slice(0, TEMP_LABEL_BATCH_SIZE);
+
+            requests.forEach(request => queuedCityGridTemperatureRequests.delete(request.key));
+            await fetchCityGridTemperatureBatch(requests);
+
+            if (queuedCityGridTemperatureRequests.size) {
+                await new Promise(resolve => setTimeout(resolve, TEMP_LABEL_BATCH_SPACING_MS));
+            }
+        }
+    } finally {
+        cityGridTemperatureQueueActive = false;
+        if (currentRadarMode === 'temperature' && queuedCityGridTemperatureRequests.size) {
+            flushQueuedCityGridTemperatures();
+        }
     }
 }
+
+async function fetchCityGridTemperatureBatch(cities, force = false) {
+    const requests = cities
+        .map(item => item.key ? item : cityToWeatherRequest(item))
+        .filter(item => force || (!cityGridTemperatureCache[item.key] && !pendingCityGridTemperatureKeys.has(item.key)));
+
+    if (!requests.length) return [];
+    requests.forEach(item => pendingCityGridTemperatureKeys.add(item.key));
+
+    try {
+        const res = await fetch('/api/temperature-grid/batch', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ locations: requests })
+        });
+        if (!res.ok) throw new Error(`Grid temperature batch failed: ${res.status}`);
+        const payload = await res.json();
+        const results = payload.results || [];
+
+        results.forEach(temperature => {
+            cityGridTemperatureCache[temperature.key] = temperature;
+            pendingCityGridTemperatureKeys.delete(temperature.key);
+            updateVisibleCityTemperature(temperature);
+        });
+
+        return results;
+    } catch (err) {
+        console.debug('Failed to load city grid temperature batch:', err.message);
+        requests.forEach(item => {
+            pendingCityGridTemperatureKeys.delete(item.key);
+            cityGridTemperatureCache[item.key] = { ...item, error: 'unavailable', temperatureF: null };
+            updateVisibleCityTemperature(cityGridTemperatureCache[item.key]);
+        });
+        return [];
+    }
+}
+
+function updateVisibleCityTemperature(weather) {
+    const text = weather.temperatureF !== null && weather.temperatureF !== undefined ? `${weather.temperatureF}&deg;` : '--&deg;';
+    document.querySelectorAll(`[data-weather-key="${CSS.escape(weather.key)}"]`).forEach(el => {
+        el.innerHTML = text;
+        el.classList.toggle('city-temp-unavailable', weather.temperatureF === null || weather.temperatureF === undefined);
+    });
+}
+
+function setupWeatherDetailModal() {
+    document.addEventListener('click', (event) => {
+        const detailButton = event.target.closest('.city-detail-button');
+        if (detailButton) {
+            const city = cityDetailLookup.get(detailButton.dataset.cityDetailKey);
+            if (city) openWeatherDetailModal(city);
+            return;
+        }
+
+        if (event.target.closest('[data-close-weather-modal]') || event.target.closest('#weather-modal-close')) {
+            closeWeatherDetailModal();
+        }
+    });
+
+    document.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape') closeWeatherDetailModal();
+    });
+}
+
+function closeWeatherDetailModal() {
+    const modal = document.getElementById('weather-detail-modal');
+    if (!modal) return;
+    modal.classList.remove('open');
+    modal.setAttribute('aria-hidden', 'true');
+}
+
+async function openWeatherDetailModal(city) {
+    const modal = document.getElementById('weather-detail-modal');
+    const content = document.getElementById('weather-modal-content');
+    if (!modal || !content) return;
+
+    modal.classList.add('open');
+    modal.setAttribute('aria-hidden', 'false');
+    content.innerHTML = `
+        <h2 id="weather-modal-title">${escapeHtml(city.city)}, ${escapeHtml(city.state || '')}</h2>
+        <div class="weather-modal-loading">Loading forecast...</div>
+    `;
+
+    try {
+        const details = await fetchWeatherDetails(city);
+        content.innerHTML = renderWeatherDetailModal(details);
+    } catch (err) {
+        console.error('Forecast detail error:', err);
+        content.innerHTML = `
+            <h2 id="weather-modal-title">${escapeHtml(city.city)}, ${escapeHtml(city.state || '')}</h2>
+            <div class="weather-modal-error">Detailed weather is unavailable right now.</div>
+        `;
+    }
+}
+
+async function fetchWeatherDetails(city) {
+    const pointData = city.pointData || await fetchCityPointData(city);
+    city.pointData = pointData;
+    const stationId = await getNearestObservationStation(city, pointData);
+    const [obsData, forecastData, hourlyData] = await Promise.all([
+        fetchLatestStationObservation(stationId),
+        fetchJson(pointData.properties.forecast),
+        fetchJson(pointData.properties.forecastHourly)
+    ]);
+
+    return {
+        city,
+        stationId,
+        current: normalizeCurrentObservation(obsData, stationId),
+        dailyPeriods: (forecastData.properties?.periods || []).slice(0, 10),
+        hourlyPeriods: (hourlyData.properties?.periods || []).slice(0, 12),
+        updatedAt: forecastData.properties?.updated || null
+    };
+}
+
+function renderWeatherDetailModal(details) {
+    const { city, stationId, current, dailyPeriods, hourlyPeriods } = details;
+    const leadPeriod = hourlyPeriods[0] || dailyPeriods[0] || {};
+    return `
+        <div class="weather-broadcast-header">
+            <div>
+                <h2 id="weather-modal-title">${escapeHtml(city.city)}, ${escapeHtml(city.state || '')}</h2>
+                <div class="weather-modal-subtitle">Station ${escapeHtml(stationId)}${current.observedAt ? ` &middot; Observed ${escapeHtml(formatDateTime(current.observedAt))}` : ''}</div>
+            </div>
+            <div class="weather-broadcast-badge">Local Forecast</div>
+        </div>
+        <div class="weather-detail-grid">
+            <section class="weather-current-panel">
+                <div class="current-main">
+                    ${renderForecastIcon(leadPeriod.icon, current.description, 'current-weather-icon')}
+                    <div>
+                        <div class="current-temp">${formatTemperature(current.temperatureF)}</div>
+                        <div class="current-condition">${escapeHtml(current.description)}</div>
+                        <div class="current-feels">Feels Like ${formatTemperature(current.feelsLikeF)}</div>
+                    </div>
+                </div>
+                <div class="weather-metric-grid">
+                    <div class="weather-metric"><span>Humidity</span><strong>${formatPercent(current.humidity)}</strong></div>
+                    <div class="weather-metric"><span>Dewpoint</span><strong>${formatTemperature(current.dewpointF)}</strong></div>
+                    <div class="weather-metric"><span>Wind</span><strong>${escapeHtml(current.windText)}</strong></div>
+                    <div class="weather-metric"><span>Pressure</span><strong>${formatPlain(current.pressureInHg, ' inHg')}</strong></div>
+                    <div class="weather-metric"><span>Visibility</span><strong>${formatPlain(current.visibilityMiles, ' mi')}</strong></div>
+                </div>
+            </section>
+            <section class="weather-detail-section forecast-section">
+                <h3>5 Day Outlook</h3>
+                <div class="forecast-list">
+                    ${dailyPeriods.map(renderDailyForecastPeriod).join('')}
+                </div>
+            </section>
+            <section class="weather-detail-section hourly-section">
+                <h3>Next 12 Hours</h3>
+                <div class="hourly-list">
+                    ${hourlyPeriods.map(renderHourlyForecastPeriod).join('')}
+                </div>
+            </section>
+        </div>
+    `;
+}
+
+function renderDailyForecastPeriod(period) {
+    return `
+        <div class="forecast-item">
+            <div class="forecast-name">${escapeHtml(period.name || 'Forecast')}</div>
+            ${renderForecastIcon(period.icon, period.shortForecast, 'forecast-icon')}
+            <div class="forecast-temp">${formatPeriodTemperature(period)}</div>
+            <div class="forecast-short">${escapeHtml(period.shortForecast || '')}</div>
+            <div class="forecast-title">
+                <strong>Wind</strong>
+                <span>${escapeHtml(period.windSpeed || '--')} ${escapeHtml(period.windDirection || '')}</span>
+            </div>
+        </div>
+    `;
+}
+
+function renderHourlyForecastPeriod(period) {
+    const precip = period.probabilityOfPrecipitation?.value;
+    const precipText = precip !== null && precip !== undefined ? `${precip}%` : '--';
+    return `
+        <div class="hourly-item">
+            <div class="hourly-time">${escapeHtml(formatHour(period.startTime))}</div>
+            ${renderForecastIcon(period.icon, period.shortForecast, 'hourly-icon')}
+            <div class="hourly-temp">${formatPeriodTemperature(period)}</div>
+            <div class="hourly-precip">${escapeHtml(precipText)}</div>
+            <div class="hourly-wind">${escapeHtml(period.windSpeed || '--')}</div>
+        </div>
+    `;
+}
+
+function renderForecastIcon(icon, alt, className) {
+    if (!icon) return `<div class="${className} weather-icon-fallback"></div>`;
+    return `<img class="${className}" src="${escapeHtml(icon)}" alt="${escapeHtml(alt || 'Forecast icon')}" loading="lazy">`;
+}
+
+function formatPeriodTemperature(period) {
+    if (period.temperature === null || period.temperature === undefined) return '--';
+    return `${escapeHtml(period.temperature)}&deg;${escapeHtml(period.temperatureUnit || 'F')}`;
+}
+
+function formatDateTime(value) {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return value;
+    return date.toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+}
+
+function formatHour(value) {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return value || 'Hour';
+    return date.toLocaleTimeString([], { hour: 'numeric' });
+}
+
+setupWeatherDetailModal();
 
 // Global initialization
 let selectedRadarId = ''; 

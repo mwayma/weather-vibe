@@ -8,6 +8,7 @@ const cors = require('cors');
 const { Level2Radar } = require('nexrad-level-2-data');
 const { XMLParser } = require('fast-xml-parser');
 const NEXRAD_STATIONS = require('./data/nexrad_stations.json');
+const COUNTIES = require('./data/counties.json');
 const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
 
 const app = express();
@@ -18,6 +19,7 @@ const PORT = process.env.PORT || 80;
 const BUCKET_URL = 'https://unidata-nexrad-level2-chunks.s3.amazonaws.com';
 
 app.use(cors());
+app.use(express.json({ limit: '256kb' }));
 app.use(compression());
 app.use(express.static(path.join(__dirname, '/')));
 
@@ -27,6 +29,8 @@ const pollingLocks = new Set(); // stationId set for locking
 const stationState = new Map(); // stationId -> { lastVolume, lastChunkKey, headerChunk }
 const stationCache = new Map(); // stationId -> liveRadarData object
 const stationHealth = new Map(); // stationId -> last feed_health payload
+const gridTemperatureCache = new Map(); // rounded lat/lon -> latest NDFD point sample
+const gridTemperatureInflight = new Map(); // rounded lat/lon -> Promise
 
 const parser = new XMLParser();
 const VOLUME_DISCOVERY_INTERVAL_MS = 15000;
@@ -51,19 +55,34 @@ const HAIL_SIGNAL_DBZ = 60;
 const ROTATION_VELOCITY_DELTA = 60;
 const ROTATION_MIN_SIDE_VELOCITY = 25;
 const ROTATION_SUPPORT_GATES = 2;
+const GRID_TEMPERATURE_TTL_MS = Number(process.env.GRID_TEMPERATURE_TTL_MS) || 20 * 60 * 1000;
+const MAX_WEATHER_BATCH_SIZE = 50;
+const GRID_TEMPERATURE_CONCURRENCY = Number(process.env.GRID_TEMPERATURE_CONCURRENCY) || 4;
+const GRID_TEMPERATURE_CELL_DEG = Number(process.env.GRID_TEMPERATURE_CELL_DEG) || 0.05;
+const NDFD_TEMP_IDENTIFY_URL = 'https://mapservices.weather.noaa.gov/raster/rest/services/NDFD/NDFD_temp/MapServer/identify';
+const NDFD_TEMP_IMAGE_LAYER_IDS = [8, 12, 16, 20, 24, 28, 32, 36, 40];
 
-// County-based auto-priming configuration
-const PRIORITY_COUNTIES = [
-    { name: 'Pulaski, AR', fips: '005119', station: 'KLZK' },
-    { name: 'Lonoke, AR', fips: '005085', station: 'KLZK' }
-];
+// Auto-prime KLZK when tornado/severe thunderstorm watches or warnings affect its radar area.
+const AUTO_PRIME_STATION = 'KLZK';
+const AUTO_PRIME_RADIUS_KM = Number(process.env.AUTO_PRIME_RADIUS_KM) || 230;
 const ALERT_POLL_INTERVAL_MS = 60 * 1000;
 const serverSubscriptions = new Set(); // Internal "virtual" subscriptions for auto-priming
+const STATE_POSTAL_FIPS = {
+    AL: '01', AK: '02', AZ: '04', AR: '05', CA: '06', CO: '08', CT: '09', DE: '10', FL: '12', GA: '13',
+    HI: '15', ID: '16', IL: '17', IN: '18', IA: '19', KS: '20', KY: '21', LA: '22', ME: '23', MD: '24',
+    MA: '25', MI: '26', MN: '27', MS: '28', MO: '29', MT: '30', NE: '31', NV: '32', NH: '33', NJ: '34',
+    NM: '35', NY: '36', NC: '37', ND: '38', OH: '39', OK: '40', OR: '41', PA: '42', RI: '44', SC: '45',
+    SD: '46', TN: '47', TX: '48', UT: '49', VT: '50', VA: '51', WA: '53', WV: '54', WI: '55', WY: '56'
+};
 
 function normalizeStationId(stationId) {
     if (!stationId) return stationId;
     stationId = stationId.toUpperCase();
     return stationId.length === 3 ? `K${stationId}` : stationId;
+}
+
+function statePostalToFips(postal) {
+    return STATE_POSTAL_FIPS[String(postal || '').toUpperCase()] || null;
 }
 
 function getKeyTimestamp(key) {
@@ -178,6 +197,49 @@ function findServerStation(stationId) {
     return NEXRAD_STATIONS.find(station => station.id === normalized);
 }
 
+function getCountyCoordinateSamples(geometry) {
+    const samples = [];
+    const collect = ring => {
+        if (!Array.isArray(ring)) return;
+        const step = Math.max(1, Math.floor(ring.length / 8));
+        for (let i = 0; i < ring.length; i += step) {
+            const coord = ring[i];
+            if (Array.isArray(coord) && Number.isFinite(coord[0]) && Number.isFinite(coord[1])) {
+                samples.push({ lon: coord[0], lat: coord[1] });
+            }
+        }
+    };
+
+    if (geometry?.type === 'Polygon') {
+        geometry.coordinates?.forEach(collect);
+    } else if (geometry?.type === 'MultiPolygon') {
+        geometry.coordinates?.forEach(poly => poly.forEach(collect));
+    }
+
+    return samples;
+}
+
+function buildRadarAreaCountyFips(stationId, radiusKm) {
+    const station = findServerStation(stationId);
+    if (!station || !COUNTIES?.features) return new Set();
+
+    const center = { lat: station.lat, lon: station.lon };
+    const fips = new Set();
+    COUNTIES.features.forEach(feature => {
+        const state = feature.properties?.STATE;
+        const county = feature.properties?.COUNTY;
+        if (!state || !county) return;
+
+        const samples = getCountyCoordinateSamples(feature.geometry);
+        const inRange = samples.some(sample => distanceKm(center, sample) <= radiusKm);
+        if (inRange) fips.add(`${state}${county}`);
+    });
+
+    return fips;
+}
+
+const autoPrimeCountyFips = buildRadarAreaCountyFips(AUTO_PRIME_STATION, AUTO_PRIME_RADIUS_KM);
+
 function normalizeGateDistanceKm(value) {
     const numeric = Number(value);
     if (!Number.isFinite(numeric)) return 0;
@@ -211,6 +273,126 @@ function distanceKm(a, b) {
     const h = Math.sin(dLat / 2) ** 2 +
         Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
     return 2 * earthRadiusKm * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
+}
+
+function roundCoordinate(value) {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? Math.round(numeric / GRID_TEMPERATURE_CELL_DEG) * GRID_TEMPERATURE_CELL_DEG : null;
+}
+
+function normalizeWeatherRequestItem(item, index) {
+    const lat = Number(item?.lat ?? item?.latitude);
+    const lon = Number(item?.lon ?? item?.longitude);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+    return {
+        key: String(item?.key || `${lat.toFixed(4)},${lon.toFixed(4)},${index}`),
+        city: item?.city || null,
+        state: item?.state || null,
+        lat,
+        lon
+    };
+}
+
+function getGridTemperatureCacheKey(lat, lon) {
+    const roundedLat = roundCoordinate(lat);
+    const roundedLon = roundCoordinate(lon);
+    if (roundedLat === null || roundedLon === null) return null;
+    return `${roundedLat},${roundedLon}`;
+}
+
+function pickBestNdfdTemperatureResult(results) {
+    return (results || [])
+        .map(result => {
+            const attrs = result.attributes || {};
+            const value = Number(attrs['Service Pixel Value'] ?? attrs['Classify.Pixel Value']);
+            const forecastHour = Number(attrs.idp_fcst_hour);
+            return {
+                value,
+                layerId: result.layerId,
+                forecastHour: Number.isFinite(forecastHour) ? forecastHour : Number.MAX_SAFE_INTEGER,
+                validTime: attrs.idp_validtime || null,
+                validEndTime: attrs.idp_validendtime || null,
+                issuedAt: attrs.idp_issueddate || null
+            };
+        })
+        .filter(result => Number.isFinite(result.value))
+        .sort((a, b) => a.forecastHour - b.forecastHour || a.layerId - b.layerId)[0] || null;
+}
+
+async function fetchGridTemperature(item) {
+    const cacheKey = getGridTemperatureCacheKey(item.lat, item.lon);
+    if (!cacheKey) return { ...item, error: 'invalid_location' };
+
+    const now = Date.now();
+    const cached = gridTemperatureCache.get(cacheKey);
+    if (cached && now - cached.fetchedAt < GRID_TEMPERATURE_TTL_MS) return { ...item, ...cached };
+    if (gridTemperatureInflight.has(cacheKey)) return { ...item, ...(await gridTemperatureInflight.get(cacheKey)) };
+
+    const request = (async () => {
+        const params = new URLSearchParams({
+            f: 'json',
+            geometry: `${item.lon},${item.lat}`,
+            geometryType: 'esriGeometryPoint',
+            sr: '4326',
+            layers: `all:${NDFD_TEMP_IMAGE_LAYER_IDS.join(',')}`,
+            tolerance: '10',
+            mapExtent: '-130,20,-60,53',
+            imageDisplay: '1200,800,96',
+            returnGeometry: 'false'
+        });
+
+        try {
+            const response = await fetchWithTimeout(`${NDFD_TEMP_IDENTIFY_URL}?${params}`, {
+                headers: {
+                    Accept: 'application/json',
+                    'User-Agent': 'weathertest NDFD temperature labels'
+                }
+            }, 10000);
+            const data = await response.json();
+            const best = pickBestNdfdTemperatureResult(data.results);
+            if (!best) throw new Error('No NDFD temperature value returned');
+
+            const sampled = {
+                source: 'NDFD',
+                temperatureF: Math.round(best.value),
+                rawTemperatureF: best.value,
+                layerId: best.layerId,
+                forecastHour: best.forecastHour,
+                validTime: best.validTime,
+                validEndTime: best.validEndTime,
+                issuedAt: best.issuedAt,
+                fetchedAt: Date.now()
+            };
+            gridTemperatureCache.set(cacheKey, sampled);
+            return sampled;
+        } finally {
+            gridTemperatureInflight.delete(cacheKey);
+        }
+    })();
+
+    gridTemperatureInflight.set(cacheKey, request);
+
+    try {
+        return { ...item, ...(await request) };
+    } catch (error) {
+        if (cached) return { ...item, ...cached, stale: true };
+        return { ...item, error: classifyFetchError(error) };
+    }
+}
+
+async function mapWithConcurrency(items, limit, worker) {
+    const results = new Array(items.length);
+    let nextIndex = 0;
+    const workerCount = Math.min(limit, items.length);
+
+    await Promise.all(Array.from({ length: workerCount }, async () => {
+        while (nextIndex < items.length) {
+            const index = nextIndex++;
+            results[index] = await worker(items[index], index);
+        }
+    }));
+
+    return results;
 }
 
 function bearingDeg(a, b) {
@@ -705,11 +887,10 @@ async function fetchWithTimeout(url, options = {}, timeout = 15000) {
 }
 
 async function startAlertPoller() {
-    console.log('Initializing server-side NWS alert poller for priority counties...');
+    console.log(`Initializing server-side NWS alert poller for ${AUTO_PRIME_STATION} area (${autoPrimeCountyFips.size} counties)...`);
     
     const poll = async () => {
         try {
-            // Fetch active alerts for Pulaski and Lonoke AR
             const res = await fetchWithTimeout('https://api.weather.gov/alerts/active?status=actual&message_type=alert');
             const data = await res.json();
             
@@ -719,28 +900,32 @@ async function startAlertPoller() {
             data.features.forEach(f => {
                 const props = f.properties;
                 const event = (props.event || '').toLowerCase();
-                const isThreat = event.includes('tornado') || event.includes('thunderstorm') || event.includes('flood');
-                if (!isThreat) return;
+                const isTargetEvent =
+                    event === 'tornado warning' ||
+                    event === 'tornado watch' ||
+                    event === 'severe thunderstorm warning' ||
+                    event === 'severe thunderstorm watch';
+                if (!isTargetEvent) return;
 
                 const sameCodes = props.geocode?.SAME || [];
                 const ugcCodes = props.geocode?.UGC || [];
-
-                PRIORITY_COUNTIES.forEach(county => {
-                    const matched = sameCodes.some(c => c.includes(county.fips.slice(1))) || 
-                                    ugcCodes.some(c => c.includes(county.fips));
-                    
-                    if (matched) {
-                        activeStations.add(county.station);
-                    }
+                const matched = sameCodes.some(code => {
+                    const countyFips = String(code).slice(-5);
+                    return autoPrimeCountyFips.has(countyFips);
+                }) || ugcCodes.some(code => {
+                    const ugc = String(code);
+                    if (!/^[A-Z]{2}C\d{3}$/.test(ugc)) return false;
+                    const stateFips = statePostalToFips(ugc.slice(0, 2));
+                    return stateFips && autoPrimeCountyFips.has(`${stateFips}${ugc.slice(3)}`);
                 });
+
+                if (matched) activeStations.add(AUTO_PRIME_STATION);
             });
 
-            // Update internal server subscriptions
-            PRIORITY_COUNTIES.forEach(county => {
-                const stationId = county.station;
+            [AUTO_PRIME_STATION].forEach(stationId => {
                 if (activeStations.has(stationId)) {
                     if (!serverSubscriptions.has(stationId)) {
-                        console.log(`[Auto-Prime] Activating background poller for ${stationId} due to NWS alert in target counties.`);
+                        console.log(`[Auto-Prime] Activating background poller for ${stationId} due to tornado/severe thunderstorm watch/warning in radar area.`);
                         serverSubscriptions.add(stationId);
                         if (!activePollers.has(stationId)) {
                             const poller = setInterval(() => pollChunks(stationId), 1000);
@@ -765,6 +950,26 @@ async function startAlertPoller() {
     setInterval(poll, ALERT_POLL_INTERVAL_MS);
     poll();
 }
+
+app.post('/api/temperature-grid/batch', async (req, res) => {
+    const items = Array.isArray(req.body?.locations) ? req.body.locations : [];
+    const locations = items
+        .slice(0, MAX_WEATHER_BATCH_SIZE)
+        .map(normalizeWeatherRequestItem)
+        .filter(Boolean);
+
+    if (!locations.length) {
+        res.status(400).json({ error: 'Request body must include a locations array with lat/lon values.' });
+        return;
+    }
+
+    const results = await mapWithConcurrency(locations, GRID_TEMPERATURE_CONCURRENCY, fetchGridTemperature);
+    res.json({
+        generatedAt: Date.now(),
+        ttlMs: GRID_TEMPERATURE_TTL_MS,
+        results
+    });
+});
 
 async function findTrulyLatestVolume(stationId, commonPrefixes) {
     if (commonPrefixes.length === 0) return null;
