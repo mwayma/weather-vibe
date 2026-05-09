@@ -36,7 +36,7 @@ let temperatureMapCache = {
     buffer: null,
     fetchedAt: 0,
     bbox: [[22, -127], [51, -65]], // [[latMin, lonMin], [latMax, lonMax]] for Leaflet ImageOverlay
-    esriBbox: '-127,22,-65,51'  // [minLon, minLat, maxLon, maxLat] for ESRI export
+    esriBbox: '-14137571,2511525,-7235805,6621294' // [minX, minY, maxX, maxY] in EPSG:3857
 };
 
 const parser = new XMLParser();
@@ -973,7 +973,8 @@ async function updateTemperatureMap() {
     const params = new URLSearchParams({
         f: 'image',
         bbox: temperatureMapCache.esriBbox,
-        bboxSR: '4326',
+        bboxSR: '3857',
+        imageSR: '3857',
         size: '2048,1024',
         format: 'png32',
         transparent: 'true',
