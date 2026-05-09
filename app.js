@@ -518,12 +518,14 @@ async function fetchCityWeather(city, marker) {
     try {
         marker.bindPopup(`<div style="text-align:center;">Fetching weather...</div>`).openPopup();
 
+        const weatherKey = getCityWeatherKey(city);
+        const gridFallback = cityGridTemperatureCache[weatherKey] || null;
+
         const pointData = await fetchCityPointData(city);
         const stationId = await getNearestObservationStation(city, pointData);
         const obsData = await fetchLatestStationObservation(stationId);
-        const current = normalizeCurrentObservation(obsData, stationId);
-        const detailKey = getCityWeatherKey(city);
-        cityDetailLookup.set(detailKey, { ...city, station: stationId, pointData, current });
+        const current = normalizeCurrentObservation(obsData, stationId, gridFallback);
+        cityDetailLookup.set(weatherKey, { ...city, station: stationId, pointData, current });
         
         marker.setPopupContent(`
             <div class="city-weather-popup">
@@ -534,8 +536,9 @@ async function fetchCityWeather(city, marker) {
                     <div>Feels like: <strong>${formatTemperature(current.feelsLikeF)}</strong></div>
                     <div>Humidity: <strong>${formatPercent(current.humidity)}</strong></div>
                     <div>Wind: <strong>${escapeHtml(current.windText)}</strong></div>
+                    <div style="margin-top: 4px; color: #888;">Grid Temp (Map): <strong>${formatTemperature(gridFallback?.temperatureF)}</strong></div>
                 </div>
-                <button class="city-detail-button" type="button" data-city-detail-key="${escapeHtml(detailKey)}">Detailed forecast</button>
+                <button class="city-detail-button" type="button" data-city-detail-key="${escapeHtml(weatherKey)}">Detailed forecast</button>
                 <small style="color: #666; margin-top: 5px; display: block;">Station: ${stationId}</small>
             </div>
         `);
@@ -601,15 +604,37 @@ function calculateRelativeHumidity(tempC, dewpointC) {
     return Math.max(0, Math.min(100, Math.round((actual / saturation) * 100)));
 }
 
-function normalizeCurrentObservation(obsData, stationId) {
-    const props = obsData.properties || {};
+function calculateDewpoint(tempF, humidity) {
+    if (!Number.isFinite(tempF) || !Number.isFinite(humidity) || humidity <= 0) return null;
+    const t = (tempF - 32) * 5 / 9;
+    const rh = humidity / 100;
+    const lnRH = Math.log(rh);
+    const dewpointC = (243.5 * (lnRH + (17.67 * t) / (243.5 + t))) / (17.67 - (lnRH + (17.67 * t) / (243.5 + t)));
+    return Math.round((dewpointC * 9 / 5) + 32);
+}
+
+function normalizeCurrentObservation(obsData, stationId, gridFallback = null) {
+    const props = obsData?.properties || {};
     const tempC = props.temperature?.value;
     const dewpointC = props.dewpoint?.value;
-    const tempF = cToF(tempC);
-    const dewpointF = cToF(dewpointC);
-    const humidity = Number.isFinite(props.relativeHumidity?.value)
+    
+    let tempF = cToF(tempC);
+    let dewpointF = cToF(dewpointC);
+    let humidity = Number.isFinite(props.relativeHumidity?.value)
         ? Math.round(props.relativeHumidity.value)
         : calculateRelativeHumidity(tempC, dewpointC);
+
+    // Apply grid fallbacks if station is missing data
+    if (gridFallback) {
+        if (tempF === null) tempF = gridFallback.temperatureF;
+        if (humidity === null) humidity = gridFallback.humidity;
+    }
+
+    // If we have temp and humidity but no dewpoint, calculate it
+    if (dewpointF === null && tempF !== null && humidity !== null) {
+        dewpointF = calculateDewpoint(tempF, humidity);
+    }
+
     const windMph = metersPerSecondToMph(props.windSpeed?.value);
     const gustMph = metersPerSecondToMph(props.windGust?.value);
     const windDirection = Number.isFinite(props.windDirection?.value) ? `${Math.round(props.windDirection.value)} deg` : null;
@@ -856,11 +881,15 @@ async function fetchWeatherDetails(city) {
         fetchAlmanacData(city.latitude, city.longitude)
     ]);
 
+    const weatherKey = getCityWeatherKey(city);
+    const gridFallback = cityGridTemperatureCache[weatherKey] || null;
+
     return {
         city,
         stationId,
         almanac,
-        current: normalizeCurrentObservation(obsData, stationId),
+        gridFallback,
+        current: normalizeCurrentObservation(obsData, stationId, gridFallback),
         dailyPeriods: (forecastData.properties?.periods || []).slice(0, 10),
         hourlyPeriods: (hourlyData.properties?.periods || []).slice(0, 12),
         updatedAt: forecastData.properties?.updated || null
@@ -909,18 +938,8 @@ function getMoonPhase(date) {
 }
 
 function renderWeatherDetailModal(details) {
-    const { city, stationId, current, dailyPeriods, hourlyPeriods, almanac } = details;
+    const { city, stationId, current, dailyPeriods, hourlyPeriods, almanac, gridFallback } = details;
     const leadPeriod = hourlyPeriods[0] || dailyPeriods[0] || {};
-    
-    // Fill in missing metrics from lead forecast if observation is incomplete
-    if (current.humidity === null || current.humidity === undefined) {
-        current.humidity = leadPeriod.probabilityOfPrecipitation?.value || null;
-    }
-    if (current.dewpointF === null || current.dewpointF === undefined) {
-        // NWS Forecast doesn't usually give dewpoint directly in periods, but we can try to estimate
-        // or just leave as is if we have no better source. 
-    }
-
     const currentIcon = current.icon || leadPeriod.icon;
 
     if (activeWeatherTab === 'current') {
@@ -947,6 +966,7 @@ function renderWeatherDetailModal(details) {
                     <div class="weather-metric"><span>Wind</span><strong>${escapeHtml(current.windText)}</strong></div>
                     <div class="weather-metric"><span>Pressure</span><strong>${formatPlain(current.pressureInHg, ' inHg')}</strong></div>
                     <div class="weather-metric"><span>Visibility</span><strong>${formatPlain(current.visibilityMiles, ' mi')}</strong></div>
+                    <div class="weather-metric" style="background: rgba(255,255,255,0.03); border-color: rgba(132,155,175,0.1);"><span>Grid Temp (Map)</span><strong>${formatTemperature(gridFallback?.temperatureF)}</strong></div>
                 </div>
             </div>
             ${renderAlmanacView(almanac)}

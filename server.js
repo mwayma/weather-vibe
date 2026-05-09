@@ -312,8 +312,10 @@ function getGridTemperatureCacheKey(lat, lon) {
     return `${roundedLat},${roundedLon}`;
 }
 
-function pickBestNdfdTemperatureResult(results) {
-    return (results || [])
+const NDFD_TEMP_IMAGE_LAYER_IDS = [8, 12, 16, 20, 24, 28, 32, 36, 40, 49, 90];
+
+function pickBestNdfdResults(results) {
+    const parsed = (results || [])
         .map(result => {
             const attrs = result.attributes || {};
             const value = Number(attrs['Service Pixel Value'] ?? attrs['Classify.Pixel Value']);
@@ -321,14 +323,23 @@ function pickBestNdfdTemperatureResult(results) {
             return {
                 value,
                 layerId: result.layerId,
-                forecastHour: Number.isFinite(forecastHour) ? forecastHour : Number.MAX_SAFE_INTEGER,
-                validTime: attrs.idp_validtime || null,
-                validEndTime: attrs.idp_validendtime || null,
-                issuedAt: attrs.idp_issueddate || null
+                forecastHour: Number.isFinite(forecastHour) ? forecastHour : 999
             };
         })
-        .filter(result => Number.isFinite(result.value))
-        .sort((a, b) => a.forecastHour - b.forecastHour || a.layerId - b.layerId)[0] || null;
+        .filter(r => Number.isFinite(r.value));
+
+    const tempResults = parsed.filter(r => [8, 12, 16, 20, 24, 28, 32, 36, 40].includes(r.layerId));
+    const bestTemp = tempResults.sort((a, b) => a.forecastHour - b.forecastHour)[0];
+    
+    // For RH and Apparent, we primarily want the 0hr (now) data
+    const bestRH = parsed.find(r => r.layerId === 90) || parsed.find(r => r.layerId === 94);
+    const bestApparent = parsed.find(r => r.layerId === 49) || parsed.find(r => r.layerId === 53);
+
+    return {
+        temp: bestTemp,
+        rh: bestRH,
+        apparent: bestApparent
+    };
 }
 
 async function fetchGridTemperature(item) {
@@ -366,18 +377,14 @@ async function fetchGridTemperature(item) {
                 }
             }, 10000);
             const data = await response.json();
-            const best = pickBestNdfdTemperatureResult(data.results);
-            if (!best) throw new Error('No NDFD temperature value returned');
+            const { temp, rh, apparent } = pickBestNdfdResults(data.results);
+            if (!temp) throw new Error('No NDFD temperature value returned');
 
             const sampled = {
                 source: 'NDFD',
-                temperatureF: Math.round(best.value),
-                rawTemperatureF: best.value,
-                layerId: best.layerId,
-                forecastHour: best.forecastHour,
-                validTime: best.validTime,
-                validEndTime: best.validEndTime,
-                issuedAt: best.issuedAt,
+                temperatureF: Math.round(temp.value),
+                humidity: rh ? Math.round(rh.value) : null,
+                apparentTempF: apparent ? Math.round(apparent.value) : null,
                 fetchedAt: Date.now()
             };
             gridTemperatureCache.set(cacheKey, sampled);
