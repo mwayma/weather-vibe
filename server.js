@@ -69,7 +69,7 @@ const GRID_TEMPERATURE_CONCURRENCY = Number(process.env.GRID_TEMPERATURE_CONCURR
 const GRID_TEMPERATURE_CELL_DEG = Number(process.env.GRID_TEMPERATURE_CELL_DEG) || 0.05;
 const NDFD_TEMP_IDENTIFY_URL = 'https://mapservices.weather.noaa.gov/raster/rest/services/NDFD/NDFD_temp/MapServer/identify';
 const NDFD_TEMP_EXPORT_URL = 'https://mapservices.weather.noaa.gov/raster/rest/services/NDFD/NDFD_temp/MapServer/export';
-const NDFD_TEMP_IMAGE_LAYER_IDS = [8, 12, 16, 20, 24, 28, 32, 36, 40];
+const NDFD_TEMP_IMAGE_LAYER_IDS = [8, 12, 16, 20, 24, 28, 32, 36, 40, 49, 90];
 
 // Auto-prime KLZK when tornado/severe thunderstorm watches or warnings affect its radar area.
 const AUTO_PRIME_STATION = 'KLZK';
@@ -311,8 +311,6 @@ function getGridTemperatureCacheKey(lat, lon) {
     if (roundedLat === null || roundedLon === null) return null;
     return `${roundedLat},${roundedLon}`;
 }
-
-const NDFD_TEMP_IMAGE_LAYER_IDS = [8, 12, 16, 20, 24, 28, 32, 36, 40, 49, 90];
 
 function pickBestNdfdResults(results) {
     const parsed = (results || [])
