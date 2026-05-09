@@ -353,6 +353,11 @@ async function fetchGridTemperature(item) {
             returnGeometry: 'false'
         });
 
+        // Use the same time context as our cached global map for consistency and better performance
+        if (temperatureMapCache.fetchedAt) {
+            params.set('time', String(temperatureMapCache.fetchedAt));
+        }
+
         try {
             const response = await fetchWithTimeout(`${NDFD_TEMP_IDENTIFY_URL}?${params}`, {
                 headers: {
