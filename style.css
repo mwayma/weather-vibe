@@ -851,6 +851,10 @@ body, html {
         background: rgba(255, 255, 255, 0.05);
     }
 
+    .forecast-item > *, .hourly-item > * {
+        grid-row: 1;
+    }
+
     .forecast-name, .hourly-time {
         grid-column: 1;
         min-height: 0;
@@ -1182,67 +1186,3 @@ body, html {
     padding: 20px 0;
 }
 
-@media (max-width: 720px) {
-    .weather-detail-grid {
-        grid-template-columns: 1fr;
-    }
-}
-
-/* Alert Popup Styles */
-.alert-popup {
-    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-    color: #333;
-}
-
-.alert-popup h3 {
-    margin-top: 0;
-    margin-bottom: 8px;
-    color: #cc0000;
-    font-size: 16px;
-    text-transform: uppercase;
-    border-bottom: 1px solid #ccc;
-    padding-bottom: 4px;
-}
-
-.alert-desc {
-    font-size: 12px;
-    line-height: 1.4;
-    margin-bottom: 10px;
-}
-
-.alert-inst {
-    font-size: 12px;
-    line-height: 1.4;
-    color: #cc0000;
-    background: #ffeeee;
-    padding: 5px;
-    border-left: 3px solid #cc0000;
-}
-
-/* Spectrum Legends */
-.spectrum-bar {
-    height: 15px;
-    width: 100%;
-    margin: 5px 0;
-    border-radius: 2px;
-}
-
-.reflectivity-spectrum {
-    background: linear-gradient(to right, #04e9e7, #019ff4, #0300f4, #02fd02, #01c501, #008e00, #fdf802, #e5bc00, #fd9500, #fd0000, #d40000, #bc0000, #f800fd, #9854c6, #fdfdfd);
-}
-
-.velocity-spectrum {
-    background: linear-gradient(to right, #00ffff, #00ccff, #0099ff, #00ff00, #00c000, #007000, #111111, #700000, #a00000, #ff0000, #ff9900, #ffff00);
-}
-
-.debris-spectrum {
-    background: linear-gradient(to right, #6a00ff, #0055ff, #00d5ff, #00ff00, #ffff00, #ff0000, #ffffff);
-}
-
-.zdr-spectrum {
-    background: linear-gradient(to right, #4d4d4d, #0066ff, #00ccff, #00ff00, #ffff00, #ff9900, #ff0000, #ff00ff, #ffffff);
-}
-
-.width-spectrum {
-    background: linear-gradient(to right, #4d4d4d, #0055ff, #00d5ff, #00ff00, #ffff00, #ff9900, #ff0000, #ff00ff);
-}

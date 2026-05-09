@@ -795,7 +795,11 @@ function setupWeatherDetailModal() {
 
     // Use document listener for buttons that might be in Leaflet popups (outside modal)
     document.addEventListener('click', (event) => {
-        const detailButton = event.target.closest('.city-detail-button');
+        let target = event.target;
+        if (target && target.nodeType === 3) target = target.parentNode;
+        if (!target || typeof target.closest !== 'function') return;
+
+        const detailButton = target.closest('.city-detail-button');
         if (detailButton) {
             const city = cityDetailLookup.get(detailButton.dataset.cityDetailKey);
             if (city) openWeatherDetailModal(city);
@@ -883,6 +887,15 @@ async function fetchWeatherDetails(city) {
 
     const weatherKey = getCityWeatherKey(city);
     const gridFallback = cityGridTemperatureCache[weatherKey] || null;
+    
+    const hourlyList = (hourlyData.properties?.periods || []).slice(0, 12);
+    hourlyList.forEach(period => {
+        const hour = new Date(period.startTime).getHours();
+        // NWS often returns night icons starting at 6 PM. Override if before 8 PM local.
+        if (hour >= 6 && hour < 20 && period.icon && period.icon.includes('/night/')) {
+            period.icon = period.icon.replace('/night/', '/day/');
+        }
+    });
 
     return {
         city,
@@ -891,7 +904,7 @@ async function fetchWeatherDetails(city) {
         gridFallback,
         current: normalizeCurrentObservation(obsData, stationId, gridFallback),
         dailyPeriods: (forecastData.properties?.periods || []).slice(0, 10),
-        hourlyPeriods: (hourlyData.properties?.periods || []).slice(0, 12),
+        hourlyPeriods: hourlyList,
         updatedAt: forecastData.properties?.updated || null
     };
 }
