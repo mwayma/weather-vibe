@@ -65,6 +65,8 @@ const NDFD_TEMP_IMAGE_LAYER_IDS = [8, 12, 16, 20, 24, 28, 32, 36, 40];
 // Auto-prime KLZK when tornado/severe thunderstorm watches or warnings affect its radar area.
 const AUTO_PRIME_STATION = 'KLZK';
 const AUTO_PRIME_RADIUS_KM = Number(process.env.AUTO_PRIME_RADIUS_KM) || 230;
+const AUTO_PRIME_STATE_FIPS = new Set((process.env.AUTO_PRIME_STATE_FIPS || '05').split(',').map(value => value.trim()).filter(Boolean));
+const AUTO_PRIME_POLL_INTERVAL_MS = Number(process.env.AUTO_PRIME_POLL_INTERVAL_MS) || 5000;
 const ALERT_POLL_INTERVAL_MS = 60 * 1000;
 const serverSubscriptions = new Set(); // Internal "virtual" subscriptions for auto-priming
 const STATE_POSTAL_FIPS = {
@@ -229,6 +231,7 @@ function buildRadarAreaCountyFips(stationId, radiusKm) {
         const state = feature.properties?.STATE;
         const county = feature.properties?.COUNTY;
         if (!state || !county) return;
+        if (AUTO_PRIME_STATE_FIPS.size && !AUTO_PRIME_STATE_FIPS.has(state)) return;
 
         const samples = getCountyCoordinateSamples(feature.geometry);
         const inRange = samples.some(sample => distanceKm(center, sample) <= radiusKm);
@@ -928,7 +931,7 @@ async function startAlertPoller() {
                         console.log(`[Auto-Prime] Activating background poller for ${stationId} due to tornado/severe thunderstorm watch/warning in radar area.`);
                         serverSubscriptions.add(stationId);
                         if (!activePollers.has(stationId)) {
-                            const poller = setInterval(() => pollChunks(stationId), 1000);
+                            const poller = setInterval(() => pollChunks(stationId), AUTO_PRIME_POLL_INTERVAL_MS);
                             activePollers.set(stationId, poller);
                             pollChunks(stationId);
                         }
