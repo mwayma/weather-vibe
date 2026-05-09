@@ -523,9 +523,25 @@ async function fetchCityWeather(city, marker) {
 
         const pointData = await fetchCityPointData(city);
         const stationId = await getNearestObservationStation(city, pointData);
-        const obsData = await fetchLatestStationObservation(stationId);
-        const current = normalizeCurrentObservation(obsData, stationId, gridFallback);
-        cityDetailLookup.set(weatherKey, { ...city, station: stationId, pointData, current });
+        
+        // Pre-fetch hourly forecast for highly accurate fallback data and instant modal loading
+        const [obsData, hourlyData] = await Promise.all([
+            fetchLatestStationObservation(stationId),
+            fetchJson(pointData.properties.forecastHourly)
+        ]);
+
+        const hourlyList = (hourlyData?.properties?.periods || []).slice(0, 12);
+        // Fix NWS API bug with 6 PM night icons
+        hourlyList.forEach(period => {
+            const hour = new Date(period.startTime).getHours();
+            if (hour >= 6 && hour < 20 && period.icon && period.icon.includes('/night/')) {
+                period.icon = period.icon.replace('/night/', '/day/');
+            }
+        });
+        const forecastFallback = hourlyList[0] || null;
+
+        const current = normalizeCurrentObservation(obsData, stationId, gridFallback, forecastFallback);
+        cityDetailLookup.set(weatherKey, { ...city, station: stationId, pointData, hourlyList, current });
         
         marker.setPopupContent(`
             <div class="city-weather-popup">
@@ -613,7 +629,7 @@ function calculateDewpoint(tempF, humidity) {
     return Math.round((dewpointC * 9 / 5) + 32);
 }
 
-function normalizeCurrentObservation(obsData, stationId, gridFallback = null) {
+function normalizeCurrentObservation(obsData, stationId, gridFallback = null, forecastFallback = null) {
     const props = obsData?.properties || {};
     const tempC = props.temperature?.value;
     const dewpointC = props.dewpoint?.value;
@@ -624,7 +640,20 @@ function normalizeCurrentObservation(obsData, stationId, gridFallback = null) {
         ? Math.round(props.relativeHumidity.value)
         : calculateRelativeHumidity(tempC, dewpointC);
 
-    // Apply grid fallbacks if station is missing data
+    // 1. Forecast Fallback (highly localized, great for missing station data)
+    if (forecastFallback) {
+        if (tempF === null && forecastFallback.temperature !== undefined) {
+            tempF = forecastFallback.temperature;
+        }
+        if (humidity === null && forecastFallback.relativeHumidity?.value !== undefined) {
+            humidity = Math.round(forecastFallback.relativeHumidity.value);
+        }
+        if (dewpointF === null && forecastFallback.dewpoint?.value !== undefined) {
+            dewpointF = cToF(forecastFallback.dewpoint.value);
+        }
+    }
+
+    // 2. Grid Fallbacks (if everything else fails)
     if (gridFallback) {
         if (tempF === null) tempF = gridFallback.temperatureF;
         if (humidity === null) humidity = gridFallback.humidity;
@@ -875,34 +904,47 @@ async function openWeatherDetailModal(city) {
 async function fetchWeatherDetails(city) {
     const pointData = city.pointData || await fetchCityPointData(city);
     city.pointData = pointData;
-    const stationId = await getNearestObservationStation(city, pointData);
+    const stationId = city.station || await getNearestObservationStation(city, pointData);
     
+    // Use pre-fetched hourly list if we clicked from the popup
+    const existingHourlyList = city.hourlyList || null;
+
     // Fetch weather and almanac in parallel
-    const [obsData, forecastData, hourlyData, almanac] = await Promise.all([
+    const fetches = [
         fetchLatestStationObservation(stationId),
         fetchJson(pointData.properties.forecast),
-        fetchJson(pointData.properties.forecastHourly),
         fetchAlmanacData(city.latitude, city.longitude)
-    ]);
+    ];
+    if (!existingHourlyList) {
+        fetches.push(fetchJson(pointData.properties.forecastHourly));
+    }
+
+    const results = await Promise.all(fetches);
+    const obsData = results[0];
+    const forecastData = results[1];
+    const almanac = results[2];
+    
+    let hourlyList = existingHourlyList;
+    if (!hourlyList) {
+        hourlyList = (results[3]?.properties?.periods || []).slice(0, 12);
+        hourlyList.forEach(period => {
+            const hour = new Date(period.startTime).getHours();
+            if (hour >= 6 && hour < 20 && period.icon && period.icon.includes('/night/')) {
+                period.icon = period.icon.replace('/night/', '/day/');
+            }
+        });
+    }
 
     const weatherKey = getCityWeatherKey(city);
     const gridFallback = cityGridTemperatureCache[weatherKey] || null;
-    
-    const hourlyList = (hourlyData.properties?.periods || []).slice(0, 12);
-    hourlyList.forEach(period => {
-        const hour = new Date(period.startTime).getHours();
-        // NWS often returns night icons starting at 6 PM. Override if before 8 PM local.
-        if (hour >= 6 && hour < 20 && period.icon && period.icon.includes('/night/')) {
-            period.icon = period.icon.replace('/night/', '/day/');
-        }
-    });
+    const forecastFallback = hourlyList[0] || null;
 
     return {
         city,
         stationId,
         almanac,
         gridFallback,
-        current: normalizeCurrentObservation(obsData, stationId, gridFallback),
+        current: normalizeCurrentObservation(obsData, stationId, gridFallback, forecastFallback),
         dailyPeriods: (forecastData.properties?.periods || []).slice(0, 10),
         hourlyPeriods: hourlyList,
         updatedAt: forecastData.properties?.updated || null
