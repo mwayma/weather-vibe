@@ -730,6 +730,8 @@ body, html {
     padding: 20px;
     overflow-y: auto;
     scrollbar-width: thin;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-y: contain;
 }
 
 /* Almanac Styles */
@@ -828,6 +830,56 @@ body, html {
     
     .weather-metric-grid {
         grid-template-columns: 1fr 1fr;
+    }
+
+    /* Switch to Vertical Rows on Mobile */
+    .forecast-list, .hourly-list {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        overflow-x: visible;
+    }
+
+    .forecast-item, .hourly-item {
+        display: grid;
+        grid-template-columns: 85px 40px 1fr 65px;
+        grid-template-rows: auto;
+        align-items: center;
+        text-align: left;
+        min-height: 0;
+        padding: 10px;
+        background: rgba(255, 255, 255, 0.05);
+    }
+
+    .forecast-name, .hourly-time {
+        grid-column: 1;
+        min-height: 0;
+        font-size: 0.85rem;
+        margin: 0;
+    }
+
+    .forecast-icon, .hourly-icon {
+        grid-column: 2;
+        height: 32px;
+        width: 32px;
+        justify-self: center;
+    }
+
+    .forecast-short, .hourly-precip {
+        grid-column: 3;
+        font-size: 0.8rem;
+        padding-left: 8px;
+        display: block;
+    }
+
+    .forecast-temp, .hourly-temp {
+        grid-column: 4;
+        font-size: 1.15rem;
+        justify-self: end;
+    }
+
+    .forecast-title, .hourly-wind {
+        display: none;
     }
 }
 
