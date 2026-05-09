@@ -210,6 +210,13 @@
         <div class="weather-modal-backdrop" data-close-weather-modal></div>
         <section class="weather-modal-panel" role="dialog" aria-modal="true" aria-labelledby="weather-modal-title">
             <button id="weather-modal-close" class="weather-modal-close" type="button" aria-label="Close weather details">&times;</button>
+            
+            <nav class="weather-modal-tabs" id="weather-modal-tabs">
+                <button class="modal-tab active" data-tab="current">Current</button>
+                <button class="modal-tab" data-tab="hourly">12 Hour</button>
+                <button class="modal-tab" data-tab="daily">5 Day</button>
+            </nav>
+
             <div id="weather-modal-content" class="weather-modal-content">
                 <h2 id="weather-modal-title">Weather Details</h2>
                 <div class="weather-modal-loading">Loading...</div>

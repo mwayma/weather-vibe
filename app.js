@@ -462,9 +462,9 @@ function updateVisibleCities() {
             east: bounds.getEast()
         },
         zoom: zoom,
-        minGapLat: 45 / Math.pow(2, zoom),
-        minGapLng: 75 / Math.pow(2, zoom),
-        maxCitiesOnScreen: zoom < 7 ? 12 : 25
+        minGapLat: 65 / Math.pow(2, zoom),
+        minGapLng: 105 / Math.pow(2, zoom),
+        maxCitiesOnScreen: 15
     };
 
     citiesWorker.postMessage({ type: 'update', data });
@@ -474,9 +474,11 @@ function renderVisibleCities(visibleMarkers) {
     cityLayer.clearLayers();
     const weatherRequests = [];
     
+    cityDetailLookup.clear();
     visibleMarkers.forEach(city => {
         let tempHtml = '';
         const weatherKey = getCityWeatherKey(city);
+        cityDetailLookup.set(weatherKey, city);
 
         if (currentRadarMode === 'temperature') {
             const cached = cityGridTemperatureCache[weatherKey];
@@ -758,12 +760,23 @@ function updateVisibleCityTemperature(weather) {
     });
 }
 
+let activeWeatherTab = 'current';
+let lastWeatherDetails = null;
+
 function setupWeatherDetailModal() {
-    document.addEventListener('click', (event) => {
+    const modal = document.getElementById('weather-detail-modal');
+    if (!modal) return;
+
+    modal.addEventListener('click', (event) => {
         const detailButton = event.target.closest('.city-detail-button');
         if (detailButton) {
             const city = cityDetailLookup.get(detailButton.dataset.cityDetailKey);
             if (city) openWeatherDetailModal(city);
+            return;
+        }
+
+        if (event.target.classList.contains('modal-tab')) {
+            switchWeatherTab(event.target.getAttribute('data-tab'));
             return;
         }
 
@@ -775,6 +788,19 @@ function setupWeatherDetailModal() {
     document.addEventListener('keydown', (event) => {
         if (event.key === 'Escape') closeWeatherDetailModal();
     });
+}
+
+function switchWeatherTab(tabId) {
+    activeWeatherTab = tabId;
+    const tabs = document.querySelectorAll('.modal-tab');
+    tabs.forEach(t => {
+        t.classList.toggle('active', t.getAttribute('data-tab') === tabId);
+    });
+
+    if (lastWeatherDetails) {
+        const content = document.getElementById('weather-modal-content');
+        content.innerHTML = renderWeatherDetailModal(lastWeatherDetails);
+    }
 }
 
 function closeWeatherDetailModal() {
@@ -789,20 +815,24 @@ async function openWeatherDetailModal(city) {
     const content = document.getElementById('weather-modal-content');
     if (!modal || !content) return;
 
+    activeWeatherTab = 'current';
+    const tabs = document.querySelectorAll('.modal-tab');
+    tabs.forEach(t => t.classList.toggle('active', t.getAttribute('data-tab') === 'current'));
+
     modal.classList.add('open');
     modal.setAttribute('aria-hidden', 'false');
     content.innerHTML = `
-        <h2 id="weather-modal-title">${escapeHtml(city.city)}, ${escapeHtml(city.state || '')}</h2>
-        <div class="weather-modal-loading">Loading forecast...</div>
+        <h2 id="weather-modal-title" style="margin-top: 40px">${escapeHtml(city.city)}, ${escapeHtml(city.state || '')}</h2>
+        <div class="weather-modal-loading">Loading local forecast...</div>
     `;
 
     try {
-        const details = await fetchWeatherDetails(city);
-        content.innerHTML = renderWeatherDetailModal(details);
+        lastWeatherDetails = await fetchWeatherDetails(city);
+        content.innerHTML = renderWeatherDetailModal(lastWeatherDetails);
     } catch (err) {
         console.error('Forecast detail error:', err);
         content.innerHTML = `
-            <h2 id="weather-modal-title">${escapeHtml(city.city)}, ${escapeHtml(city.state || '')}</h2>
+            <h2 id="weather-modal-title" style="margin-top: 40px">${escapeHtml(city.city)}, ${escapeHtml(city.state || '')}</h2>
             <div class="weather-modal-error">Detailed weather is unavailable right now.</div>
         `;
     }
@@ -812,15 +842,19 @@ async function fetchWeatherDetails(city) {
     const pointData = city.pointData || await fetchCityPointData(city);
     city.pointData = pointData;
     const stationId = await getNearestObservationStation(city, pointData);
-    const [obsData, forecastData, hourlyData] = await Promise.all([
+    
+    // Fetch weather and almanac in parallel
+    const [obsData, forecastData, hourlyData, almanac] = await Promise.all([
         fetchLatestStationObservation(stationId),
         fetchJson(pointData.properties.forecast),
-        fetchJson(pointData.properties.forecastHourly)
+        fetchJson(pointData.properties.forecastHourly),
+        fetchAlmanacData(city.latitude, city.longitude)
     ]);
 
     return {
         city,
         stationId,
+        almanac,
         current: normalizeCurrentObservation(obsData, stationId),
         dailyPeriods: (forecastData.properties?.periods || []).slice(0, 10),
         hourlyPeriods: (hourlyData.properties?.periods || []).slice(0, 12),
@@ -828,19 +862,52 @@ async function fetchWeatherDetails(city) {
     };
 }
 
+async function fetchAlmanacData(lat, lon) {
+    const today = new Date();
+    const tomorrow = new Date(today);
+    tomorrow.setDate(today.getDate() + 1);
+    const fmtDate = (d) => d.toISOString().split('T')[0];
+
+    try {
+        const [resToday, resTomorrow] = await Promise.all([
+            fetch(`https://api.sunrise-sunset.org/json?lat=${lat}&lng=${lon}&date=${fmtDate(today)}&formatted=0`).then(r => r.json()),
+            fetch(`https://api.sunrise-sunset.org/json?lat=${lat}&lng=${lon}&date=${fmtDate(tomorrow)}&formatted=0`).then(r => r.json())
+        ]);
+        return {
+            today: resToday.results,
+            tomorrow: resTomorrow.results,
+            moonPhase: getMoonPhase(today)
+        };
+    } catch (e) {
+        console.warn('Almanac fetch failed:', e);
+        return null;
+    }
+}
+
+function getMoonPhase(date) {
+    const phases = ["New Moon", "Waxing Crescent", "First Quarter", "Waxing Gibbous", "Full Moon", "Waning Gibbous", "Last Quarter", "Waning Crescent"];
+    const lp = 2551443;
+    const now = new Date(date.getTime());
+    const new_moon = new Date(1970, 0, 7, 20, 35, 0);
+    const phase = ((now.getTime() - new_moon.getTime()) / 1000) % lp;
+    const res = Math.floor((phase / lp) * 8);
+    return phases[res % 8];
+}
+
 function renderWeatherDetailModal(details) {
-    const { city, stationId, current, dailyPeriods, hourlyPeriods } = details;
-    const leadPeriod = hourlyPeriods[0] || dailyPeriods[0] || {};
-    return `
-        <div class="weather-broadcast-header">
-            <div>
-                <h2 id="weather-modal-title">${escapeHtml(city.city)}, ${escapeHtml(city.state || '')}</h2>
-                <div class="weather-modal-subtitle">Station ${escapeHtml(stationId)}${current.observedAt ? ` &middot; Observed ${escapeHtml(formatDateTime(current.observedAt))}` : ''}</div>
+    const { city, stationId, current, dailyPeriods, hourlyPeriods, almanac } = details;
+    
+    if (activeWeatherTab === 'current') {
+        const leadPeriod = hourlyPeriods[0] || dailyPeriods[0] || {};
+        return `
+            <div class="weather-broadcast-header">
+                <div>
+                    <h2 id="weather-modal-title">${escapeHtml(city.city)}, ${escapeHtml(city.state || '')}</h2>
+                    <div class="weather-modal-subtitle">Station ${escapeHtml(stationId)}${current.observedAt ? ` &middot; Observed ${escapeHtml(formatDateTime(current.observedAt))}` : ''}</div>
+                </div>
+                <div class="weather-broadcast-badge">Local Forecast</div>
             </div>
-            <div class="weather-broadcast-badge">Local Forecast</div>
-        </div>
-        <div class="weather-detail-grid">
-            <section class="weather-current-panel">
+            <div class="weather-current-panel">
                 <div class="current-main">
                     ${renderForecastIcon(leadPeriod.icon, current.description, 'current-weather-icon')}
                     <div>
@@ -856,19 +923,62 @@ function renderWeatherDetailModal(details) {
                     <div class="weather-metric"><span>Pressure</span><strong>${formatPlain(current.pressureInHg, ' inHg')}</strong></div>
                     <div class="weather-metric"><span>Visibility</span><strong>${formatPlain(current.visibilityMiles, ' mi')}</strong></div>
                 </div>
-            </section>
-            <section class="weather-detail-section forecast-section">
-                <h3>5 Day Outlook</h3>
-                <div class="forecast-list">
-                    ${dailyPeriods.map(renderDailyForecastPeriod).join('')}
-                </div>
-            </section>
+            </div>
+            ${renderAlmanacView(almanac)}
+        `;
+    }
+
+    if (activeWeatherTab === 'hourly') {
+        return `
             <section class="weather-detail-section hourly-section">
-                <h3>Next 12 Hours</h3>
+                <h3 style="margin-top: 0">Next 12 Hours</h3>
                 <div class="hourly-list">
                     ${hourlyPeriods.map(renderHourlyForecastPeriod).join('')}
                 </div>
             </section>
+        `;
+    }
+
+    if (activeWeatherTab === 'daily') {
+        return `
+            <section class="weather-detail-section forecast-section">
+                <h3 style="margin-top: 0">5 Day Outlook</h3>
+                <div class="forecast-list">
+                    ${dailyPeriods.map(renderDailyForecastPeriod).join('')}
+                </div>
+            </section>
+        `;
+    }
+}
+
+function renderAlmanacView(almanac) {
+    if (!almanac) return '';
+    const formatTime = (iso) => {
+        if (!iso) return '--:--';
+        const d = new Date(iso);
+        return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    };
+
+    return `
+        <div class="almanac-section">
+            <div class="almanac-grid">
+                <div class="almanac-day">
+                    <h4>Today's Almanac</h4>
+                    <div class="almanac-metric"><span>Sunrise</span><strong>${formatTime(almanac.today.sunrise)}</strong></div>
+                    <div class="almanac-metric"><span>Sunset</span><strong>${formatTime(almanac.today.sunset)}</strong></div>
+                    <div class="almanac-metric"><span>Day Length</span><strong>${Math.floor(almanac.today.day_length / 3600)}h ${Math.floor((almanac.today.day_length % 3600) / 60)}m</strong></div>
+                </div>
+                <div class="almanac-day">
+                    <h4>Tomorrow</h4>
+                    <div class="almanac-metric"><span>Sunrise</span><strong>${formatTime(almanac.tomorrow.sunrise)}</strong></div>
+                    <div class="almanac-metric"><span>Sunset</span><strong>${formatTime(almanac.tomorrow.sunset)}</strong></div>
+                    <div class="almanac-metric"><span>Day Length</span><strong>${Math.floor(almanac.tomorrow.day_length / 3600)}h ${Math.floor((almanac.tomorrow.day_length % 3600) / 60)}m</strong></div>
+                </div>
+            </div>
+            <div class="moon-phase-box">
+                <div>Current Moon Phase</div>
+                <div class="moon-phase-value">${escapeHtml(almanac.moonPhase)}</div>
+            </div>
         </div>
     `;
 }
