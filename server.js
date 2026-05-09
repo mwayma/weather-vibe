@@ -35,8 +35,8 @@ const gridTemperatureInflight = new Map(); // rounded lat/lon -> Promise
 let temperatureMapCache = {
     buffer: null,
     fetchedAt: 0,
-    bbox: [[22, -127], [51, -65]], // [[latMin, lonMin], [latMax, lonMax]] for Leaflet ImageOverlay
-    esriBbox: '-14137571,2511525,-7235805,6621294' // [minX, minY, maxX, maxY] in EPSG:3857
+    bbox: [[24, -125], [50, -66]], // Tightened CONUS bounds for NDFD
+    esriBbox: '-13914936,2755034,-7347067,6446275' // [minX, minY, maxX, maxY] in EPSG:3857
 };
 
 const parser = new XMLParser();
@@ -975,10 +975,10 @@ async function updateTemperatureMap() {
         bbox: temperatureMapCache.esriBbox,
         bboxSR: '3857',
         imageSR: '3857',
-        size: '2048,1024',
+        size: '2048,1151', // Matches aspect ratio of the new bbox
         format: 'png32',
         transparent: 'true',
-        layers: 'show:0,1,5,8' // Explicitly show current temperature raster and its parents
+        layers: 'show:0,1,5,8' // Use full hierarchy to ensure mosaic rendering
     });
 
     try {
