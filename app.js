@@ -890,7 +890,16 @@ async function fetchAlmanacData(lat, lon) {
 }
 
 function getMoonPhase(date) {
-    const phases = ["New Moon", "Waxing Crescent", "First Quarter", "Waxing Gibbous", "Full Moon", "Waning Gibbous", "Last Quarter", "Waning Crescent"];
+    const phases = [
+        { name: "New Moon", icon: "🌑" },
+        { name: "Waxing Crescent", icon: "🌒" },
+        { name: "First Quarter", icon: "🌓" },
+        { name: "Waxing Gibbous", icon: "🌔" },
+        { name: "Full Moon", icon: "🌕" },
+        { name: "Waning Gibbous", icon: "🌖" },
+        { name: "Last Quarter", icon: "🌗" },
+        { name: "Waning Crescent", icon: "🌘" }
+    ];
     const lp = 2551443;
     const now = new Date(date.getTime());
     const new_moon = new Date(1970, 0, 7, 20, 35, 0);
@@ -992,8 +1001,9 @@ function renderAlmanacView(almanac) {
                 </div>
             </div>
             <div class="moon-phase-box">
+                <div class="moon-phase-visual" style="font-size: 2.5rem; margin-bottom: 5px;">${almanac.moonPhase.icon}</div>
                 <div>Current Moon Phase</div>
-                <div class="moon-phase-value">${escapeHtml(almanac.moonPhase)}</div>
+                <div class="moon-phase-value">${escapeHtml(almanac.moonPhase.name)}</div>
             </div>
         </div>
     `;
