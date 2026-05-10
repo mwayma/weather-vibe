@@ -126,44 +126,39 @@ body, html {
 
 .storm-feature-marker {
     align-items: center;
-    border: 2px solid #ffffff;
-    border-radius: 4px;
-    box-shadow: 0 2px 7px rgba(0, 0, 0, 0.55);
+    border: 1px solid rgba(255, 255, 255, 0.8);
+    border-radius: 50%;
+    box-shadow: 0 2px 5px rgba(0, 0, 0, 0.6);
     color: #07111a;
     display: flex;
-    font-size: 10px;
-    font-weight: 800;
-    height: 20px;
+    font-size: 14px;
+    height: 24px;
     justify-content: center;
-    letter-spacing: 0;
-    line-height: 1;
-    min-width: 38px;
-    padding: 0 3px;
-    text-shadow: none;
+    width: 24px;
     pointer-events: auto;
     transition: opacity 120ms ease, transform 120ms ease;
+    background: rgba(255, 255, 255, 0.9);
 }
 
 .storm-feature-marker span {
     display: block;
+    line-height: 1;
     pointer-events: none;
 }
 
 .storm-feature-core {
     background: #ffef3b;
-    border-color: #231f00;
+    border-color: #000;
 }
 
 .storm-feature-hail {
-    background: #f7f7f7;
+    background: #ffffff;
     border-color: #ffcc00;
-    color: #111;
 }
 
 .storm-feature-rotation {
     background: #ff4d4d;
     border-color: #ffffff;
-    color: #ffffff;
 }
 
 .storm-feature-marker.selected {

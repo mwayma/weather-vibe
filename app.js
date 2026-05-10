@@ -2197,9 +2197,9 @@ function getStormFeatureClass(kind) {
 }
 
 function getStormFeatureText(kind) {
-    if (kind === 'rotation') return '🔄 ROTATION';
-    if (kind === 'hail') return '🧊 HAIL';
-    return '⛈️ STORM CORE';
+    if (kind === 'rotation') return '🔄';
+    if (kind === 'hail') return '🧊';
+    return '⛈️';
 }
 
 function renderStormFeatures(features) {
@@ -2220,8 +2220,8 @@ function renderStormFeatures(features) {
             icon: L.divIcon({
                 className: `storm-feature-marker ${getStormFeatureClass(kind)}`,
                 html: `<span>${getStormFeatureText(kind)}</span>`,
-                iconSize: [110, 24],
-                iconAnchor: [55, 12]
+                iconSize: [24, 24],
+                iconAnchor: [12, 12]
             })
         }).addTo(stormFeaturesLayer);
 
