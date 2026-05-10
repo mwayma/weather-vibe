@@ -324,9 +324,9 @@ function pickBestNdfdResults(results) {
         })
         .filter(r => Number.isFinite(r.value));
 
-    const tempResult = parsed.find(r => r.layerId === 5 || r.layerId === 8);
-    const rhResult = parsed.find(r => r.layerId === 90);
-    const apparentResult = parsed.find(r => r.layerId === 49);
+    const tempResult = parsed.find(r => r.layerId === 12 || r.layerId === 8);
+    const rhResult = parsed.find(r => r.layerId === 94 || r.layerId === 90);
+    const apparentResult = parsed.find(r => r.layerId === 53 || r.layerId === 49);
 
     return {
         temp: tempResult,
@@ -350,7 +350,7 @@ async function fetchGridTemperature(item) {
             geometry: `${item.lon},${item.lat}`,
             geometryType: 'esriGeometryPoint',
             sr: '4326',
-            layers: 'all:5,90,49',
+            layers: 'all:12,94,53', // Working 3hr layers
             tolerance: '10',
             mapExtent: '-130,20,-60,53',
             imageDisplay: '1200,800,96',
@@ -359,8 +359,6 @@ async function fetchGridTemperature(item) {
 
         if (ndfdServiceTime) {
             params.set('time', String(ndfdServiceTime));
-        } else if (temperatureMapCache.fetchedAt) {
-            params.set('time', String(temperatureMapCache.fetchedAt));
         }
 
         try {
@@ -981,12 +979,21 @@ async function updateTemperatureMap() {
     console.log('[Temperature] Refreshing global CONUS map from NDFD...');
     
     try {
-        // First, get the current time extent for the service
-        const metaRes = await fetchWithTimeout(`${NDFD_TEMP_EXPORT_URL.replace('/export', '')}?f=json`, {}, 10000);
-        const meta = await metaRes.json();
-        if (meta.timeInfo?.timeExtent) {
-            ndfdServiceTime = meta.timeInfo.timeExtent[0];
-            console.log(`[Temperature] Service valid time: ${new Date(ndfdServiceTime).toISOString()}`);
+        const queryParams = new URLSearchParams({
+            where: "idp_subset='conus'",
+            outFields: 'idp_validtime',
+            resultRecordCount: '1',
+            f: 'json',
+            orderByFields: 'idp_validtime ASC'
+        });
+        
+        const timeRes = await fetchWithTimeout(`${NDFD_TEMP_EXPORT_URL.replace('/export', '/3/query')}?${queryParams}`, {}, 10000);
+        const timeData = await timeRes.json();
+        const earliestTime = timeData.features?.[0]?.attributes?.idp_validtime;
+        
+        if (earliestTime) {
+            ndfdServiceTime = earliestTime;
+            console.log(`[Temperature] Discovered valid time: ${new Date(ndfdServiceTime).toISOString()}`);
         }
 
         const params = new URLSearchParams({
@@ -997,7 +1004,7 @@ async function updateTemperatureMap() {
             size: '2048,1151',
             format: 'png32',
             transparent: 'true',
-            layers: 'show:0,1,5,8'
+            layers: 'show:0,9,12'
         });
         
         if (ndfdServiceTime) {
