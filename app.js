@@ -125,10 +125,10 @@ let radarReflectivity = L.tileLayer.wms('https://mesonet.agron.iastate.edu/cgi-b
 // Initialize radarVelocity as an empty layer group to prevent WMS errors before a station is selected
 let radarVelocity = L.layerGroup();
 
-// Initialize Temperature layer (Cached NDFD Map)
+// Initialize Temperature layer (Cached RTMA Map)
 let temperatureOverlay = L.imageOverlay('', [[22, -127], [51, -65]], {
     opacity: 0.5,
-    attribution: 'Temperature: NOAA NDFD (Cached)',
+    attribution: 'Temperature: NOAA RTMA (Cached)',
     interactive: false,
     zIndex: 200
 });

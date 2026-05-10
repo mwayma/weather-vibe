@@ -29,13 +29,13 @@ const pollingLocks = new Set(); // stationId set for locking
 const stationState = new Map(); // stationId -> { lastVolume, lastChunkKey, headerChunk }
 const stationCache = new Map(); // stationId -> liveRadarData object
 const stationHealth = new Map(); // stationId -> last feed_health payload
-const gridTemperatureCache = new Map(); // rounded lat/lon -> latest RTMA point sample
+const gridTemperatureCache = new Map(); // rounded lat/lon -> latest NDFD point sample
 const gridTemperatureInflight = new Map(); // rounded lat/lon -> Promise
 
 let temperatureMapCache = {
     buffer: null,
     fetchedAt: 0,
-    bbox: [[24, -125], [50, -66]], // Tightened CONUS bounds for RTMA
+    bbox: [[24, -125], [50, -66]], // Tightened CONUS bounds for NDFD
     esriBbox: '-13914936,2755034,-7347067,6446275' // [minX, minY, maxX, maxY] in EPSG:3857
 };
 
@@ -67,9 +67,9 @@ const TEMPERATURE_MAP_REFRESH_MS = 30 * 60 * 1000; // 30 mins
 const MAX_WEATHER_BATCH_SIZE = 50;
 const GRID_TEMPERATURE_CONCURRENCY = Number(process.env.GRID_TEMPERATURE_CONCURRENCY) || 10;
 const GRID_TEMPERATURE_CELL_DEG = Number(process.env.GRID_TEMPERATURE_CELL_DEG) || 0.05;
-const RTMA_TEMP_IDENTIFY_URL = 'https://mapservices.weather.noaa.gov/raster/rest/services/RTMA/RTMA/MapServer/identify';
-const RTMA_TEMP_EXPORT_URL = 'https://mapservices.weather.noaa.gov/raster/rest/services/RTMA/RTMA/MapServer/export';
-const RTMA_TEMP_IMAGE_LAYER_IDS = [0];
+const NDFD_TEMP_IDENTIFY_URL = 'https://mapservices.weather.noaa.gov/raster/rest/services/NDFD/NDFD_temp/MapServer/identify';
+const NDFD_TEMP_EXPORT_URL = 'https://mapservices.weather.noaa.gov/raster/rest/services/NDFD/NDFD_temp/MapServer/export';
+const NDFD_TEMP_IMAGE_LAYER_IDS = [5, 8, 90, 49]; // 0hr temp, its image, 0hr RH, 0hr apparent
 
 // Auto-prime KLZK when tornado/severe thunderstorm watches or warnings affect its radar area.
 const AUTO_PRIME_STATION = 'KLZK';
@@ -312,7 +312,7 @@ function getGridTemperatureCacheKey(lat, lon) {
     return `${roundedLat},${roundedLon}`;
 }
 
-function pickBestRtmaResults(results) {
+function pickBestNdfdResults(results) {
     const parsed = (results || [])
         .map(result => {
             const attrs = result.attributes || {};
@@ -324,12 +324,14 @@ function pickBestRtmaResults(results) {
         })
         .filter(r => Number.isFinite(r.value));
 
-    const tempResult = parsed.find(r => r.layerId === 0);
-    const rhResult = parsed.find(r => r.layerId === 7);
+    const tempResult = parsed.find(r => r.layerId === 5 || r.layerId === 8);
+    const rhResult = parsed.find(r => r.layerId === 90);
+    const apparentResult = parsed.find(r => r.layerId === 49);
 
     return {
         temp: tempResult,
-        rh: rhResult
+        rh: rhResult,
+        apparent: apparentResult
     };
 }
 
@@ -348,7 +350,7 @@ async function fetchGridTemperature(item) {
             geometry: `${item.lon},${item.lat}`,
             geometryType: 'esriGeometryPoint',
             sr: '4326',
-            layers: `all:${RTMA_TEMP_IMAGE_LAYER_IDS.join(',')}`,
+            layers: `all:${NDFD_TEMP_IMAGE_LAYER_IDS.join(',')}`,
             tolerance: '10',
             mapExtent: '-130,20,-60,53',
             imageDisplay: '1200,800,96',
@@ -361,20 +363,21 @@ async function fetchGridTemperature(item) {
         }
 
         try {
-            const response = await fetchWithTimeout(`${RTMA_TEMP_IDENTIFY_URL}?${params}`, {
+            const response = await fetchWithTimeout(`${NDFD_TEMP_IDENTIFY_URL}?${params}`, {
                 headers: {
                     Accept: 'application/json',
-                    'User-Agent': 'weathertest RTMA temperature labels'
+                    'User-Agent': 'weathertest NDFD temperature labels'
                 }
             }, 10000);
             const data = await response.json();
-            const { temp, rh } = pickBestRtmaResults(data.results);
-            if (!temp) throw new Error('No RTMA temperature value returned');
+            const { temp, rh, apparent } = pickBestNdfdResults(data.results);
+            if (!temp) throw new Error('No NDFD temperature value returned');
 
             const sampled = {
-                source: 'RTMA',
+                source: 'NDFD',
                 temperatureF: Math.round(temp.value),
                 humidity: rh ? Math.round(rh.value) : null,
+                apparentTempF: apparent ? Math.round(apparent.value) : null,
                 fetchedAt: Date.now()
             };
             gridTemperatureCache.set(cacheKey, sampled);
@@ -966,7 +969,7 @@ async function startAlertPoller() {
 }
 
 async function updateTemperatureMap() {
-    console.log('[Temperature] Refreshing global CONUS map from RTMA...');
+    console.log('[Temperature] Refreshing global CONUS map from NDFD...');
     const params = new URLSearchParams({
         f: 'image',
         bbox: temperatureMapCache.esriBbox,
@@ -975,12 +978,12 @@ async function updateTemperatureMap() {
         size: '2048,1151', // Matches aspect ratio of the new bbox
         format: 'png32',
         transparent: 'true',
-        layers: 'show:0' // RTMA temperature layer
+        layers: 'show:0,1,5,8' // NDFD 24hr group and 00hr layers
     });
 
     try {
-        const response = await fetchWithTimeout(`${RTMA_TEMP_EXPORT_URL}?${params}`, {
-            headers: { 'User-Agent': 'weathertest RTMA cache' }
+        const response = await fetchWithTimeout(`${NDFD_TEMP_EXPORT_URL}?${params}`, {
+            headers: { 'User-Agent': 'weathertest NDFD cache' }
         }, 30000);
         const buffer = await response.arrayBuffer();
         temperatureMapCache.buffer = Buffer.from(buffer);
