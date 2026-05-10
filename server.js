@@ -350,15 +350,16 @@ async function fetchGridTemperature(item) {
             geometry: `${item.lon},${item.lat}`,
             geometryType: 'esriGeometryPoint',
             sr: '4326',
-            layers: `all:${NDFD_TEMP_IMAGE_LAYER_IDS.join(',')}`,
+            layers: 'all:5,90,49',
             tolerance: '10',
             mapExtent: '-130,20,-60,53',
             imageDisplay: '1200,800,96',
             returnGeometry: 'false'
         });
 
-        // Use the same time context as our cached global map for consistency and better performance
-        if (temperatureMapCache.fetchedAt) {
+        if (ndfdServiceTime) {
+            params.set('time', String(ndfdServiceTime));
+        } else if (temperatureMapCache.fetchedAt) {
             params.set('time', String(temperatureMapCache.fetchedAt));
         }
 
@@ -371,17 +372,23 @@ async function fetchGridTemperature(item) {
             }, 10000);
             const data = await response.json();
             const { temp, rh, apparent } = pickBestNdfdResults(data.results);
-            if (!temp) throw new Error('No NDFD temperature value returned');
+            
+            if (!temp || temp.value === null || (typeof temp.value === 'string' && temp.value.toLowerCase() === 'nodata')) {
+                throw new Error('No valid NDFD temperature value returned');
+            }
 
             const sampled = {
                 source: 'NDFD',
                 temperatureF: Math.round(temp.value),
-                humidity: rh ? Math.round(rh.value) : null,
-                apparentTempF: apparent ? Math.round(apparent.value) : null,
+                humidity: rh && Number.isFinite(Number(rh.value)) ? Math.round(rh.value) : null,
+                apparentTempF: apparent && Number.isFinite(Number(apparent.value)) ? Math.round(apparent.value) : null,
                 fetchedAt: Date.now()
             };
             gridTemperatureCache.set(cacheKey, sampled);
             return sampled;
+        } catch (err) {
+            console.debug(`[GridTemp] Failed for ${item.lat},${item.lon}: ${err.message}`);
+            throw err;
         } finally {
             gridTemperatureInflight.delete(cacheKey);
         }
@@ -393,7 +400,7 @@ async function fetchGridTemperature(item) {
         return { ...item, ...(await request) };
     } catch (error) {
         if (cached) return { ...item, ...cached, stale: true };
-        return { ...item, error: classifyFetchError(error) };
+        return { ...item, error: 'unavailable' };
     }
 }
 
@@ -968,20 +975,35 @@ async function startAlertPoller() {
     poll();
 }
 
+let ndfdServiceTime = null;
+
 async function updateTemperatureMap() {
     console.log('[Temperature] Refreshing global CONUS map from NDFD...');
-    const params = new URLSearchParams({
-        f: 'image',
-        bbox: temperatureMapCache.esriBbox,
-        bboxSR: '3857',
-        imageSR: '3857',
-        size: '2048,1151', // Matches aspect ratio of the new bbox
-        format: 'png32',
-        transparent: 'true',
-        layers: 'show:0,1,5,8' // NDFD 24hr group and 00hr layers
-    });
-
+    
     try {
+        // First, get the current time extent for the service
+        const metaRes = await fetchWithTimeout(`${NDFD_TEMP_EXPORT_URL.replace('/export', '')}?f=json`, {}, 10000);
+        const meta = await metaRes.json();
+        if (meta.timeInfo?.timeExtent) {
+            ndfdServiceTime = meta.timeInfo.timeExtent[0];
+            console.log(`[Temperature] Service valid time: ${new Date(ndfdServiceTime).toISOString()}`);
+        }
+
+        const params = new URLSearchParams({
+            f: 'image',
+            bbox: temperatureMapCache.esriBbox,
+            bboxSR: '3857',
+            imageSR: '3857',
+            size: '2048,1151',
+            format: 'png32',
+            transparent: 'true',
+            layers: 'show:0,1,5,8'
+        });
+        
+        if (ndfdServiceTime) {
+            params.set('time', String(ndfdServiceTime));
+        }
+
         const response = await fetchWithTimeout(`${NDFD_TEMP_EXPORT_URL}?${params}`, {
             headers: { 'User-Agent': 'weathertest NDFD cache' }
         }, 30000);

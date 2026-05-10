@@ -142,8 +142,30 @@ let cityGridTemperatureTimer = null;
 let cityGridTemperatureQueueActive = false;
 let temperatureOverlayLoaded = false;
 const TEMP_LABEL_FETCH_DEFER_MS = 300; // Reduced defer since image overlay is faster
-const TEMP_LABEL_BATCH_SIZE = 8;
-const TEMP_LABEL_BATCH_SPACING_MS = 120;
+const TEMP_LABEL_BATCH_SIZE = 24;
+const TEMP_LABEL_BATCH_SPACING_MS = 80;
+
+const TEMP_COLOR_SCALE = [
+    { temp: -30, color: [160, 0, 200] },
+    { temp: -20, color: [60, 0, 160] },
+    { temp: -10, color: [0, 0, 210] },
+    { temp: 0, color: [0, 80, 240] },
+    { temp: 10, color: [0, 160, 240] },
+    { temp: 20, color: [0, 210, 250] },
+    { temp: 32, color: [0, 120, 0] },
+    { temp: 40, color: [0, 190, 0] },
+    { temp: 50, color: [140, 255, 0] },
+    { temp: 60, color: [255, 255, 0] },
+    { temp: 70, color: [255, 200, 0] },
+    { temp: 80, color: [255, 150, 0] },
+    { temp: 90, color: [255, 0, 0] },
+    { temp: 100, color: [200, 0, 0] },
+    { temp: 110, color: [120, 0, 0] }
+];
+
+let temperatureCanvas = document.createElement('canvas');
+let temperatureCtx = temperatureCanvas.getContext('2d', { willReadFrequently: true });
+let temperatureImage = new Image();
 
 async function refreshTemperatureOverlay() {
     try {
@@ -151,18 +173,57 @@ async function refreshTemperatureOverlay() {
         if (!res.ok) throw new Error('Failed to load temperature meta');
         temperatureMeta = await res.json();
         
-        // Update overlay with new image and bbox
         const imageUrl = `/api/temperature/map?t=${temperatureMeta.fetchedAt}`;
         temperatureOverlay.setUrl(imageUrl);
         if (temperatureMeta.bbox) {
             temperatureOverlay.setBounds(temperatureMeta.bbox);
         }
         
-        temperatureOverlayLoaded = true;
-        flushQueuedCityGridTemperatures();
+        // Also load into canvas for sampling
+        temperatureImage.crossOrigin = "Anonymous";
+        temperatureImage.onload = () => {
+            temperatureCanvas.width = temperatureImage.width;
+            temperatureCanvas.height = temperatureImage.height;
+            temperatureCtx.drawImage(temperatureImage, 0, 0);
+            temperatureOverlayLoaded = true;
+            console.log('Temperature sampling grid updated');
+            updateVisibleCities(); // Refresh labels with new data
+        };
+        temperatureImage.src = imageUrl;
+
     } catch (err) {
         console.error('Temperature overlay refresh failed:', err);
     }
+}
+
+function getTemperatureAt(lat, lon) {
+    if (!temperatureOverlayLoaded || !temperatureMeta?.bbox) return null;
+    
+    const [[minLat, minLon], [maxLat, maxLon]] = temperatureMeta.bbox;
+    if (lat < minLat || lat > maxLat || lon < minLon || lon > maxLon) return null;
+    
+    // Map lat/lon to canvas x/y
+    const x = Math.round((lon - minLon) / (maxLon - minLon) * temperatureCanvas.width);
+    const y = Math.round((maxLat - lat) / (maxLat - minLat) * temperatureCanvas.height);
+    
+    const pixel = temperatureCtx.getImageData(x, y, 1, 1).data;
+    if (pixel[3] === 0) return null; // Transparent/NoData
+    
+    // Find closest color in scale
+    let bestTemp = null;
+    let minDist = Infinity;
+    
+    for (const entry of TEMP_COLOR_SCALE) {
+        const dist = Math.pow(pixel[0] - entry.color[0], 2) + 
+                     Math.pow(pixel[1] - entry.color[1], 2) + 
+                     Math.pow(pixel[2] - entry.color[2], 2);
+        if (dist < minDist) {
+            minDist = dist;
+            bestTemp = entry.temp;
+        }
+    }
+    
+    return minDist < 3000 ? bestTemp : null; // Threshold to prevent garbage data
 }
 
 // Track the currently active radar layer to allow redraws
@@ -473,7 +534,7 @@ function updateVisibleCities() {
 function renderVisibleCities(visibleMarkers) {
     cityLayer.clearLayers();
     const weatherRequests = [];
-    
+
     cityDetailLookup.clear();
     visibleMarkers.forEach(city => {
         let tempHtml = '';
@@ -484,15 +545,21 @@ function renderVisibleCities(visibleMarkers) {
             const cached = cityGridTemperatureCache[weatherKey];
             if (cached && cached.temperatureF !== null && cached.temperatureF !== undefined) {
                 tempHtml = `<div class="city-temp-label" data-weather-key="${weatherKey}">${cached.temperatureF}&deg;</div>`;
-            } else if (cached?.error) {
-                tempHtml = `<div class="city-temp-label city-temp-unavailable" data-weather-key="${weatherKey}">--&deg;</div>`;
             } else {
-                tempHtml = `<div class="city-temp-label" data-weather-key="${weatherKey}">...</div>`;
-                weatherRequests.push(city);
+                // Try sampling from overlay first (FAST)
+                const sampled = getTemperatureAt(city.latitude, city.longitude);
+                if (sampled !== null) {
+                    cityGridTemperatureCache[weatherKey] = { temperatureF: sampled, source: 'sampled' };
+                    tempHtml = `<div class="city-temp-label" data-weather-key="${weatherKey}">${sampled}&deg;</div>`;
+                } else {
+                    tempHtml = `<div class="city-temp-label" data-weather-key="${weatherKey}">...</div>`;
+                    weatherRequests.push(city);
+                }
             }
         }
 
         const marker = L.marker(L.latLng(city.latitude, city.longitude), {
+
             pane: 'cityLabelPane',
             icon: L.divIcon({
                 className: 'city-label',
