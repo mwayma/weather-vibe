@@ -567,6 +567,49 @@ body, html {
     color: #00ccff;
 }
 
+.spectrum-bar {
+    height: 12px;
+    width: 100%;
+    border-radius: 2px;
+    margin-bottom: 4px;
+    border: 1px solid rgba(255,255,255,0.1);
+}
+
+.reflectivity-spectrum {
+    background: linear-gradient(to right, 
+        #04e9e7 0%, #019ff4 10%, #0300f4 20%, 
+        #02fd02 30%, #01c501 40%, #008e00 50%, 
+        #fdf802 60%, #e5bc00 70%, #fd9500 80%, 
+        #fd0000 90%, #d40000 95%, #bc0000 100%
+    );
+}
+
+.velocity-spectrum {
+    background: linear-gradient(to right, 
+        #00ffff 0%, #0099ff 20%, #00ff00 40%, #007000 48%, 
+        transparent 50%, 
+        #700000 52%, #ff0000 70%, #ffff00 100%
+    );
+}
+
+.debris-spectrum {
+    background: linear-gradient(to right, 
+        #6a00ff 0%, #0055ff 25%, #00d5ff 50%, #00ff00 75%, #ffff00 100%
+    );
+}
+
+.zdr-spectrum {
+    background: linear-gradient(to right, 
+        #4d4d4d 0%, #0066ff 20%, #00ff00 40%, #ffff00 60%, #ff0000 80%, #ff00ff 100%
+    );
+}
+
+.width-spectrum {
+    background: linear-gradient(to right, 
+        #4d4d4d 0%, #0055ff 25%, #00ff00 50%, #ffff00 75%, #ff0000 100%
+    );
+}
+
 .v-scale {
     display: flex;
     align-items: center;

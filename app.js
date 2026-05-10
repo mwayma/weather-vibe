@@ -552,7 +552,7 @@ async function fetchCityWeather(city, marker) {
                     <div>Feels like: <strong>${formatTemperature(current.feelsLikeF)}</strong></div>
                     <div>Humidity: <strong>${formatPercent(current.humidity)}</strong></div>
                     <div>Wind: <strong>${escapeHtml(current.windText)}</strong></div>
-                    <div style="margin-top: 4px; color: #888;">Grid Temp (Map): <strong>${formatTemperature(gridFallback?.temperatureF)}</strong></div>
+                    
                 </div>
                 <button class="city-detail-button" type="button" data-city-detail-key="${escapeHtml(weatherKey)}">Detailed forecast</button>
                 <small style="color: #666; margin-top: 5px; display: block;">Station: ${stationId}</small>
@@ -927,12 +927,6 @@ async function fetchWeatherDetails(city) {
     let hourlyList = existingHourlyList;
     if (!hourlyList) {
         hourlyList = (results[3]?.properties?.periods || []).slice(0, 12);
-        hourlyList.forEach(period => {
-            const hour = new Date(period.startTime).getHours();
-            if (hour >= 6 && hour < 20 && period.icon && period.icon.includes('/night/')) {
-                period.icon = period.icon.replace('/night/', '/day/');
-            }
-        });
     }
 
     const weatherKey = getCityWeatherKey(city);
@@ -992,12 +986,83 @@ function getMoonPhase(date) {
     return phases[res % 8];
 }
 
+function adjustIconForTime(icon, timeStr, almanac) {
+    if (!icon || !almanac || !almanac.today) return icon;
+    
+    const time = new Date(timeStr);
+    const dateStr = time.toISOString().split('T')[0];
+    const todayStr = new Date().toISOString().split('T')[0];
+    
+    let sunrise, sunset;
+    if (dateStr === todayStr) {
+        sunrise = new Date(almanac.today.sunrise);
+        sunset = new Date(almanac.today.sunset);
+    } else {
+        // Fallback to today if tomorrow isn't perfect, but ideally we use tomorrow for future dates
+        sunrise = new Date(almanac.tomorrow?.sunrise || almanac.today.sunrise);
+        sunset = new Date(almanac.tomorrow?.sunset || almanac.today.sunset);
+    }
+    
+    const isDay = time > sunrise && time < sunset;
+    if (isDay && icon.includes('/night/')) {
+        return icon.replace('/night/', '/day/');
+    } else if (!isDay && icon.includes('/day/')) {
+        return icon.replace('/day/', '/night/');
+    }
+    return icon;
+}
+
+function getNextHighLow(hourlyPeriods) {
+    if (!hourlyPeriods || hourlyPeriods.length === 0) return { nextHigh: null, nextLow: null };
+    
+    let nextHigh = null;
+    let nextLow = null;
+    
+    // Simplistic approach: find the first peak and first valley
+    for (let i = 1; i < hourlyPeriods.length - 1; i++) {
+        const prev = hourlyPeriods[i-1].temperature;
+        const curr = hourlyPeriods[i].temperature;
+        const next = hourlyPeriods[i+1].temperature;
+        
+        if (nextHigh === null && curr > prev && curr >= next) {
+            nextHigh = { temp: curr, time: hourlyPeriods[i].startTime };
+        }
+        if (nextLow === null && curr < prev && curr <= next) {
+            nextLow = { temp: curr, time: hourlyPeriods[i].startTime };
+        }
+        if (nextHigh && nextLow) break;
+    }
+    
+    // Fallback if no peak/valley found in the window
+    if (!nextHigh) {
+        const max = Math.max(...hourlyPeriods.map(p => p.temperature));
+        const p = hourlyPeriods.find(p => p.temperature === max);
+        nextHigh = { temp: p.temperature, time: p.startTime };
+    }
+    if (!nextLow) {
+        const min = Math.min(...hourlyPeriods.map(p => p.temperature));
+        const p = hourlyPeriods.find(p => p.temperature === min);
+        nextLow = { temp: p.temperature, time: p.startTime };
+    }
+    
+    return { nextHigh, nextLow };
+}
+
 function renderWeatherDetailModal(details) {
     const { city, stationId, current, dailyPeriods, hourlyPeriods, almanac, gridFallback } = details;
     const leadPeriod = hourlyPeriods[0] || dailyPeriods[0] || {};
-    const currentIcon = current.icon || leadPeriod.icon;
+    let currentIcon = current.icon || leadPeriod.icon;
+    
+    // Correct current icon based on actual sunrise/sunset
+    currentIcon = adjustIconForTime(currentIcon, new Date().toISOString(), almanac);
 
     if (activeWeatherTab === 'current') {
+        const { nextHigh, nextLow } = getNextHighLow(hourlyPeriods);
+        const todayHighLow = dailyPeriods.length ? {
+            high: dailyPeriods[0].isDaytime ? dailyPeriods[0].temperature : dailyPeriods[1]?.temperature,
+            low: !dailyPeriods[0].isDaytime ? dailyPeriods[0].temperature : dailyPeriods[1]?.temperature
+        } : { high: null, low: null };
+
         return `
             <div class="weather-broadcast-header">
                 <div>
@@ -1013,15 +1078,19 @@ function renderWeatherDetailModal(details) {
                         <div class="current-temp">${formatTemperature(current.temperatureF)}</div>
                         <div class="current-condition">${escapeHtml(current.description)}</div>
                         <div class="current-feels">Feels Like ${formatTemperature(current.feelsLikeF)}</div>
+                        <div style="margin-top: 8px; font-size: 14px; color: #f6fbff;">
+                            <span style="color: #ff8888;">H: ${formatTemperature(todayHighLow.high)}</span> &nbsp; 
+                            <span style="color: #88ccff;">L: ${formatTemperature(todayHighLow.low)}</span>
+                        </div>
                     </div>
                 </div>
                 <div class="weather-metric-grid">
+                    <div class="weather-metric"><span>Next High</span><strong>${formatTemperature(nextHigh?.temp)} <small style="font-size: 10px; font-weight: normal; color: #849baf;">at ${formatHour(nextHigh?.time)}</small></strong></div>
+                    <div class="weather-metric"><span>Next Low</span><strong>${formatTemperature(nextLow?.temp)} <small style="font-size: 10px; font-weight: normal; color: #849baf;">at ${formatHour(nextLow?.time)}</small></strong></div>
                     <div class="weather-metric"><span>Humidity</span><strong>${formatPercent(current.humidity)}</strong></div>
                     <div class="weather-metric"><span>Dewpoint</span><strong>${formatTemperature(current.dewpointF)}</strong></div>
                     <div class="weather-metric"><span>Wind</span><strong>${escapeHtml(current.windText)}</strong></div>
                     <div class="weather-metric"><span>Pressure</span><strong>${formatPlain(current.pressureInHg, ' inHg')}</strong></div>
-                    <div class="weather-metric"><span>Visibility</span><strong>${formatPlain(current.visibilityMiles, ' mi')}</strong></div>
-                    <div class="weather-metric" style="background: rgba(255,255,255,0.03); border-color: rgba(132,155,175,0.1);"><span>Grid Temp (Map)</span><strong>${formatTemperature(gridFallback?.temperatureF)}</strong></div>
                 </div>
             </div>
             ${renderAlmanacView(almanac)}
@@ -1033,7 +1102,7 @@ function renderWeatherDetailModal(details) {
             <section class="weather-detail-section hourly-section">
                 <h3 style="margin-top: 0">Next 12 Hours</h3>
                 <div class="hourly-list">
-                    ${hourlyPeriods.map(renderHourlyForecastPeriod).join('')}
+                    ${hourlyPeriods.map(p => renderHourlyForecastPeriod(p, almanac)).join('')}
                 </div>
             </section>
         `;
@@ -1044,7 +1113,7 @@ function renderWeatherDetailModal(details) {
             <section class="weather-detail-section forecast-section">
                 <h3 style="margin-top: 0">5 Day Outlook</h3>
                 <div class="forecast-list">
-                    ${dailyPeriods.map(renderDailyForecastPeriod).join('')}
+                    ${dailyPeriods.map(p => renderDailyForecastPeriod(p, almanac)).join('')}
                 </div>
             </section>
         `;
@@ -1084,11 +1153,12 @@ function renderAlmanacView(almanac) {
     `;
 }
 
-function renderDailyForecastPeriod(period) {
+function renderDailyForecastPeriod(period, almanac) {
+    const icon = adjustIconForTime(period.icon, period.startTime, almanac);
     return `
         <div class="forecast-item">
             <div class="forecast-name">${escapeHtml(period.name || 'Forecast')}</div>
-            ${renderForecastIcon(period.icon, period.shortForecast, 'forecast-icon')}
+            ${renderForecastIcon(icon, period.shortForecast, 'forecast-icon')}
             <div class="forecast-temp">${formatPeriodTemperature(period)}</div>
             <div class="forecast-short">${escapeHtml(period.shortForecast || '')}</div>
             <div class="forecast-title">
@@ -1099,13 +1169,14 @@ function renderDailyForecastPeriod(period) {
     `;
 }
 
-function renderHourlyForecastPeriod(period) {
+function renderHourlyForecastPeriod(period, almanac) {
+    const icon = adjustIconForTime(period.icon, period.startTime, almanac);
     const precip = period.probabilityOfPrecipitation?.value;
     const precipText = precip !== null && precip !== undefined ? `${precip}%` : '--';
     return `
         <div class="hourly-item">
             <div class="hourly-time">${escapeHtml(formatHour(period.startTime))}</div>
-            ${renderForecastIcon(period.icon, period.shortForecast, 'hourly-icon')}
+            ${renderForecastIcon(icon, period.shortForecast, 'hourly-icon')}
             <div class="hourly-temp">${formatPeriodTemperature(period)}</div>
             <div class="hourly-precip">${escapeHtml(precipText)}</div>
             <div class="hourly-wind">${escapeHtml(period.windSpeed || '--')}</div>
@@ -2059,9 +2130,9 @@ function getStormFeatureClass(kind) {
 }
 
 function getStormFeatureText(kind) {
-    if (kind === 'rotation') return 'ROT';
-    if (kind === 'hail') return 'HAIL';
-    return 'CORE';
+    if (kind === 'rotation') return '🔄 ROTATION';
+    if (kind === 'hail') return '🧊 HAIL';
+    return '⛈️ STORM CORE';
 }
 
 function renderStormFeatures(features) {
@@ -2082,8 +2153,8 @@ function renderStormFeatures(features) {
             icon: L.divIcon({
                 className: `storm-feature-marker ${getStormFeatureClass(kind)}`,
                 html: `<span>${getStormFeatureText(kind)}</span>`,
-                iconSize: [42, 24],
-                iconAnchor: [21, 12]
+                iconSize: [110, 24],
+                iconAnchor: [55, 12]
             })
         }).addTo(stormFeaturesLayer);
 
