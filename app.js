@@ -146,22 +146,30 @@ const TEMP_LABEL_BATCH_SIZE = 24;
 const TEMP_LABEL_BATCH_SPACING_MS = 80;
 
 const TEMP_COLOR_SCALE = [
-    { temp: -30, color: [160, 0, 200] },
-    { temp: -20, color: [60, 0, 160] },
-    { temp: -10, color: [0, 0, 210] },
-    { temp: 0, color: [0, 80, 240] },
-    { temp: 10, color: [0, 160, 240] },
-    { temp: 20, color: [0, 210, 250] },
-    { temp: 32, color: [0, 120, 0] },
-    { temp: 40, color: [0, 190, 0] },
-    { temp: 50, color: [140, 255, 0] },
-    { temp: 60, color: [255, 255, 0] },
-    { temp: 70, color: [255, 200, 0] },
-    { temp: 80, color: [255, 150, 0] },
-    { temp: 90, color: [255, 0, 0] },
-    { temp: 100, color: [200, 0, 0] },
-    { temp: 110, color: [120, 0, 0] }
+    { temp: -30, color: [160, 0, 200] }, // Deep Purple
+    { temp: -20, color: [60, 0, 130] },  // Purple-Indigo
+    { temp: -10, color: [0, 0, 210] },   // Dark Blue
+    { temp: 0, color: [0, 80, 240] },    // Blue
+    { temp: 10, color: [0, 160, 240] },  // Light Blue
+    { temp: 20, color: [0, 210, 250] },  // Cyan
+    { temp: 32, color: [0, 210, 250] },  // Freezing (Cyan/Blue boundary)
+    { temp: 40, color: [0, 120, 0] },    // Dark Green
+    { temp: 50, color: [0, 190, 0] },    // Green
+    { temp: 60, color: [140, 255, 0] },  // Lime
+    { temp: 65, color: [255, 255, 0] },  // Yellow
+    { temp: 75, color: [255, 200, 0] },  // Orange-Yellow
+    { temp: 85, color: [255, 150, 0] },  // Orange
+    { temp: 95, color: [255, 0, 0] },    // Red
+    { temp: 105, color: [200, 0, 0] },   // Dark Red
+    { temp: 115, color: [120, 0, 0] }    // Maroon
 ];
+
+function projectToWebMercator(lat, lon) {
+    const R = 6378137;
+    const x = lon * Math.PI / 180 * R;
+    const y = Math.log(Math.tan(Math.PI / 4 + lat * Math.PI / 360)) * R;
+    return { x, y };
+}
 
 let temperatureCanvas = document.createElement('canvas');
 let temperatureCtx = temperatureCanvas.getContext('2d', { willReadFrequently: true });
@@ -187,7 +195,20 @@ async function refreshTemperatureOverlay() {
             temperatureCtx.drawImage(temperatureImage, 0, 0);
             temperatureOverlayLoaded = true;
             console.log('Temperature sampling grid updated');
-            updateVisibleCities(); // Refresh labels with new data
+            
+            // Proactively sample all currently visible cities
+            // This is the "fast as possible" requirement
+            document.querySelectorAll('.city-temp-label').forEach(el => {
+                const key = el.dataset.weatherKey;
+                const city = cityDetailLookup.get(key);
+                if (city && (el.innerText === '...' || el.innerText === '--&deg;')) {
+                    const sampled = getTemperatureAt(city.latitude, city.longitude);
+                    if (sampled !== null) {
+                        cityGridTemperatureCache[key] = { temperatureF: sampled, source: 'sampled' };
+                        updateVisibleCityTemperature(cityGridTemperatureCache[key]);
+                    }
+                }
+            });
         };
         temperatureImage.src = imageUrl;
 
@@ -197,35 +218,41 @@ async function refreshTemperatureOverlay() {
 }
 
 function getTemperatureAt(lat, lon) {
-    if (!temperatureOverlayLoaded || !temperatureMeta?.bbox) return null;
-    
-    const [[minLat, minLon], [maxLat, maxLon]] = temperatureMeta.bbox;
-    if (lat < minLat || lat > maxLat || lon < minLon || lon > maxLon) return null;
-    
-    // Map lat/lon to canvas x/y
-    const x = Math.round((lon - minLon) / (maxLon - minLon) * temperatureCanvas.width);
-    const y = Math.round((maxLat - lat) / (maxLat - minLat) * temperatureCanvas.height);
-    
-    const pixel = temperatureCtx.getImageData(x, y, 1, 1).data;
-    if (pixel[3] === 0) return null; // Transparent/NoData
-    
-    // Find closest color in scale
-    let bestTemp = null;
-    let minDist = Infinity;
-    
-    for (const entry of TEMP_COLOR_SCALE) {
-        const dist = Math.pow(pixel[0] - entry.color[0], 2) + 
-                     Math.pow(pixel[1] - entry.color[1], 2) + 
-                     Math.pow(pixel[2] - entry.color[2], 2);
-        if (dist < minDist) {
-            minDist = dist;
-            bestTemp = entry.temp;
-        }
-    }
-    
-    return minDist < 3000 ? bestTemp : null; // Threshold to prevent garbage data
-}
+    if (!temperatureOverlayLoaded || !temperatureMeta?.esriBbox || !temperatureCanvas.width) return null;
 
+    // esriBbox: "minX,minY,maxX,maxY" in EPSG:3857
+    const [minX, minY, maxX, maxY] = temperatureMeta.esriBbox.split(',').map(Number);
+    const { x: projX, y: projY } = projectToWebMercator(lat, lon);
+
+    if (projX < minX || projX > maxX || projY < minY || projY > maxY) return null;
+
+    // Map projected coordinates to canvas pixel coordinates
+    const px = Math.floor((projX - minX) / (maxX - minX) * temperatureCanvas.width);
+    const py = Math.floor((maxY - projY) / (maxY - minY) * temperatureCanvas.height);
+
+    try {
+        const pixel = temperatureCtx.getImageData(px, py, 1, 1).data;
+        if (pixel[3] < 50) return null; // Transparent/Low alpha
+
+        // Find closest color in scale
+        let bestTemp = null;
+        let minDist = Infinity;
+
+        for (const entry of TEMP_COLOR_SCALE) {
+            const dist = Math.pow(pixel[0] - entry.color[0], 2) + 
+                         Math.pow(pixel[1] - entry.color[1], 2) + 
+                         Math.pow(pixel[2] - entry.color[2], 2);
+            if (dist < minDist) {
+                minDist = dist;
+                bestTemp = entry.temp;
+            }
+        }
+
+        return minDist < 5000 ? bestTemp : null; 
+    } catch (e) {
+        return null;
+    }
+}
 // Track the currently active radar layer to allow redraws
 let radarLayer = radarReflectivity;
 
