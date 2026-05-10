@@ -2206,7 +2206,13 @@ function renderStormFeatures(features) {
     stormFeaturesLayer.clearLayers();
     if (currentRadarMode !== 'live-tracking' || !liveStormSignalsVisible || !Array.isArray(features)) return;
 
-    features.forEach(feature => {
+    // Sort features so that 'rotation' is drawn last (on top), followed by 'hail', then 'core'.
+    const sortedFeatures = [...features].sort((a, b) => {
+        const order = { 'core': 0, 'hail': 1, 'rotation': 2 };
+        return (order[a.kind || 'core'] || 0) - (order[b.kind || 'core'] || 0);
+    });
+
+    sortedFeatures.forEach(feature => {
         if (!Number.isFinite(Number(feature.lat)) || !Number.isFinite(Number(feature.lon))) return;
         const kind = feature.kind || 'core';
 
