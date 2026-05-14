@@ -21,21 +21,7 @@ const BUCKET_URL = 'https://unidata-nexrad-level2-chunks.s3.amazonaws.com';
 app.use(cors());
 app.use(express.json({ limit: '256kb' }));
 app.use(compression());
-app.use(express.static(path.join(__dirname, '/'), {
-    setHeaders: (res, filePath) => {
-        // Versioned assets (app.js, style.css) are loaded with ?v=N in HTML,
-        // so we cache them for a day. Large data/*.json files change rarely
-        // and are big — also cache for a day with revalidation. The HTML
-        // shell stays uncached so the version bump always takes effect.
-        if (filePath.endsWith('index.html')) {
-            res.set('Cache-Control', 'no-cache');
-            return;
-        }
-        if (filePath.endsWith('.json') || filePath.endsWith('.js') || filePath.endsWith('.css')) {
-            res.set('Cache-Control', 'public, max-age=86400, must-revalidate');
-        }
-    }
-}));
+app.use(express.static(path.join(__dirname, '/')));
 
 const subscriptions = new Map();
 const activePollers = new Map();
@@ -1031,7 +1017,6 @@ async function updateTemperatureMap() {
         const buffer = await response.arrayBuffer();
         temperatureMapCache.buffer = Buffer.from(buffer);
         temperatureMapCache.fetchedAt = Date.now();
-        temperatureTileCache.clear();
         console.log(`[Temperature] Global map refreshed (${Math.round(temperatureMapCache.buffer.length / 1024)}KB)`);
     } catch (e) {
         console.error('[Temperature] Failed to refresh map:', e.message);
@@ -1054,80 +1039,6 @@ app.get('/api/temperature/meta', (req, res) => {
         bbox: temperatureMapCache.bbox,
         refreshIntervalMs: TEMPERATURE_MAP_REFRESH_MS
     });
-});
-
-// XYZ tile proxy for the NDFD temperature layer. Each tile is fetched from
-// ESRI's MapServer at exactly the Web Mercator bbox of {z/x/y}, so no client-
-// side resampling is needed and zooming stays sharp. Tiles are cached in
-// memory and keyed by the global map's fetchedAt so they invalidate together.
-const TILE_CACHE_MAX = 1500;
-const TEMP_TILE_ORIGIN_SHIFT = 20037508.342789244;
-const temperatureTileCache = new Map(); // key -> { buffer, fetchedAt }
-
-function tileBboxMeters(z, x, y) {
-    const tileSize = (2 * TEMP_TILE_ORIGIN_SHIFT) / Math.pow(2, z);
-    const minX = -TEMP_TILE_ORIGIN_SHIFT + x * tileSize;
-    const maxX = minX + tileSize;
-    const maxY = TEMP_TILE_ORIGIN_SHIFT - y * tileSize;
-    const minY = maxY - tileSize;
-    return `${minX},${minY},${maxX},${maxY}`;
-}
-
-app.get('/api/temperature/tile/:z/:x/:y.png', async (req, res) => {
-    const z = parseInt(req.params.z, 10);
-    const x = parseInt(req.params.x, 10);
-    const y = parseInt(req.params.y, 10);
-    if (!Number.isInteger(z) || !Number.isInteger(x) || !Number.isInteger(y) ||
-        z < 0 || z > 12 || x < 0 || y < 0 || x >= (1 << z) || y >= (1 << z)) {
-        res.status(400).send('bad tile coords');
-        return;
-    }
-
-    const fetchedAt = temperatureMapCache.fetchedAt || 0;
-    const key = `${z}/${x}/${y}@${fetchedAt}`;
-    const cached = temperatureTileCache.get(key);
-    if (cached) {
-        // refresh LRU position
-        temperatureTileCache.delete(key);
-        temperatureTileCache.set(key, cached);
-        res.set('Content-Type', 'image/png');
-        res.set('Cache-Control', 'public, max-age=1800');
-        res.send(cached.buffer);
-        return;
-    }
-
-    try {
-        const params = new URLSearchParams({
-            f: 'image',
-            bbox: tileBboxMeters(z, x, y),
-            bboxSR: '3857',
-            imageSR: '3857',
-            size: '256,256',
-            format: 'png32',
-            transparent: 'true',
-            layers: 'show:0,9,12'
-        });
-        if (ndfdServiceTime) params.set('time', String(ndfdServiceTime));
-
-        const response = await fetchWithTimeout(`${NDFD_TEMP_EXPORT_URL}?${params}`, {
-            headers: { 'User-Agent': 'weathertest NDFD tile' }
-        }, 15000);
-        if (!response.ok) throw new Error(`upstream ${response.status}`);
-        const buffer = Buffer.from(await response.arrayBuffer());
-
-        temperatureTileCache.set(key, { buffer, fetchedAt });
-        if (temperatureTileCache.size > TILE_CACHE_MAX) {
-            const oldestKey = temperatureTileCache.keys().next().value;
-            temperatureTileCache.delete(oldestKey);
-        }
-
-        res.set('Content-Type', 'image/png');
-        res.set('Cache-Control', 'public, max-age=1800');
-        res.send(buffer);
-    } catch (e) {
-        console.error('[Temperature] tile fetch failed:', z, x, y, e.message);
-        res.status(502).send('tile fetch failed');
-    }
 });
 
 app.post('/api/temperature-grid/batch', async (req, res) => {
