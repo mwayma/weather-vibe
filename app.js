@@ -5,9 +5,17 @@ const map = L.map('map', {
     maxZoom: 12,
     zoomControl: false,
     preferCanvas: true,
-    zoomSnap: 0.1,
-    zoomDelta: 0.1,
-    wheelPxPerZoomLevel: 200
+    // Smooth, butter-feel scroll zoom:
+    //  - zoomSnap: 0.25 keeps fractional zoom so animations don't snap-jump
+    //  - zoomDelta: 0.5 makes each wheel/keyboard tick produce a visible step
+    //  - wheelPxPerZoomLevel: 80 = ~one zoom level per modest scroll flick
+    //  - wheelDebounceTime: 0 removes the buffering pause before motion starts
+    //  - zoomAnimation: true keeps the animated transform between steps
+    zoomSnap: 0.25,
+    zoomDelta: 0.5,
+    wheelPxPerZoomLevel: 80,
+    wheelDebounceTime: 0,
+    zoomAnimation: true
 });
 
 // Add Map Scale
@@ -40,10 +48,39 @@ map.createPane('alertsPane');
 map.getPane('alertsPane').style.zIndex = 650;
 map.getPane('alertsPane').style.pointerEvents = 'none';
 
+// Hide the heavy vector panes during a zoom gesture. Their canvas redraw is
+// synchronous and blocks the animation frame; making them invisible lets
+// Leaflet's CSS-transform on the layers happen smoothly without us paying
+// the rasterization cost mid-zoom. We restore them on zoomend, when the
+// canvas redraw completes against the new zoom.
+const VECTOR_PANES_DURING_ZOOM = ['landPane', 'waterPane', 'boundaryPane'];
+function setVectorPanesVisibility(visible) {
+    for (const name of VECTOR_PANES_DURING_ZOOM) {
+        const pane = map.getPane(name);
+        if (!pane) continue;
+        pane.style.transition = visible ? 'opacity 80ms ease-out' : '';
+        pane.style.opacity = visible ? '1' : '0';
+    }
+}
+// Debounce restoration so rapid wheel-zoom doesn't flicker the panes on/off
+// between consecutive zoom steps.
+let vectorRestoreTimer = null;
+map.on('zoomstart', () => {
+    clearTimeout(vectorRestoreTimer);
+    setVectorPanesVisibility(false);
+});
+map.on('zoomend', () => {
+    clearTimeout(vectorRestoreTimer);
+    vectorRestoreTimer = setTimeout(() => setVectorPanesVisibility(true), 120);
+});
+
 // Canvas Renderers for better performance with large GeoJSON datasets
-const landRenderer = L.canvas({ pane: 'landPane', padding: 1.5 });
-const waterRenderer = L.canvas({ pane: 'waterPane', padding: 1.5 });
-const boundaryRenderer = L.canvas({ pane: 'boundaryPane', padding: 1.5 });
+// padding controls how much off-screen area the canvas rasterizes — bigger
+// values smooth panning but cost rasterization time on every zoom. 0.5 covers
+// a half-screen halo on each side, which is plenty for normal pan velocity.
+const landRenderer = L.canvas({ pane: 'landPane', padding: 0.5 });
+const waterRenderer = L.canvas({ pane: 'waterPane', padding: 0.5 });
+const boundaryRenderer = L.canvas({ pane: 'boundaryPane', padding: 0.5 });
 const alertsRenderer = L.svg({ pane: 'alertsPane' });
 
 // 1. Base Map Setup (Local GeoJSON) 
@@ -89,15 +126,18 @@ async function loadBaseMapData() {
         console.log(`Data loaded in ${Math.round(performance.now() - startTime)}ms`);
 
         // Initialize layers
-        landLayer = L.geoJSON(data.land, { style: landStyle, pane: 'landPane', renderer: landRenderer }).addTo(map);
-        
-        waterLayer = L.geoJSON(data.lakes, { style: waterStyle, pane: 'waterPane', renderer: waterRenderer });
+        // smoothFactor lets Leaflet skip near-collinear vertices at draw
+        // time — sub-pixel detail you'd never see anyway. Combined with the
+        // pre-simplified GeoJSON, this further cuts per-zoom rasterization.
+        landLayer = L.geoJSON(data.land, { style: landStyle, pane: 'landPane', renderer: landRenderer, smoothFactor: 1.5 }).addTo(map);
+
+        waterLayer = L.geoJSON(data.lakes, { style: waterStyle, pane: 'waterPane', renderer: waterRenderer, smoothFactor: 1.5 });
         if (document.getElementById('chk-water')?.checked !== false) waterLayer.addTo(map);
-        
-        riverLayer = L.geoJSON(data.rivers, { style: riverStyle, pane: 'waterPane', renderer: waterRenderer });
+
+        riverLayer = L.geoJSON(data.rivers, { style: riverStyle, pane: 'waterPane', renderer: waterRenderer, smoothFactor: 1.5 });
         if (document.getElementById('chk-rivers')?.checked !== false) riverLayer.addTo(map);
-        
-        statesLayer = L.geoJSON(data.states, { style: stateStyle, pane: 'boundaryPane', renderer: boundaryRenderer });
+
+        statesLayer = L.geoJSON(data.states, { style: stateStyle, pane: 'boundaryPane', renderer: boundaryRenderer, smoothFactor: 1.5 });
         if (document.getElementById('chk-states')?.checked !== false) statesLayer.addTo(map);
         
         initializeAppWithStations(data.nexrad);
@@ -119,18 +159,27 @@ let radarReflectivity = L.tileLayer.wms('https://mesonet.agron.iastate.edu/cgi-b
     format: 'image/png',
     transparent: true,
     opacity: 0.8,
-    attribution: 'Radar: IEM NEXRAD'
+    attribution: 'Radar: IEM NEXRAD',
+    keepBuffer: 4,
+    updateWhenZooming: false
 }).addTo(map);
 
 // Initialize radarVelocity as an empty layer group to prevent WMS errors before a station is selected
 let radarVelocity = L.layerGroup();
 
-// Initialize Temperature layer (Cached RTMA Map)
-let temperatureOverlay = L.imageOverlay('', [[22, -127], [51, -65]], {
+// Initialize Temperature layer (NDFD tiled). Each tile is rendered server-
+// side at the Web Mercator bbox of the requested z/x/y, so the layer stays
+// crisp at any zoom and the browser caches tiles for free.
+let temperatureOverlay = L.tileLayer('/api/temperature/tile/{z}/{x}/{y}.png', {
     opacity: 0.5,
-    attribution: 'Temperature: NOAA RTMA (Cached)',
-    interactive: false,
-    zIndex: 200
+    attribution: 'Temperature: NOAA NDFD',
+    minZoom: 3,
+    maxZoom: 10,
+    maxNativeZoom: 9,
+    zIndex: 200,
+    pane: 'overlayPane',
+    keepBuffer: 4,
+    updateWhenZooming: false
 });
 let temperatureMeta = null;
 
@@ -180,14 +229,21 @@ async function refreshTemperatureOverlay() {
         const res = await fetch('/api/temperature/meta');
         if (!res.ok) throw new Error('Failed to load temperature meta');
         temperatureMeta = await res.json();
-        
-        const imageUrl = `/api/temperature/map?t=${temperatureMeta.fetchedAt}`;
-        temperatureOverlay.setUrl(imageUrl);
-        if (temperatureMeta.bbox) {
-            temperatureOverlay.setBounds(temperatureMeta.bbox);
+
+        // Server hasn't fetched its first NDFD map yet — bail and let the next
+        // refresh cycle pick it up. Avoids the 404/400 burst on cold start.
+        if (!temperatureMeta.fetchedAt) {
+            setTimeout(refreshTemperatureOverlay, 5000);
+            return;
         }
-        
-        // Also load into canvas for sampling
+
+        const imageUrl = `/api/temperature/map?t=${temperatureMeta.fetchedAt}`;
+        // Force the tile layer to re-request all tiles when the upstream map
+        // refreshes. Setting the URL template re-drops cached tiles in Leaflet.
+        temperatureOverlay.setUrl(`/api/temperature/tile/{z}/{x}/{y}.png?t=${temperatureMeta.fetchedAt}`);
+
+        // Also load the global PNG into a hidden canvas for fast city-label
+        // sampling. This isn't displayed — it's just an in-memory color grid.
         temperatureImage.crossOrigin = "Anonymous";
         temperatureImage.onload = () => {
             temperatureCanvas.width = temperatureImage.width;
@@ -288,9 +344,11 @@ let lastScanTime = "";
 const roadsLayer = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}', {
     attribution: 'Roads &copy; Esri',
     opacity: 0.75,
-    pane: 'roadsPane'
+    pane: 'roadsPane',
+    keepBuffer: 4
 }).addTo(map);
 let isRoadsVisible = true;
+
 let areRoadsAboveRadar = true;
 
 function updateRoadLayerOrder() {
@@ -512,7 +570,7 @@ async function loadCountiesData() {
     const data = await res.json();
     countiesData = data;
     data.features.forEach(c => { countiesLookup[c.properties.STATE + c.properties.COUNTY] = c; });
-    countiesLayer = L.geoJSON(data, { style: countyStyle, pane: 'boundaryPane', renderer: boundaryRenderer });
+    countiesLayer = L.geoJSON(data, { style: countyStyle, pane: 'boundaryPane', renderer: boundaryRenderer, smoothFactor: 1.5 });
     if (document.getElementById('chk-counties')?.checked !== false) countiesLayer.addTo(map);
     if (typeof activeAlertData !== 'undefined' && activeAlertData) renderAlerts();
 }
@@ -3158,7 +3216,8 @@ function updateVelocityLayer() {
         const sectorId = station.id.length === 4 ? station.id.substring(1).toUpperCase() : station.id.toUpperCase();
         radarVelocity = L.tileLayer.wms(specificWmsUrl, {
             layers: 'single', sector: sectorId, prod: 'N0U', format: 'image/png',
-            transparent: true, opacity: 0.8, attribution: `Radar: ${station.id}`
+            transparent: true, opacity: 0.8, attribution: `Radar: ${station.id}`,
+            keepBuffer: 4, updateWhenZooming: false
         });
     }
 }
@@ -3167,7 +3226,8 @@ function updateReflectivityLayer() {
     if (map.hasLayer(radarReflectivity)) map.removeLayer(radarReflectivity);
     radarReflectivity = L.tileLayer.wms('https://mesonet.agron.iastate.edu/cgi-bin/wms/nexrad/n0q.cgi', {
         layers: 'nexrad-n0q', format: 'image/png', transparent: true, opacity: 0.8,
-        attribution: 'Radar: IEM NEXRAD'
+        attribution: 'Radar: IEM NEXRAD',
+        keepBuffer: 4, updateWhenZooming: false
     });
 }
 
@@ -3362,10 +3422,15 @@ const RadarCanvasLayer = L.Layer.extend({
         this._offscreenCtx = this._offscreenCanvas.getContext('2d');
         this._needsFullRedraw = true;
         this._geometryCache = new Map();
+        this._pendingResetHandle = null;
 
         this._reset();
     },
     onRemove: function(map) {
+        if (this._pendingResetHandle) {
+            cancelAnimationFrame(this._pendingResetHandle);
+            this._pendingResetHandle = null;
+        }
         if (this._container && this._container.parentNode) {
             this._container.parentNode.removeChild(this._container);
         }
@@ -3375,9 +3440,47 @@ const RadarCanvasLayer = L.Layer.extend({
     getEvents: function() {
         return {
             viewreset: this._reset,
-            moveend: this._reset,
-            zoomend: this._reset
+            moveend: this._scheduleReset,
+            zoomend: this._scheduleReset,
+            zoomanim: this._animateZoom
         };
+    },
+    // Defer the canvas re-rasterization until *after* the browser paints the
+    // post-zoom frame. Without this, _reset runs synchronously inside the
+    // zoomend handler — that's hundreds of trig + path operations on the main
+    // thread, blocking the next paint and producing a visible stutter at the
+    // tail of the zoom. By scheduling on rAF (or idle if available) we let
+    // the CSS-transformed canvas stay visible (slightly stretched) for one
+    // frame, then sharpen on the next.
+    _scheduleReset: function() {
+        if (this._pendingResetHandle) cancelAnimationFrame(this._pendingResetHandle);
+        this._pendingResetHandle = requestAnimationFrame(() => {
+            this._pendingResetHandle = null;
+            // Use idle time if the browser is willing, otherwise just go.
+            if (typeof requestIdleCallback === 'function') {
+                requestIdleCallback(() => this._reset(), { timeout: 80 });
+            } else {
+                this._reset();
+            }
+        });
+    },
+    // During a zoom gesture Leaflet doesn't fire moveend/zoomend until the
+    // animation finishes. Without this hook the canvas gets CSS-stretched and
+    // drifts off the basemap until zoomend triggers a re-rasterize. Instead
+    // we compute the transform that lines the existing canvas up with the
+    // basemap at the *target* zoom, so it slides+scales in lockstep. The full
+    // redraw still happens on zoomend.
+    _animateZoom: function(e) {
+        if (!this._map || !this._container) return;
+        const map = this._map;
+        const scale = map.getZoomScale(e.zoom, map.getZoom());
+        // Where the canvas's current top-left corner will land at the target zoom.
+        const newTopLeft = map._latLngToNewLayerPoint(
+            map.layerPointToLatLng(this._currentTopLeft || [0, 0]),
+            e.zoom,
+            e.center
+        );
+        L.DomUtil.setTransform(this._container, newTopLeft, scale);
     },
     _reset: function() {
         if (!this._map) return;
@@ -3408,7 +3511,8 @@ const RadarCanvasLayer = L.Layer.extend({
         const stationPoint = this._map.latLngToLayerPoint([station.lat, station.lon]);
         const topLeft = this._map.containerPointToLayerPoint([0, 0]);
         L.DomUtil.setPosition(this._container, topLeft);
-        
+        this._currentTopLeft = topLeft;
+
         this._centerOffset = stationPoint.subtract(topLeft);
         this._needsFullRedraw = true;
         this._draw();
