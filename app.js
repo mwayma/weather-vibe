@@ -1080,9 +1080,24 @@ function getMoonPhase(date) {
     return phases[res % 8];
 }
 
-function adjustIconForTime(icon, timeStr, almanac) {
-    if (!icon || !almanac || !almanac.today) return icon;
+function adjustIconForTime(icon, period, almanac) {
+    if (!icon) return icon;
+
+    // Use isDaytime if provided (standard for forecast periods)
+    if (period && typeof period.isDaytime === 'boolean') {
+        const isDay = period.isDaytime;
+        if (isDay && icon.includes('/night/')) {
+            return icon.replace('/night/', '/day/');
+        } else if (!isDay && icon.includes('/day/')) {
+            return icon.replace('/day/', '/night/');
+        }
+        return icon;
+    }
+
+    // Fallback: Use almanac for periods without isDaytime (like current observation)
+    if (!almanac || !almanac.today) return icon;
     
+    const timeStr = period?.startTime || new Date().toISOString();
     const time = new Date(timeStr);
     const dateStr = time.toISOString().split('T')[0];
     const todayStr = new Date().toISOString().split('T')[0];
@@ -1148,7 +1163,7 @@ function renderWeatherDetailModal(details) {
     let currentIcon = current.icon || leadPeriod.icon;
     
     // Correct current icon based on actual sunrise/sunset
-    currentIcon = adjustIconForTime(currentIcon, new Date().toISOString(), almanac);
+    currentIcon = adjustIconForTime(currentIcon, leadPeriod, almanac);
 
     if (activeWeatherTab === 'current') {
         const { nextHigh, nextLow } = getNextHighLow(hourlyPeriods);
@@ -1248,7 +1263,7 @@ function renderAlmanacView(almanac) {
 }
 
 function renderDailyForecastPeriod(period, almanac) {
-    const icon = adjustIconForTime(period.icon, period.startTime, almanac);
+    const icon = adjustIconForTime(period.icon, period, almanac);
     return `
         <div class="forecast-item">
             <div class="forecast-name">${escapeHtml(period.name || 'Forecast')}</div>
@@ -1264,7 +1279,7 @@ function renderDailyForecastPeriod(period, almanac) {
 }
 
 function renderHourlyForecastPeriod(period, almanac) {
-    const icon = adjustIconForTime(period.icon, period.startTime, almanac);
+    const icon = adjustIconForTime(period.icon, period, almanac);
     const precip = period.probabilityOfPrecipitation?.value;
     const precipText = precip !== null && precip !== undefined ? `${precip}%` : '--';
     return `
