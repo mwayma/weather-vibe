@@ -3031,16 +3031,60 @@ function setupRadarButtons() {
     }
 
     if (mainControlsToggle && mainControlsContent) {
-        mainControlsToggle.addEventListener('click', () => {
+        // Initial state for mobile: start closed
+        if (window.innerWidth <= 768) {
+            mainControlsContent.style.display = 'none';
             const icon = mainControlsToggle.querySelector('span');
-            if (mainControlsContent.style.display === 'none') {
+            if (icon) icon.innerText = '▶';
+        }
+
+        const toggleControls = (force) => {
+            const icon = mainControlsToggle.querySelector('span');
+            const isHidden = mainControlsContent.style.display === 'none' || mainControlsContent.style.display === '';
+            const nextHidden = typeof force === 'boolean' ? !force : !isHidden;
+
+            if (!nextHidden) {
                 mainControlsContent.style.display = 'block';
                 if (icon) icon.innerText = '▼';
             } else {
                 mainControlsContent.style.display = 'none';
                 if (icon) icon.innerText = '▶';
             }
-        });
+        };
+
+        mainControlsToggle.addEventListener('click', () => toggleControls());
+
+        // Drag handle touch logic
+        const dragHandle = document.getElementById('drag-handle');
+        if (dragHandle) {
+            let startY = 0;
+            let currentY = 0;
+
+            dragHandle.addEventListener('touchstart', (e) => {
+                startY = e.touches[0].clientY;
+                currentY = startY;
+            }, { passive: true });
+
+            dragHandle.addEventListener('touchmove', (e) => {
+                currentY = e.touches[0].clientY;
+            }, { passive: true });
+
+            dragHandle.addEventListener('touchend', () => {
+                const diffY = currentY - startY;
+                const isHidden = mainControlsContent.style.display === 'none' || mainControlsContent.style.display === '';
+
+                if (Math.abs(diffY) < 10) {
+                    // It's a tap
+                    toggleControls();
+                } else if (diffY < -30 && isHidden) {
+                    // Swipe up while closed
+                    toggleControls(true);
+                } else if (diffY > 30 && !isHidden) {
+                    // Swipe down while open
+                    toggleControls(false);
+                }
+            });
+        }
     }
 
     // Legend Toggle

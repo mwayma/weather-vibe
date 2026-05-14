@@ -180,6 +180,10 @@ body, html {
     margin-top: 10px;
 }
 
+.drag-handle {
+    display: none;
+}
+
 .panel-toggle,
 .section-toggle {
     align-items: center;
@@ -424,14 +428,23 @@ body, html {
         scrollbar-width: thin;
     }
 
-    .control-panel::before {
+    .drag-handle {
         background: rgba(214, 232, 248, 0.36);
         border-radius: 999px;
-        content: "";
         display: block;
-        height: 4px;
-        margin: 0 auto 8px;
+        height: 5px;
+        margin: 0 auto 12px;
         width: 44px;
+        cursor: grab;
+        flex-shrink: 0;
+        touch-action: none; /* Prevent scrolling while dragging */
+        user-select: none;
+        -webkit-user-select: none;
+    }
+
+    .drag-handle:active {
+        cursor: grabbing;
+        background: rgba(214, 232, 248, 0.6);
     }
 
     .app-title-row {
