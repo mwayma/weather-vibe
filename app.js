@@ -625,13 +625,6 @@ async function fetchCityWeather(city, marker) {
         ]);
 
         const hourlyList = (hourlyData?.properties?.periods || []).slice(0, 12);
-        // Fix NWS API bug with 6 PM night icons
-        hourlyList.forEach(period => {
-            const hour = new Date(period.startTime).getHours();
-            if (hour >= 6 && hour < 20 && period.icon && period.icon.includes('/night/')) {
-                period.icon = period.icon.replace('/night/', '/day/');
-            }
-        });
         const forecastFallback = hourlyList[0] || null;
 
         const current = normalizeCurrentObservation(obsData, stationId, gridFallback, forecastFallback);
@@ -1083,9 +1076,23 @@ function getMoonPhase(date) {
 function adjustIconForTime(icon, period, almanac) {
     if (!icon) return icon;
 
-    // Use isDaytime if provided (standard for forecast periods)
-    if (period && typeof period.isDaytime === 'boolean') {
-        const isDay = period.isDaytime;
+    // Use almanac if available for the most accurate daylight determination
+    if (almanac && almanac.today) {
+        const timeStr = period?.startTime || new Date().toISOString();
+        const time = new Date(timeStr);
+        const dateStr = time.toISOString().split('T')[0];
+        const todayStr = new Date().toISOString().split('T')[0];
+        
+        let sunrise, sunset;
+        if (dateStr === todayStr) {
+            sunrise = new Date(almanac.today.sunrise);
+            sunset = new Date(almanac.today.sunset);
+        } else {
+            sunrise = new Date(almanac.tomorrow?.sunrise || almanac.today.sunrise);
+            sunset = new Date(almanac.tomorrow?.sunset || almanac.today.sunset);
+        }
+        
+        const isDay = time > sunrise && time < sunset;
         if (isDay && icon.includes('/night/')) {
             return icon.replace('/night/', '/day/');
         } else if (!isDay && icon.includes('/day/')) {
@@ -1094,30 +1101,16 @@ function adjustIconForTime(icon, period, almanac) {
         return icon;
     }
 
-    // Fallback: Use almanac for periods without isDaytime (like current observation)
-    if (!almanac || !almanac.today) return icon;
-    
-    const timeStr = period?.startTime || new Date().toISOString();
-    const time = new Date(timeStr);
-    const dateStr = time.toISOString().split('T')[0];
-    const todayStr = new Date().toISOString().split('T')[0];
-    
-    let sunrise, sunset;
-    if (dateStr === todayStr) {
-        sunrise = new Date(almanac.today.sunrise);
-        sunset = new Date(almanac.today.sunset);
-    } else {
-        // Fallback to today if tomorrow isn't perfect, but ideally we use tomorrow for future dates
-        sunrise = new Date(almanac.tomorrow?.sunrise || almanac.today.sunrise);
-        sunset = new Date(almanac.tomorrow?.sunset || almanac.today.sunset);
+    // Fallback: Use isDaytime if provided (standard for forecast periods)
+    if (period && typeof period.isDaytime === 'boolean') {
+        const isDay = period.isDaytime;
+        if (isDay && icon.includes('/night/')) {
+            return icon.replace('/night/', '/day/');
+        } else if (!isDay && icon.includes('/day/')) {
+            return icon.replace('/day/', '/night/');
+        }
     }
-    
-    const isDay = time > sunrise && time < sunset;
-    if (isDay && icon.includes('/night/')) {
-        return icon.replace('/night/', '/day/');
-    } else if (!isDay && icon.includes('/day/')) {
-        return icon.replace('/day/', '/night/');
-    }
+
     return icon;
 }
 
