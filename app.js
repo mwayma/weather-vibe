@@ -3058,48 +3058,61 @@ function setupRadarButtons() {
         if (dragHandle && header) {
             let startY = 0;
             let currentY = 0;
-            let initialOffset = 0;
+            let wasHidden = false;
+            let heightDiff = 0;
 
             dragHandle.addEventListener('touchstart', (e) => {
                 startY = e.touches[0].clientY;
+                currentY = startY;
                 header.style.transition = 'none';
-                // Calculate current visual offset if we were to support partial drags later, 
-                // but for now we just track from the current touch start.
-                initialOffset = 0; 
+                
+                wasHidden = mainControlsContent.style.display === 'none' || mainControlsContent.style.display === '';
+                if (wasHidden) {
+                    const oldHeight = header.offsetHeight;
+                    mainControlsContent.style.display = 'block';
+                    heightDiff = header.offsetHeight - oldHeight;
+                    header.style.transform = `translateY(${heightDiff}px)`;
+                } else {
+                    heightDiff = 0;
+                }
             }, { passive: true });
 
             dragHandle.addEventListener('touchmove', (e) => {
                 currentY = e.touches[0].clientY;
-                const diffY = currentY - startY;
-                const isHidden = mainControlsContent.style.display === 'none' || mainControlsContent.style.display === '';
+                const deltaY = currentY - startY;
                 
-                // Only allow dragging in directions that make sense
-                if (isHidden && diffY < 0) {
-                    // Pulling up from bottom
-                    header.style.transform = `translateY(${diffY}px)`;
-                } else if (!isHidden && diffY > 0) {
-                    // Pulling down from top
-                    header.style.transform = `translateY(${diffY}px)`;
+                if (wasHidden) {
+                    // Pulling up: start at heightDiff (bottom), decrease to 0 (top)
+                    const translate = Math.max(0, heightDiff + deltaY);
+                    header.style.transform = `translateY(${translate}px)`;
+                } else {
+                    // Pulling down: start at 0, increase
+                    const translate = Math.max(0, deltaY);
+                    header.style.transform = `translateY(${translate}px)`;
                 }
             }, { passive: true });
 
             dragHandle.addEventListener('touchend', () => {
-                const diffY = currentY - startY;
-                const isHidden = mainControlsContent.style.display === 'none' || mainControlsContent.style.display === '';
+                const deltaY = currentY - startY;
+                const isTap = Math.abs(deltaY) < 10;
+                
+                if (isTap) {
+                    toggleControls(!wasHidden);
+                    return;
+                }
 
-                if (Math.abs(diffY) < 10) {
-                    // It's a tap
-                    toggleControls();
-                } else if (diffY < -50 && isHidden) {
-                    // Sufficient pull up
-                    toggleControls(true);
-                } else if (diffY > 50 && !isHidden) {
-                    // Sufficient pull down
-                    toggleControls(false);
+                if (wasHidden) {
+                    if (deltaY < -50) {
+                        toggleControls(true);
+                    } else {
+                        toggleControls(false);
+                    }
                 } else {
-                    // Reset to current state
-                    header.style.transition = 'transform 0.3s ease';
-                    header.style.transform = '';
+                    if (deltaY > 50) {
+                        toggleControls(false);
+                    } else {
+                        toggleControls(true);
+                    }
                 }
             });
         }
