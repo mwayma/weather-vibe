@@ -2744,6 +2744,7 @@ function setupRadarButtons() {
     const weatherViewsContent = document.getElementById('weather-views-content');
     const mainControlsToggle = document.getElementById('main-controls-toggle');
     const mainControlsContent = document.getElementById('main-controls-content');
+    const header = document.getElementById('header');
 
     if (reflectivityBtn) {
         reflectivityBtn.addEventListener('click', (e) => {
@@ -3036,6 +3037,11 @@ function setupRadarButtons() {
             const isHidden = mainControlsContent.style.display === 'none' || mainControlsContent.style.display === '';
             const nextHidden = typeof force === 'boolean' ? !force : !isHidden;
 
+            if (header) {
+                header.style.transition = 'transform 0.3s cubic-bezier(0.2, 0.8, 0.2, 1)';
+                header.style.transform = '';
+            }
+
             if (!nextHidden) {
                 mainControlsContent.style.display = 'block';
                 if (icon) icon.innerText = '▼';
@@ -3049,17 +3055,32 @@ function setupRadarButtons() {
 
         // Drag handle touch logic
         const dragHandle = document.getElementById('drag-handle');
-        if (dragHandle) {
+        if (dragHandle && header) {
             let startY = 0;
             let currentY = 0;
+            let initialOffset = 0;
 
             dragHandle.addEventListener('touchstart', (e) => {
                 startY = e.touches[0].clientY;
-                currentY = startY;
+                header.style.transition = 'none';
+                // Calculate current visual offset if we were to support partial drags later, 
+                // but for now we just track from the current touch start.
+                initialOffset = 0; 
             }, { passive: true });
 
             dragHandle.addEventListener('touchmove', (e) => {
                 currentY = e.touches[0].clientY;
+                const diffY = currentY - startY;
+                const isHidden = mainControlsContent.style.display === 'none' || mainControlsContent.style.display === '';
+                
+                // Only allow dragging in directions that make sense
+                if (isHidden && diffY < 0) {
+                    // Pulling up from bottom
+                    header.style.transform = `translateY(${diffY}px)`;
+                } else if (!isHidden && diffY > 0) {
+                    // Pulling down from top
+                    header.style.transform = `translateY(${diffY}px)`;
+                }
             }, { passive: true });
 
             dragHandle.addEventListener('touchend', () => {
@@ -3069,12 +3090,16 @@ function setupRadarButtons() {
                 if (Math.abs(diffY) < 10) {
                     // It's a tap
                     toggleControls();
-                } else if (diffY < -30 && isHidden) {
-                    // Swipe up while closed
+                } else if (diffY < -50 && isHidden) {
+                    // Sufficient pull up
                     toggleControls(true);
-                } else if (diffY > 30 && !isHidden) {
-                    // Swipe down while open
+                } else if (diffY > 50 && !isHidden) {
+                    // Sufficient pull down
                     toggleControls(false);
+                } else {
+                    // Reset to current state
+                    header.style.transition = 'transform 0.3s ease';
+                    header.style.transform = '';
                 }
             });
         }
