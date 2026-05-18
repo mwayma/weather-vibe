@@ -1078,9 +1078,16 @@ function adjustIconForTime(icon, period, almanac) {
 
     // Use almanac if available for the most accurate daylight determination
     if (almanac && almanac.today) {
-        const timeStr = period?.startTime || new Date().toISOString();
-        const time = new Date(timeStr);
-        const dateStr = time.toISOString().split('T')[0];
+        const startTimeStr = period?.startTime || new Date().toISOString();
+        const startTime = new Date(startTimeStr);
+        
+        // Estimate the middle of the period for more representative daylight checking
+        // Daily periods are ~12h, hourly are 1h, current is 0h
+        const isDaily = !!period?.name;
+        const durationMs = period?.startTime ? (isDaily ? 12 : 1) * 3600000 : 0;
+        const checkTime = new Date(startTime.getTime() + durationMs / 2);
+        
+        const dateStr = checkTime.toISOString().split('T')[0];
         const todayStr = new Date().toISOString().split('T')[0];
         
         let sunrise, sunset;
@@ -1092,7 +1099,13 @@ function adjustIconForTime(icon, period, almanac) {
             sunset = new Date(almanac.tomorrow?.sunset || almanac.today.sunset);
         }
         
-        const isDay = time > sunrise && time < sunset;
+        // Use time-of-day comparison to handle proxy sunrise/sunset for future days
+        const getMinutes = (d) => d.getHours() * 60 + d.getMinutes();
+        const checkMin = getMinutes(checkTime);
+        const sunriseMin = getMinutes(sunrise);
+        const sunsetMin = getMinutes(sunset);
+        
+        const isDay = checkMin > sunriseMin && checkMin < sunsetMin;
         if (isDay && icon.includes('/night/')) {
             return icon.replace('/night/', '/day/');
         } else if (!isDay && icon.includes('/day/')) {
