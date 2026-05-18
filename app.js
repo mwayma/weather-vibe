@@ -778,6 +778,16 @@ function formatTemperature(value) {
     return value !== null && value !== undefined ? `${value}&deg;F` : '--&deg;F';
 }
 
+function estimateHailSize(dbz) {
+    if (!Number.isFinite(dbz) || dbz < 50) return null;
+    if (dbz >= 75) return '3.00"+ (Grapefruit+)';
+    if (dbz >= 70) return '2.50" (Tennis Ball)';
+    if (dbz >= 65) return '1.75" (Golf Ball)';
+    if (dbz >= 60) return '1.00" (Quarter)';
+    if (dbz >= 55) return '0.75" (Penny)';
+    return '0.25" (Pea)';
+}
+
 function formatPercent(value) {
     return value !== null && value !== undefined ? `${value}%` : '--';
 }
@@ -2300,7 +2310,13 @@ function renderStormFeatures(features) {
             `Confidence: ${Math.round((feature.confidence || 0) * 100)}%`,
             formatStormFeatureMotion(feature)
         ];
-        if (Number.isFinite(Number(evidence.maxDbz))) lines.push(`Max reflectivity: ${Math.round(evidence.maxDbz)} dBZ`);
+        if (Number.isFinite(Number(evidence.maxDbz))) {
+            lines.push(`Max reflectivity: ${Math.round(evidence.maxDbz)} dBZ`);
+            if (kind === 'hail') {
+                const hailSize = estimateHailSize(evidence.maxDbz);
+                if (hailSize) lines.push(`<strong>Estimated Max Size: ${hailSize}</strong>`);
+            }
+        }
         if (Number.isFinite(Number(evidence.velocityDelta))) lines.push(`Velocity couplet delta: ${Math.round(evidence.velocityDelta)}`);
         if (Number.isFinite(Number(evidence.rangeKm))) lines.push(`Range from radar: ${Math.round(evidence.rangeKm)} km`);
         if (evidence.reliability) lines.push(`Reliability: ${evidence.reliability}`);
