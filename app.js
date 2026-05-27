@@ -119,6 +119,7 @@ let radarReflectivity = L.tileLayer.wms('https://mesonet.agron.iastate.edu/cgi-b
     format: 'image/png',
     transparent: true,
     opacity: 0.8,
+    maxNativeZoom: 18,
     attribution: 'Radar: IEM NEXRAD'
 }).addTo(map);
 
@@ -288,6 +289,7 @@ let lastScanTime = "";
 const roadsLayer = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}', {
     attribution: 'Roads &copy; Esri',
     opacity: 0.75,
+    maxNativeZoom: 18,
     pane: 'roadsPane'
 }).addTo(map);
 let isRoadsVisible = true;
@@ -1486,6 +1488,7 @@ function checkRadarScan() {
                     transparent: true,
                     opacity: 0,
                     time: latest,
+                    maxNativeZoom: 18,
                     attribution: 'Radar: IEM NEXRAD'
                 }).addTo(map); 
                 
@@ -1523,9 +1526,11 @@ function preloadLoopLayers(timestamps) {
                 layers: 'nexrad-n0q-wmst',
                 format: 'image/png',
                 transparent: true,
-                opacity: 0, 
+                opacity: 0,
                 time: ts,
+                maxNativeZoom: 18,
                 attribution: 'Radar: IEM NEXRAD'
+
                 }).addTo(map);
                 loopLayers.push(layer);
             }, index * 250);
@@ -1557,9 +1562,11 @@ function toggleLoop() {
                         layers: 'nexrad-n0q-wmst',
                         format: 'image/png',
                         transparent: true,
-                        opacity: 0, 
+                        opacity: 0,
                         time: ts,
+                        maxNativeZoom: 18,
                         attribution: 'Radar: IEM NEXRAD'
+
                     });
                     
                     layer.on('load', function onLayerLoad() {
@@ -3218,7 +3225,7 @@ function updateVelocityLayer() {
         const sectorId = station.id.length === 4 ? station.id.substring(1).toUpperCase() : station.id.toUpperCase();
         radarVelocity = L.tileLayer.wms(specificWmsUrl, {
             layers: 'single', sector: sectorId, prod: 'N0U', format: 'image/png',
-            transparent: true, opacity: 0.8, attribution: `Radar: ${station.id}`
+            transparent: true, opacity: 0.8, maxNativeZoom: 18, attribution: `Radar: ${station.id}`
         });
     }
 }
@@ -3227,6 +3234,7 @@ function updateReflectivityLayer() {
     if (map.hasLayer(radarReflectivity)) map.removeLayer(radarReflectivity);
     radarReflectivity = L.tileLayer.wms('https://mesonet.agron.iastate.edu/cgi-bin/wms/nexrad/n0q.cgi', {
         layers: 'nexrad-n0q', format: 'image/png', transparent: true, opacity: 0.8,
+        maxNativeZoom: 18,
         attribution: 'Radar: IEM NEXRAD'
     });
 }
