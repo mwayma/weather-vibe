@@ -407,6 +407,53 @@ body, html {
     border: 1px solid rgba(132, 155, 175, 0.36);
 }
 
+.user-location-marker {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    background: none !important;
+    border: none !important;
+}
+
+.user-location-dot {
+    background-color: #037aff;
+    border: 2px solid white;
+    border-radius: 50%;
+    box-shadow: 0 0 10px rgba(3, 122, 255, 0.5);
+    height: 14px;
+    width: 14px;
+    min-width: 14px;
+    min-height: 14px;
+    box-sizing: border-box;
+    z-index: 2;
+    flex-shrink: 0;
+}
+
+.user-location-pulse {
+    position: absolute;
+    background-color: rgba(3, 122, 255, 0.4);
+    border-radius: 50%;
+    height: 14px;
+    width: 14px;
+    min-width: 14px;
+    min-height: 14px;
+    box-sizing: border-box;
+    animation: user-location-pulse 2s ease-out infinite;
+    z-index: 1;
+    flex-shrink: 0;
+}
+
+@keyframes user-location-pulse {
+    0% {
+        transform: scale(1);
+        opacity: 0.8;
+    }
+    100% {
+        transform: scale(4);
+        opacity: 0;
+    }
+}
+
 /* Mobile Responsiveness */
 @media (max-width: 768px) {
     #ui-overlay {

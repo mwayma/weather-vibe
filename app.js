@@ -3765,3 +3765,71 @@ function initializeAppWithStations(data) {
     setupLegendToggles();
     setupRadarButtons();
 }
+
+// User Location and Geolocation UI
+let userLocationMarker = null;
+
+function updateUserLocation(lat, lng) {
+    if (!userLocationMarker) {
+        const userIcon = L.divIcon({
+            className: 'user-location-marker',
+            html: '<div class="user-location-pulse"></div><div class="user-location-dot"></div>',
+            iconSize: [14, 14],
+            iconAnchor: [7, 7]
+        });
+        userLocationMarker = L.marker([lat, lng], { 
+            icon: userIcon,
+            zIndexOffset: 1000,
+            pane: 'popupPane'
+        }).addTo(map);
+    } else {
+        userLocationMarker.setLatLng([lat, lng]);
+    }
+}
+
+function initGeolocation(shouldSetView = true) {
+    console.log("Geolocation request initiated...");
+    if ("geolocation" in navigator) {
+        navigator.geolocation.getCurrentPosition(
+            (position) => {
+                const { latitude, longitude } = position.coords;
+                console.log(`Geolocation SUCCESS: ${latitude}, ${longitude}`);
+                updateUserLocation(latitude, longitude);
+                if (shouldSetView) {
+                    console.log("Centering map on user location.");
+                    map.setView([latitude, longitude], 9);
+                }
+            },
+            (error) => {
+                console.error(`Geolocation ERROR (${error.code}): ${error.message}`);
+                // Only alert on manual request if it fails
+                if (!shouldSetView && error.code === 1) {
+                    alert("Location access denied. Please enable location permissions in your browser.");
+                }
+            },
+            {
+                enableHighAccuracy: true,
+                timeout: 10000,
+                maximumAge: 60000
+            }
+        );
+    } else {
+        console.warn("Geolocation is not supported by this browser.");
+    }
+}
+
+// Setup Locate Me button
+const locateMeBtn = document.getElementById('btn-locate-me');
+if (locateMeBtn) {
+    locateMeBtn.addEventListener('click', () => {
+        initGeolocation(true);
+    });
+}
+
+// Auto-detect on load
+map.whenReady(() => {
+    // Small delay to ensure all initial layers and layout are settled
+    setTimeout(() => {
+        initGeolocation(true);
+    }, 1000);
+});
