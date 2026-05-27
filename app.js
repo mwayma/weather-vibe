@@ -3795,35 +3795,68 @@ function updateUserLocation(lat, lng) {
     }
 }
 
-function initGeolocation(shouldSetView = true) {
-    console.log("Geolocation request initiated...");
-    if ("geolocation" in navigator) {
-        navigator.geolocation.getCurrentPosition(
-            (position) => {
-                const { latitude, longitude } = position.coords;
-                console.log(`Geolocation SUCCESS: ${latitude}, ${longitude}`);
-                updateUserLocation(latitude, longitude);
-                if (shouldSetView) {
-                    console.log("Centering map on user location.");
-                    map.setView([latitude, longitude], 9);
-                }
-            },
-            (error) => {
-                console.error(`Geolocation ERROR (${error.code}): ${error.message}`);
-                // Only alert on manual request if it fails
-                if (!shouldSetView && error.code === 1) {
-                    alert("Location access denied. Please enable location permissions in your browser.");
-                }
-            },
-            {
-                enableHighAccuracy: true,
-                timeout: 10000,
-                maximumAge: 60000
-            }
-        );
-    } else {
-        console.warn("Geolocation is not supported by this browser.");
+function initGeolocation(isManual = false) {
+    console.log(`Geolocation requested (manual: ${isManual})...`);
+    if (!navigator.geolocation) {
+        if (isManual) alert("Geolocation is not supported by this browser.");
+        return;
     }
+
+    const highAccuracyOptions = {
+        enableHighAccuracy: true,
+        timeout: 12000,
+        maximumAge: isManual ? 0 : 60000
+    };
+
+    const lowAccuracyOptions = {
+        enableHighAccuracy: false,
+        timeout: 10000,
+        maximumAge: 60000
+    };
+
+    const handleSuccess = (position) => {
+        const { latitude, longitude } = position.coords;
+        console.log(`Geolocation SUCCESS: ${latitude}, ${longitude} (acc: ${position.coords.accuracy}m)`);
+        updateUserLocation(latitude, longitude);
+        
+        // Auto-center if manual or if we haven't moved from the default center yet
+        if (isManual) {
+            console.log("Centering map on user location.");
+            map.setView([latitude, longitude], 13);
+        } else {
+            // Check if we are still at the default Little Rock view
+            const center = map.getCenter();
+            if (Math.abs(center.lat - 34.7465) < 0.01 && Math.abs(center.lng - -92.2896) < 0.01) {
+                console.log("Initial auto-centering on user location.");
+                map.setView([latitude, longitude], 9);
+            }
+        }
+    };
+
+    const handleError = (error) => {
+        console.error(`Geolocation ERROR (${error.code}): ${error.message}`);
+        
+        // If high accuracy failed/timed out and we haven't tried low accuracy yet
+        if (error.code !== 1 && highAccuracyOptions.enableHighAccuracy) {
+            console.log("High accuracy failed; falling back to low accuracy...");
+            navigator.geolocation.getCurrentPosition(handleSuccess, (err) => {
+                console.error(`Low accuracy Geolocation ERROR (${err.code}): ${err.message}`);
+                if (isManual) {
+                    alert("Unable to determine location. Please try again or check your signal.");
+                }
+            }, lowAccuracyOptions);
+            return;
+        }
+
+        if (isManual) {
+            let msg = "Could not detect location.";
+            if (error.code === 1) msg = "Location access denied. Please check your browser or system privacy settings.";
+            else if (error.code === 3) msg = "Location request timed out. Please try again or check your GPS signal.";
+            alert(msg);
+        }
+    };
+
+    navigator.geolocation.getCurrentPosition(handleSuccess, handleError, highAccuracyOptions);
 }
 
 // Setup Locate Me button
@@ -3836,8 +3869,7 @@ if (locateMeBtn) {
 
 // Auto-detect on load
 map.whenReady(() => {
-    // Small delay to ensure all initial layers and layout are settled
     setTimeout(() => {
-        initGeolocation(true);
-    }, 1000);
+        initGeolocation(false);
+    }, 2000);
 });
