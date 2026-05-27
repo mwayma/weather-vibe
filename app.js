@@ -2,7 +2,7 @@ const map = L.map('map', {
     center: [34.7465, -92.2896], // Center on Little Rock, AR
     zoom: 7,
     minZoom: 4,
-    maxZoom: 12,
+    maxZoom: 18,
     zoomControl: false,
     preferCanvas: true,
     zoomSnap: 0.1,
