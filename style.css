@@ -378,6 +378,27 @@ body, html {
     gap: 6px;
 }
 
+#legend-toggle-btn {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    background: rgba(8, 14, 20, 0.92);
+    color: white;
+    padding: 6px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+    z-index: 1002;
+    pointer-events: auto;
+    display: none; /* Only show on mobile */
+    border: 1px solid rgba(132, 155, 175, 0.36);
+    font-size: 10px;
+    font-weight: 700;
+}
+
+#legend-toggle-btn:hover {
+    background: rgba(30, 48, 62, 0.98);
+}
+
 #legend {
     position: absolute;
     top: 12px;
@@ -390,21 +411,6 @@ body, html {
     border-radius: 6px;
     max-width: 280px;
     transition: background-color 0.3s ease, border-color 0.3s ease, box-shadow 0.3s ease, opacity 0.3s ease;
-}
-
-#legend-toggle-btn {
-    position: absolute;
-    top: 12px;
-    right: 12px;
-    background: rgba(8, 14, 20, 0.92);
-    color: white;
-    padding: 8px;
-    border-radius: 5px;
-    cursor: pointer;
-    z-index: 1002;
-    pointer-events: auto;
-    display: none; /* Only show on mobile if needed or as a generic toggle */
-    border: 1px solid rgba(132, 155, 175, 0.36);
 }
 
 .user-location-marker {
@@ -624,19 +630,21 @@ body, html {
     }
 
     #legend-toggle-btn {
-        position: relative;
-        top: auto;
-        right: auto;
-        left: auto;
-        bottom: auto;
-        padding: 4px 10px;
+        position: static;
+        padding: 4px 8px;
         font-size: 9px;
-        background: rgba(8, 14, 20, 0.9);
-        box-shadow: 0 2px 6px rgba(0,0,0,0.5);
+        background: rgba(35, 166, 213, 0.2);
+        color: #8cc8ff;
+        border: 1px solid rgba(35, 166, 213, 0.4);
+        box-shadow: none;
+        z-index: auto;
         border-radius: 4px;
-        margin-bottom: 8px;
-        align-self: flex-start;
-        pointer-events: auto;
+        margin: 0;
+        display: block; /* Force visible inside app-title-row on mobile */
+    }
+
+    .app-title-row {
+        align-items: center;
     }
 
     /* Ensure modals are always above everything else */
