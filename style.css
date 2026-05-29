@@ -532,28 +532,116 @@ body, html {
     }
 
     #legend {
+        top: 12px;
+        right: 12px;
+        left: 12px;
+        bottom: auto;
+        max-height: 40vh;
+        overflow-y: auto;
+        font-size: 11px;
+        max-width: none;
+        padding: 10px;
+        border-radius: 8px;
+        background: rgba(8, 14, 20, 0.94);
+        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+        border: 1px solid rgba(132, 155, 175, 0.4);
+    }
+
+    #legend {
+        position: relative;
         top: auto;
-        bottom: calc(52vh + 18px);
-        right: 8px;
-        left: 8px;
+        right: auto;
+        left: auto;
+        bottom: auto;
         max-height: 30vh;
         overflow-y: auto;
-        font-size: 10px;
+        font-size: 9px;
         max-width: none;
+        padding: 5px 8px;
+        border-radius: 6px;
+        background: rgba(8, 14, 20, 0.96);
+        box-shadow: 0 -4px 15px rgba(0, 0, 0, 0.5);
+        border: 1px solid rgba(132, 155, 175, 0.5);
+        margin-bottom: 6px;
+        order: -1; /* Place above the toggle button in the flex-end stack */
+    }
+
+    #reflectivity-legend {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 3px;
+        align-items: center;
+    }
+
+    #legend .legend-title {
+        width: 100%;
+        margin-top: 2px !important;
+        margin-bottom: 1px;
+        font-size: 7px;
+        text-transform: uppercase;
+        opacity: 0.6;
+        letter-spacing: 0.8px;
+    }
+
+    #legend .legend-title:first-child {
+        margin-top: 0 !important;
+    }
+
+    .legend-item {
+        margin-bottom: 0;
+        background: rgba(255, 255, 255, 0.04);
+        padding: 1px 4px;
+        border-radius: 3px;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        font-size: 8px;
+        flex: 0 1 auto;
+        display: none; /* JS will control visibility */
+        align-items: center;
+        height: 16px;
+    }
+
+    #legend-no-alerts, #legend-no-watches {
+        display: none !important;
+    }
+
+    .box {
+        width: 6px;
+        height: 6px;
+        margin-right: 3px;
+        border-width: 1px;
+        border-radius: 50%; /* Tiny dots */
+        flex-shrink: 0;
+    }
+
+    .spectrum-bar {
+        height: 5px;
+        margin-bottom: 2px;
+    }
+
+    .v-note {
+        font-size: 7px;
+        margin-top: 1px;
     }
 
     #legend-toggle-btn {
-        top: 8px;
-        right: 8px;
+        position: relative;
+        top: auto;
+        right: auto;
+        left: auto;
+        bottom: auto;
+        padding: 4px 10px;
+        font-size: 9px;
+        background: rgba(8, 14, 20, 0.9);
+        box-shadow: 0 2px 6px rgba(0,0,0,0.5);
+        border-radius: 4px;
+        margin-bottom: 8px;
+        align-self: flex-start;
+        pointer-events: auto;
     }
 
-    .legend-item, .v-scale {
-        font-size: 10px;
-    }
-
-    .box, .v-box {
-        width: 15px;
-        height: 15px;
+    /* Ensure modals are always above everything else */
+    .weather-modal {
+        z-index: 5000 !important;
     }
 
     #radar-controls button {
@@ -607,7 +695,9 @@ body, html {
 .thunderstorm-warning { background-color: rgba(255, 255, 0, 0.5); border-color: #ffff00; }
 .thunderstorm-watch { background-color: rgba(255, 102, 178, 0.5); border-color: #ff66b2; }
 .hurricane { background-color: rgba(128, 0, 128, 0.5); border-color: #800080; }
-.flood { background-color: rgba(0, 255, 0, 0.5); border-color: #00ff00; }
+.flash-flood-warning { background-color: rgba(139, 0, 0, 0.5); border-color: #8b0000; }
+.flood-warning { background-color: rgba(0, 255, 0, 0.5); border-color: #00ff00; }
+.flood-watch { background-color: rgba(46, 139, 87, 0.5); border-color: #2e8b57; }
 .marine { background-color: rgba(255, 0, 255, 0.5); border-color: #ff00ff; }
 .snow { background-color: rgba(0, 255, 255, 0.5); border-color: #00ffff; }
 .winter-watch { background-color: rgba(51, 153, 255, 0.5); border-color: #3399ff; }
@@ -760,7 +850,7 @@ body, html {
     display: none;
     inset: 0;
     position: fixed;
-    z-index: 2000;
+    z-index: 10000;
 }
 
 .weather-modal.open {
@@ -781,14 +871,14 @@ body, html {
     color: #f6fbff;
     left: 50%;
     max-height: min(92vh, 850px);
-    max-width: min(900px, calc(100vw - 20px));
-    overflow: hidden; /* Changed to hidden to let content handle scrolling */
+    max-width: min(860px, calc(100vw - 16px));
+    overflow: hidden;
     display: flex;
     flex-direction: column;
     position: absolute;
     top: 50%;
     transform: translate(-50%, -50%);
-    width: 860px;
+    width: 95%;
 }
 
 .weather-modal-tabs {
@@ -898,93 +988,6 @@ body, html {
     margin-top: 4px;
 }
 
-/* Mobile Responsive Adjustments */
-@media (max-width: 600px) {
-    .weather-modal-panel {
-        width: 100%;
-        max-width: 100%;
-        height: 100%;
-        max-height: 100vh;
-        border-radius: 0;
-        border: none;
-        top: 0;
-        left: 0;
-        transform: none;
-    }
-    
-    .weather-modal-close {
-        right: 8px;
-        top: 8px;
-    }
-
-    .weather-modal-tabs {
-        margin-top: 0;
-        padding-top: 5px;
-    }
-
-    .almanac-grid {
-        grid-template-columns: 1fr;
-    }
-    
-    .weather-metric-grid {
-        grid-template-columns: 1fr 1fr;
-    }
-
-    /* Switch to Vertical Rows on Mobile */
-    .forecast-list, .hourly-list {
-        display: flex;
-        flex-direction: column;
-        gap: 8px;
-        overflow-x: visible;
-    }
-
-    .forecast-item, .hourly-item {
-        display: grid;
-        grid-template-columns: 85px 40px 1fr 65px;
-        grid-template-rows: auto;
-        align-items: center;
-        text-align: left;
-        min-height: 0;
-        padding: 10px;
-        background: rgba(255, 255, 255, 0.05);
-    }
-
-    .forecast-item > *, .hourly-item > * {
-        grid-row: 1;
-    }
-
-    .forecast-name, .hourly-time {
-        grid-column: 1;
-        min-height: 0;
-        font-size: 0.85rem;
-        margin: 0;
-    }
-
-    .forecast-icon, .hourly-icon {
-        grid-column: 2;
-        height: 32px;
-        width: 32px;
-        justify-self: center;
-    }
-
-    .forecast-short, .hourly-precip {
-        grid-column: 3;
-        font-size: 0.8rem;
-        padding-left: 8px;
-        display: block;
-    }
-
-    .forecast-temp, .hourly-temp {
-        grid-column: 4;
-        font-size: 1.15rem;
-        justify-self: end;
-    }
-
-    .forecast-title, .hourly-wind {
-        display: none;
-    }
-}
-
 .weather-modal-panel::before {
     background: linear-gradient(90deg, #1266b0 0%, #23a6d5 44%, #f2c14e 100%);
     content: "";
@@ -1019,6 +1022,13 @@ body, html {
     margin-bottom: 14px;
 }
 
+@media (max-width: 600px) {
+    .weather-broadcast-header {
+        flex-direction: column;
+        gap: 8px;
+    }
+}
+
 .weather-modal-content h2 {
     font-size: 20px;
     margin: 0 46px 4px 0;
@@ -1027,6 +1037,32 @@ body, html {
 .weather-modal-subtitle {
     color: #9fb4c8;
     font-size: 12px;
+}
+
+/* Alert Popup Styles */
+.alert-popup {
+    color: #000;
+    max-width: 100%;
+}
+
+.alert-popup h3 {
+    margin: 0 0 5px 0;
+    font-size: 16px;
+    font-weight: 800;
+}
+
+.alert-desc, .alert-inst {
+    font-size: 13px;
+    line-height: 1.4;
+    margin-top: 8px;
+    white-space: pre-wrap;
+    word-break: break-word;
+    overflow-wrap: break-word;
+}
+
+.alert-inst {
+    border-top: 1px solid #ccc;
+    padding-top: 8px;
 }
 
 .weather-detail-grid {

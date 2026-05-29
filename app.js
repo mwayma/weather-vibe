@@ -319,7 +319,15 @@ function getAlertStyle(event) {
     if (ev.includes('hurricane') || ev.includes('tropical storm')) {
         return { color: '#800080', fillColor: '#800080', weight: 4, fillOpacity: 0.3 };
     }
-    if (ev.includes('flood')) return { color: '#00ff00', fillColor: '#00ff00', weight: 3, fillOpacity: 0.3 };
+    if (ev.includes('flood')) {
+        if (ev.includes('flash flood warning')) {
+            return { color: '#8b0000', fillColor: '#8b0000', weight: 4, fillOpacity: 0.4 };
+        }
+        if (isWatch) {
+            return { color: '#2e8b57', fillColor: '#2e8b57', weight: 3, fillOpacity: 0.2, dashArray: '6' };
+        }
+        return { color: '#00ff00', fillColor: '#00ff00', weight: 3, fillOpacity: 0.3 };
+    }
     if (ev.includes('marine') || ev.includes('gale')) return { color: '#ff00ff', fillColor: '#ff00ff', weight: 3, fillOpacity: 0.3 };
     
     if (ev.includes('snow') || ev.includes('blizzard') || ev.includes('winter') || ev.includes('ice') || ev.includes('freez')) {
@@ -342,6 +350,7 @@ function getAlertSeverity(event) {
     else if (ev.includes('winter') || ev.includes('freeze') || ev.includes('chill') || ev.includes('ice')) score = 50;
     else if (ev.includes('thunderstorm')) score = 60;
     else if (ev.includes('marine') || ev.includes('gale')) score = 60;
+    else if (ev.includes('flash flood warning')) score = 75;
     else if (ev.includes('flood')) score = 40;
     else score = 10;
 
@@ -369,7 +378,11 @@ function getAlertType(eventStr) {
     if (ev.includes('tornado')) return isWatch ? 'tornado-watch' : 'tornado-warning';
     if (ev.includes('thunderstorm')) return isWatch ? 'thunderstorm-watch' : 'thunderstorm-warning';
     if (ev.includes('hurricane') || ev.includes('tropical storm')) return 'hurricane';
-    if (ev.includes('flood')) return 'flood';
+    if (ev.includes('flood')) {
+        if (ev.includes('flash flood warning')) return 'flash-flood-warning';
+        if (isWatch) return 'flood-watch';
+        return 'flood-warning';
+    }
     if (ev.includes('marine') || ev.includes('gale')) return 'marine';
     if (ev.includes('snow') || ev.includes('blizzard') || ev.includes('winter') || ev.includes('ice') || ev.includes('freez')) return isWatch ? 'winter-watch' : 'snow';
     
@@ -385,7 +398,9 @@ function updateLegend() {
         'thunderstorm-warning': false,
         'thunderstorm-watch': false,
         'hurricane': false,
-        'flood': false,
+        'flash-flood-warning': false,
+        'flood-warning': false,
+        'flood-watch': false,
         'marine': false,
         'snow': false,
         'winter-watch': false,
@@ -414,12 +429,12 @@ function updateLegend() {
     Object.keys(types).forEach(type => {
         const legendEl = document.getElementById(`legend-${type}`);
         if (legendEl) {
-            legendEl.style.display = types[type] ? 'flex' : 'none';
+            legendEl.style.display = types[type] ? 'inline-flex' : 'none';
         }
     });
     
-    const anyWarnings = types['tornado-warning'] || types['thunderstorm-warning'] || types['hurricane'] || types['flood'] || types['marine'] || types['snow'] || types['other-warning'];
-    const anyWatches = types['tornado-watch'] || types['thunderstorm-watch'] || types['winter-watch'] || types['other-watch'];
+    const anyWarnings = types['tornado-warning'] || types['thunderstorm-warning'] || types['hurricane'] || types['flash-flood-warning'] || types['flood-warning'] || types['marine'] || types['snow'] || types['other-warning'];
+    const anyWatches = types['tornado-watch'] || types['thunderstorm-watch'] || types['flood-watch'] || types['winter-watch'] || types['other-watch'];
     
     const noAlerts = document.getElementById(`legend-no-alerts`);
     if (noAlerts) noAlerts.style.display = anyWarnings ? 'none' : 'flex';
@@ -480,13 +495,16 @@ function renderAlerts() {
                 popupContent += `<strong>${f.properties.headline}</strong><br><br>`;
             }
             if (f.properties.description) {
-                popupContent += `<div class="alert-desc">${f.properties.description.replace(/\n/g, '<br>')}</div>`;
+                popupContent += `<div class="alert-desc">${f.properties.description}</div>`;
             }
             if (f.properties.instruction) {
-                popupContent += `<strong>Instructions:</strong><div class="alert-inst">${f.properties.instruction.replace(/\n/g, '<br>')}</div>`;
+                popupContent += `<strong>Instructions:</strong><div class="alert-inst">${f.properties.instruction}</div>`;
             }
             popupContent += `</div>`;
-            layer.bindPopup(popupContent, { maxWidth: 400, maxHeight: 300 });
+            layer.bindPopup(popupContent, { 
+                maxWidth: Math.min(window.innerWidth - 70, 450), 
+                maxHeight: 400 
+            });
         }
     }).addTo(alertsLayer);
     
@@ -3787,8 +3805,7 @@ function updateUserLocation(lat, lng) {
         });
         userLocationMarker = L.marker([lat, lng], { 
             icon: userIcon,
-            zIndexOffset: 1000,
-            pane: 'popupPane'
+            pane: 'markerPane'
         }).addTo(map);
     } else {
         userLocationMarker.setLatLng([lat, lng]);
