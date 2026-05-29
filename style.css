@@ -483,10 +483,12 @@ body, html {
 
     .drag-handle {
         background: rgba(214, 232, 248, 0.36);
+        background-clip: content-box;
         border-radius: 999px;
         display: block;
         height: 5px;
-        margin: 0 auto 12px;
+        padding: 15px 20px; /* Massive invisible hit area for fingers */
+        margin: -10px auto 2px; /* Pull it up to compensate for padding */
         width: 44px;
         cursor: grab;
         flex-shrink: 0;
