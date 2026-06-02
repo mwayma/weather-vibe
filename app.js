@@ -736,6 +736,13 @@ function calculateDewpoint(tempF, humidity) {
     return Math.round((dewpointC * 9 / 5) + 32);
 }
 
+function degreesToCompass(degrees) {
+    if (degrees === null || degrees === undefined || isNaN(degrees)) return '';
+    const val = Math.floor((degrees / 45) + 0.5);
+    const directions = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+    return directions[val % 8];
+}
+
 function normalizeCurrentObservation(obsData, stationId, gridFallback = null, forecastFallback = null) {
     const props = obsData?.properties || {};
     const tempC = props.temperature?.value;
@@ -773,7 +780,7 @@ function normalizeCurrentObservation(obsData, stationId, gridFallback = null, fo
 
     const windMph = metersPerSecondToMph(props.windSpeed?.value);
     const gustMph = metersPerSecondToMph(props.windGust?.value);
-    const windDirection = Number.isFinite(props.windDirection?.value) ? `${Math.round(props.windDirection.value)} deg` : null;
+    const windDirection = Number.isFinite(props.windDirection?.value) ? degreesToCompass(props.windDirection.value) : null;
     const windParts = [];
     if (windDirection) windParts.push(windDirection);
     if (windMph !== null) windParts.push(`${windMph} mph`);
