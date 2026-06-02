@@ -1300,12 +1300,17 @@ function renderAlmanacView(almanac) {
 
 function renderDailyForecastPeriod(period, almanac) {
     const icon = adjustIconForTime(period.icon, period, almanac);
+    const precip = period.probabilityOfPrecipitation?.value;
+    const precipText = precip !== null && precip !== undefined ? `${precip}%` : '0%';
     return `
         <div class="forecast-item">
             <div class="forecast-name">${escapeHtml(period.name || 'Forecast')}</div>
             ${renderForecastIcon(icon, period.shortForecast, 'forecast-icon')}
             <div class="forecast-temp">${formatPeriodTemperature(period)}</div>
-            <div class="forecast-short">${escapeHtml(period.shortForecast || '')}</div>
+            <div class="forecast-short">
+                <div>${escapeHtml(period.shortForecast || '')}</div>
+                <div class="forecast-precip">Rain: ${escapeHtml(precipText)}</div>
+            </div>
             <div class="forecast-title">
                 <strong>Wind</strong>
                 <span>${escapeHtml(period.windSpeed || '--')} ${escapeHtml(period.windDirection || '')}</span>
@@ -1329,9 +1334,148 @@ function renderHourlyForecastPeriod(period, almanac) {
     `;
 }
 
-function renderForecastIcon(icon, alt, className) {
-    if (!icon) return `<div class="${className} weather-icon-fallback"></div>`;
-    return `<img class="${className}" src="${escapeHtml(icon)}" alt="${escapeHtml(alt || 'Forecast icon')}" loading="lazy">`;
+let svgIdCounter = 0;
+function renderForecastIcon(iconUrl, alt, className) {
+    if (!iconUrl) return `<div class="${className} weather-icon-fallback"></div>`;
+    
+    // Determine night vs day
+    const isNight = iconUrl && (iconUrl.includes('/night/') || iconUrl.includes('night'));
+    
+    // Normalize condition
+    let category = 'sunny'; // default
+    const text = (alt || '').toLowerCase();
+    const url = (iconUrl || '').toLowerCase();
+    
+    if (url.includes('tsra') || text.includes('thunderstorm') || text.includes('t-storm') || text.includes('lightning')) {
+        category = 'thunderstorm';
+    } else if (url.includes('rain') || url.includes('shra') || url.includes('drizzle') || url.includes('fzra') || url.includes('ip') || url.includes('sleet') || url.includes('showers') || url.includes('snow') || url.includes('flurries') ||
+               text.includes('rain') || text.includes('shower') || text.includes('drizzle') || text.includes('sleet') || text.includes('snow') || text.includes('flurry') || text.includes('flurries') || text.includes('sprinkle') || text.includes('precipitation')) {
+        category = 'rain';
+    } else if (url.includes('ovc') || url.includes('bkn') || url.includes('fog') || url.includes('haze') || url.includes('smoke') || url.includes('dust') ||
+               text.includes('mostly cloudy') || text.includes('cloudy') || text.includes('overcast') || text.includes('fog') || text.includes('haze') || text.includes('mist') || text.includes('smoke') || text.includes('dust')) {
+        category = 'cloudy';
+    } else if (url.includes('sct') || url.includes('few') || text.includes('partly') || text.includes('few') || text.includes('scattered') || text.includes('mostly sunny') || text.includes('mostly clear')) {
+        category = 'partly_cloudy';
+    } else {
+        category = 'sunny';
+    }
+
+    const uid = ++svgIdCounter;
+    
+    // Define Gradients HTML
+    const defs = `
+        <defs>
+            <linearGradient id="sun-grad-${uid}" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0%" stop-color="#FFD000"/>
+                <stop offset="100%" stop-color="#FF6A00"/>
+            </linearGradient>
+            <linearGradient id="moon-grad-${uid}" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0%" stop-color="#FFFDF0"/>
+                <stop offset="100%" stop-color="#F59E0B"/>
+            </linearGradient>
+            <linearGradient id="cloud-grad-${uid}" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0%" stop-color="#FFFFFF"/>
+                <stop offset="100%" stop-color="#CBD5E1"/>
+            </linearGradient>
+            <linearGradient id="back-cloud-grad-${uid}" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0%" stop-color="#94A3B8"/>
+                <stop offset="100%" stop-color="#475569"/>
+            </linearGradient>
+            <linearGradient id="lightning-grad-${uid}" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0%" stop-color="#FFE600"/>
+                <stop offset="100%" stop-color="#FF9900"/>
+            </linearGradient>
+        </defs>
+    `;
+
+    let svgContent = '';
+    
+    if (category === 'thunderstorm') {
+        svgContent = `
+            ${defs}
+            <!-- Cloud -->
+            <path d="M20 36 a9 9 0 0 1 -1.8 -17.8 a12.6 12.6 0 0 1 23.2 -4.1 a9.9 9.9 0 0 1 7.4 9.8 a9 9 0 0 1 -9 9 h-19.8 z" fill="url(#back-cloud-grad-${uid})" />
+            <!-- Rain Drops -->
+            <line x1="22" y1="42" x2="20" y2="48" stroke="#60A5FA" stroke-width="2.5" stroke-linecap="round" />
+            <line x1="42" y1="42" x2="40" y2="48" stroke="#60A5FA" stroke-width="2.5" stroke-linecap="round" />
+            <!-- Lightning -->
+            <path d="M32 32 L27 41 H33 L30 50 L39 39 H33 L36 32 Z" fill="url(#lightning-grad-${uid})" stroke="#FFD700" stroke-width="0.5" />
+        `;
+    } else if (category === 'rain') {
+        svgContent = `
+            ${defs}
+            <!-- Cloud -->
+            <path d="M20 38 a10 10 0 0 1 -2 -19.8 a14 14 0 0 1 25.8 -4.6 a11 11 0 0 1 8.2 10.9 a10 10 0 0 1 -10 10 h-22 z" fill="url(#cloud-grad-${uid})" />
+            <!-- Rain Drops -->
+            <line x1="22" y1="44" x2="20" y2="52" stroke="#3B82F6" stroke-width="3" stroke-linecap="round" />
+            <line x1="30" y1="46" x2="28" y2="54" stroke="#3B82F6" stroke-width="3" stroke-linecap="round" />
+            <line x1="38" y1="44" x2="36" y2="52" stroke="#3B82F6" stroke-width="3" stroke-linecap="round" />
+            <line x1="46" y1="46" x2="44" y2="54" stroke="#3B82F6" stroke-width="3" stroke-linecap="round" />
+        `;
+    } else if (category === 'cloudy') {
+        svgContent = `
+            ${defs}
+            <!-- Back Cloud -->
+            <g transform="translate(6, -4) scale(0.9)">
+                <path d="M20 44 a10 10 0 0 1 -2 -19.8 a14 14 0 0 1 25.8 -4.6 a11 11 0 0 1 8.2 10.9 a10 10 0 0 1 -10 10 h-22 z" fill="url(#back-cloud-grad-${uid})" />
+            </g>
+            <!-- Front Cloud -->
+            <path d="M16 46 a10 10 0 0 1 -2 -19.8 a14 14 0 0 1 25.8 -4.6 a11 11 0 0 1 8.2 10.9 a10 10 0 0 1 -10 10 h-22 z" fill="url(#cloud-grad-${uid})" />
+        `;
+    } else if (category === 'partly_cloudy') {
+        if (isNight) {
+            svgContent = `
+                ${defs}
+                <!-- Moon -->
+                <path d="M36 14 A 12 12 0 0 1 48 26 A 12 12 0 0 1 36 38 A 9 9 0 1 0 36 14 Z" fill="url(#moon-grad-${uid})" />
+                <!-- Cloud -->
+                <path d="M16 44 a9 9 0 0 1 -1.8 -17.8 a12.6 12.6 0 0 1 23.2 -4.1 a9.9 9.9 0 0 1 7.4 9.8 a9 9 0 0 1 -9 9 h-19.8 z" fill="url(#cloud-grad-${uid})" opacity="0.95" />
+            `;
+        } else {
+            svgContent = `
+                ${defs}
+                <!-- Sun -->
+                <circle cx="38" cy="22" r="10" fill="url(#sun-grad-${uid})" />
+                <!-- Sun Rays (4 diagonal ones) -->
+                <line x1="38" y1="8" x2="38" y2="4" stroke="url(#sun-grad-${uid})" stroke-width="2.5" stroke-linecap="round" />
+                <line x1="52" y1="22" x2="56" y2="22" stroke="url(#sun-grad-${uid})" stroke-width="2.5" stroke-linecap="round" />
+                <line x1="47.9" y1="12.1" x2="50.7" y2="9.3" stroke="url(#sun-grad-${uid})" stroke-width="2.5" stroke-linecap="round" />
+                <line x1="28.1" y1="12.1" x2="25.3" y2="9.3" stroke="url(#sun-grad-${uid})" stroke-width="2.5" stroke-linecap="round" />
+                <!-- Cloud -->
+                <path d="M16 44 a9 9 0 0 1 -1.8 -17.8 a12.6 12.6 0 0 1 23.2 -4.1 a9.9 9.9 0 0 1 7.4 9.8 a9 9 0 0 1 -9 9 h-19.8 z" fill="url(#cloud-grad-${uid})" />
+            `;
+        }
+    } else {
+        // Sunny / Clear
+        if (isNight) {
+            svgContent = `
+                ${defs}
+                <!-- Moon -->
+                <path d="M30 14 A 18 18 0 0 1 48 32 A 18 18 0 0 1 30 50 A 13.5 13.5 0 1 0 30 14 Z" fill="url(#moon-grad-${uid})" />
+            `;
+        } else {
+            svgContent = `
+                ${defs}
+                <!-- Sun -->
+                <circle cx="32" cy="32" r="14" fill="url(#sun-grad-${uid})" />
+                <!-- Sun Rays -->
+                <line x1="32" y1="12" x2="32" y2="6" stroke="url(#sun-grad-${uid})" stroke-width="3" stroke-linecap="round" />
+                <line x1="32" y1="52" x2="32" y2="58" stroke="url(#sun-grad-${uid})" stroke-width="3" stroke-linecap="round" />
+                <line x1="12" y1="32" x2="6" y2="32" stroke="url(#sun-grad-${uid})" stroke-width="3" stroke-linecap="round" />
+                <line x1="52" y1="32" x2="58" y2="32" stroke="url(#sun-grad-${uid})" stroke-width="3" stroke-linecap="round" />
+                <line x1="17.9" y1="17.9" x2="13.6" y2="13.6" stroke="url(#sun-grad-${uid})" stroke-width="3" stroke-linecap="round" />
+                <line x1="46.1" y1="17.9" x2="50.4" y2="13.6" stroke="url(#sun-grad-${uid})" stroke-width="3" stroke-linecap="round" />
+                <line x1="17.9" y1="46.1" x2="13.6" y2="50.4" stroke="url(#sun-grad-${uid})" stroke-width="3" stroke-linecap="round" />
+                <line x1="46.1" y1="46.1" x2="50.4" y2="50.4" stroke="url(#sun-grad-${uid})" stroke-width="3" stroke-linecap="round" />
+            `;
+        }
+    }
+
+    return `
+        <svg class="${className}" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg" aria-label="${escapeHtml(alt || 'Forecast icon')}">
+            ${svgContent}
+        </svg>
+    `;
 }
 
 function formatPeriodTemperature(period) {

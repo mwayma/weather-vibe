@@ -1246,6 +1246,13 @@ body, html {
     line-height: 1.15;
 }
 
+.forecast-precip {
+    color: #8cc8ff;
+    font-size: 0.9em;
+    font-weight: 800;
+    margin-top: 3px;
+}
+
 .forecast-title {
     border-top: 1px solid rgba(132, 155, 175, 0.18);
     color: #c9d7e4;
