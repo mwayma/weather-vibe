@@ -94,12 +94,12 @@ function getAlertStyle(event) {
     }
     if (ev.includes('flood')) {
         if (ev.includes('flash flood warning')) {
-            return { color: '#8b0000', fillColor: '#8b0000', weight: 4, fillOpacity: 0.4 };
+            return { color: '#00ff00', fillColor: '#00ff00', weight: 4, fillOpacity: 0.4 };
         }
         if (isWatch) {
             return { color: '#2e8b57', fillColor: '#2e8b57', weight: 3, fillOpacity: 0.2, dashArray: '6' };
         }
-        return { color: '#00ff00', fillColor: '#00ff00', weight: 3, fillOpacity: 0.3 };
+        return { color: '#228b22', fillColor: '#228b22', weight: 3, fillOpacity: 0.3 };
     }
     if (ev.includes('marine') || ev.includes('gale')) return { color: '#ff00ff', fillColor: '#ff00ff', weight: 3, fillOpacity: 0.3 };
     
@@ -129,14 +129,113 @@ function getAlertSeverity(event) {
 let activeAlertData = null;
 const disabledAlertTypes = new Set();
 
+function getVtecKeyFromNws(f) {
+    if (f.properties && f.properties.parameters && f.properties.parameters.VTEC) {
+        const vtecArr = f.properties.parameters.VTEC;
+        if (vtecArr && vtecArr.length > 0) {
+            const vtecStr = vtecArr[0];
+            const parts = vtecStr.split('.');
+            if (parts.length >= 6) {
+                const wfo = parts[2];
+                const cleanWfo = wfo.length === 4 ? wfo.substring(1) : wfo;
+                const phenomena = parts[3];
+                const significance = parts[4];
+                const eventid = parseInt(parts[5], 10);
+                return `${cleanWfo}.${phenomena}.${significance}.${eventid}`.toUpperCase();
+            }
+        }
+    }
+    return null;
+}
+
+function getVtecKeyFromIem(f) {
+    if (f.properties) {
+        const wfo = f.properties.wfo || '';
+        const cleanWfo = wfo.length === 4 ? wfo.substring(1) : wfo;
+        const phenomena = f.properties.phenomena || '';
+        const significance = f.properties.significance || '';
+        const eventid = parseInt(f.properties.eventid, 10);
+        if (cleanWfo && phenomena && significance && !isNaN(eventid)) {
+            return `${cleanWfo}.${phenomena}.${significance}.${eventid}`.toUpperCase();
+        }
+    }
+    return null;
+}
+
+function mergeAndStoreAlerts(nwsData, iemData) {
+    const mergedFeatures = [];
+    const nwsKeys = new Set();
+
+    // 1. Process NWS alerts
+    if (nwsData && nwsData.features) {
+        nwsData.features.forEach(f => {
+            const key = getVtecKeyFromNws(f);
+            if (key) {
+                nwsKeys.add(key);
+            }
+            mergedFeatures.push(f);
+        });
+    }
+
+    // 2. Process IEM alerts and add those not present in NWS
+    if (iemData && iemData.features) {
+        iemData.features.forEach(f => {
+            const key = getVtecKeyFromIem(f);
+            // Only add if not already present in NWS alerts to avoid duplication
+            if (key && !nwsKeys.has(key)) {
+                // Synthesize an NWS-like feature
+                const eventName = f.properties.ps || 'Warning';
+                const wfo = f.properties.wfo || '';
+                
+                const synthesizedFeature = {
+                    type: 'Feature',
+                    id: f.id || `iem-${key}`,
+                    geometry: f.geometry,
+                    properties: {
+                        event: eventName,
+                        headline: `${eventName} issued by NWS ${wfo} (via real-time feed)`,
+                        description: `This active warning polygon was fetched in real-time from the IEM feed. Detailed text description and warning impacts will load as soon as they are processed by the NWS API.`,
+                        instruction: `Please tune to NOAA Weather Radio, local news, or official NWS outlets for immediate safety instructions.`,
+                        severity: eventName.toLowerCase().includes('tornado') ? 'Extreme' : 'Severe',
+                        urgency: 'Immediate',
+                        areaDesc: wfo
+                    }
+                };
+                mergedFeatures.push(synthesizedFeature);
+            }
+        });
+    }
+
+    activeAlertData = {
+        type: 'FeatureCollection',
+        features: mergedFeatures
+    };
+    
+    renderAlerts();
+}
+
 function updateAlerts() {
-    fetch('https://api.weather.gov/alerts/active?status=actual&message_type=alert', { cache: 'no-store' })
-        .then(res => res.json())
-        .then(data => {
-            activeAlertData = data;
-            renderAlerts();
-        })
-        .catch(err => console.error('Alert fetch error:', err));
+    const nwsUrl = 'https://api.weather.gov/alerts/active?status=actual&message_type=alert';
+    const iemUrl = 'https://mesonet.agron.iastate.edu/geojson/sbw.geojson';
+
+    Promise.allSettled([
+        fetch(nwsUrl, { cache: 'no-store' }).then(res => res.json()),
+        fetch(iemUrl, { cache: 'no-store' }).then(res => res.json())
+    ]).then(results => {
+        let nwsData = null;
+        let iemData = null;
+
+        if (results[0].status === 'fulfilled') nwsData = results[0].value;
+        else console.error('NWS Alert fetch error:', results[0].reason);
+
+        if (results[1].status === 'fulfilled') iemData = results[1].value;
+        else console.error('IEM Alert fetch error:', results[1].reason);
+
+        // Process and merge the alerts if at least one request succeeded
+        if (nwsData || iemData) {
+            mergeAndStoreAlerts(nwsData, iemData);
+        }
+    }).catch(err => console.error('Update alerts error:', err));
 }
 
 function getAlertType(eventStr) {

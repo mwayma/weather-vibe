@@ -705,9 +705,9 @@ body, html {
 .thunderstorm-warning { background-color: rgba(255, 255, 0, 0.5); border-color: #ffff00; }
 .thunderstorm-watch { background-color: rgba(255, 102, 178, 0.5); border-color: #ff66b2; }
 .hurricane { background-color: rgba(128, 0, 128, 0.5); border-color: #800080; }
-.flash-flood-warning { background-color: rgba(139, 0, 0, 0.5); border-color: #8b0000; }
-.flood-warning { background-color: rgba(0, 255, 0, 0.5); border-color: #00ff00; }
-.flood-watch { background-color: rgba(46, 139, 87, 0.5); border-color: #2e8b57; }
+.flash-flood-warning { background-color: rgba(0, 255, 0, 0.4); border-color: #00ff00; }
+.flood-warning { background-color: rgba(34, 139, 34, 0.3); border-color: #228b22; }
+.flood-watch { background-color: rgba(46, 139, 87, 0.2); border-color: #2e8b57; }
 .marine { background-color: rgba(255, 0, 255, 0.5); border-color: #ff00ff; }
 .snow { background-color: rgba(0, 255, 255, 0.5); border-color: #00ffff; }
 .winter-watch { background-color: rgba(51, 153, 255, 0.5); border-color: #3399ff; }
